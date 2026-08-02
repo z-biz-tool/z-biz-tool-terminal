@@ -1,0 +1,27 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+}
+
+/* xterm.js 终端样式 */
+.terminal-container {
+  padding: 8px;
+  background: #1e1e1e;
+  height: 100%;
+  overflow: hidden;
+}
+
+.terminal-container .xterm {
+  height: 100%;
+}
