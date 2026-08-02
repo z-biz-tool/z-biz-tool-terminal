@@ -155,3 +155,145 @@ pub async fn sftp_list(session_id: String, path: String) -> SftpListResult {
         }
     }
 }
+
+/// SFTP 上传文件
+#[tauri::command]
+pub async fn sftp_upload(
+    session_id: String,
+    local_path: String,
+    remote_path: String,
+) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        match sess.sftp_upload(&local_path, &remote_path).await {
+            Ok(_) => ExecResult {
+                success: true,
+                output: "上传成功".into(),
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}
+
+/// SFTP 下载文件
+#[tauri::command]
+pub async fn sftp_download(
+    session_id: String,
+    remote_path: String,
+    local_path: String,
+) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        match sess.sftp_download(&remote_path, &local_path).await {
+            Ok(_) => ExecResult {
+                success: true,
+                output: "下载成功".into(),
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}
+
+/// SFTP 创建目录
+#[tauri::command]
+pub async fn sftp_mkdir(session_id: String, path: String) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        match sess.sftp_mkdir(&path).await {
+            Ok(_) => ExecResult {
+                success: true,
+                output: "创建目录成功".into(),
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}
+
+/// SFTP 删除文件
+#[tauri::command]
+pub async fn sftp_remove(session_id: String, path: String) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        match sess.sftp_remove(&path).await {
+            Ok(_) => ExecResult {
+                success: true,
+                output: "删除成功".into(),
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}
+
+/// SFTP 重命名
+#[tauri::command]
+pub async fn sftp_rename(
+    session_id: String,
+    old_path: String,
+    new_path: String,
+) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        match sess.sftp_rename(&old_path, &new_path).await {
+            Ok(_) => ExecResult {
+                success: true,
+                output: "重命名成功".into(),
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}

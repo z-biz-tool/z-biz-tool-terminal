@@ -1,21 +1,47 @@
 import { useState, useMemo, useEffect } from "react";
 import {
-  Button, Modal, Form, Input, InputNumber, Select, Tree, Space,
-  Popconfirm, message, Dropdown, Tooltip, Input as AntInput,
+  Button,
+  Modal,
+  Form,
+  Input,
+  InputNumber,
+  Select,
+  Tree,
+  Space,
+  Popconfirm,
+  message,
+  Dropdown,
+  Tooltip,
+  Input as AntInput,
 } from "antd";
 import {
-  PlusOutlined, EditOutlined, DeleteOutlined, CloudServerOutlined,
-  LinkOutlined, MoreOutlined, ImportOutlined, ExportOutlined,
-  SearchOutlined, DesktopOutlined,
+  PlusOutlined,
+  EditOutlined,
+  DeleteOutlined,
+  CloudServerOutlined,
+  LinkOutlined,
+  MoreOutlined,
+  ImportOutlined,
+  ExportOutlined,
+  SearchOutlined,
+  DesktopOutlined,
 } from "@ant-design/icons";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { useServerStore } from "../stores/serverStore";
 import type { ServerConfig } from "../types";
+import { EmptyState } from "@/_shared";
 
 export default function ServerList() {
   const {
-    servers, addServer, updateServer, removeServer, connectServer,
-    loadConfig, exportConfig, importConfig, loaded,
+    servers,
+    addServer,
+    updateServer,
+    removeServer,
+    connectServer,
+    loadConfig,
+    exportConfig,
+    importConfig,
+    loaded,
   } = useServerStore();
 
   const [modalVisible, setModalVisible] = useState(false);
@@ -31,10 +57,11 @@ export default function ServerList() {
   const filteredServers = useMemo(() => {
     if (!searchText) return servers;
     const lower = searchText.toLowerCase();
-    return servers.filter(s =>
-      s.name.toLowerCase().includes(lower) ||
-      s.host.toLowerCase().includes(lower) ||
-      s.group.toLowerCase().includes(lower)
+    return servers.filter(
+      (s) =>
+        s.name.toLowerCase().includes(lower) ||
+        s.host.toLowerCase().includes(lower) ||
+        s.group.toLowerCase().includes(lower)
     );
   }, [servers, searchText]);
 
@@ -49,7 +76,15 @@ export default function ServerList() {
     return Object.entries(groups).map(([groupName, items]) => ({
       key: `group-${groupName}`,
       title: (
-        <span style={{ fontWeight: 600, fontSize: 12, color: "#888", textTransform: "uppercase", letterSpacing: 0.5 }}>
+        <span
+          style={{
+            fontWeight: 600,
+            fontSize: 12,
+            color: "#888",
+            textTransform: "uppercase",
+            letterSpacing: 0.5,
+          }}
+        >
           {groupName} · {items.length}
         </span>
       ),
@@ -59,14 +94,23 @@ export default function ServerList() {
         title: (
           <div
             style={{
-              display: "flex", alignItems: "center", justifyContent: "space-between",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
               padding: "2px 0",
             }}
             onDoubleClick={() => connectServer(s)}
           >
             <Space size={6} style={{ minWidth: 0, flex: 1 }}>
               <DesktopOutlined style={{ color: "#1677ff", flexShrink: 0 }} />
-              <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span
+                style={{
+                  fontWeight: 500,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
                 {s.name}
               </span>
               <span style={{ color: "#bbb", fontSize: 11, flexShrink: 0 }}>
@@ -75,18 +119,45 @@ export default function ServerList() {
             </Space>
             <Space size={0} style={{ flexShrink: 0, opacity: 0.6 }}>
               <Tooltip title="连接">
-                <Button type="text" size="small" icon={<LinkOutlined />}
-                  onClick={(e) => { e.stopPropagation(); connectServer(s); }} />
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<LinkOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    connectServer(s);
+                  }}
+                />
               </Tooltip>
               <Tooltip title="编辑">
-                <Button type="text" size="small" icon={<EditOutlined />}
-                  onClick={(e) => { e.stopPropagation(); handleEdit(s); }} />
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleEdit(s);
+                  }}
+                />
               </Tooltip>
-              <Popconfirm title="删除该服务器？" okText="删除" cancelText="取消"
-                onConfirm={(e) => { e?.stopPropagation(); removeServer(s.id); message.success("已删除"); }}
-                onCancel={(e) => e?.stopPropagation()}>
-                <Button type="text" size="small" danger icon={<DeleteOutlined />}
-                  onClick={(e) => e.stopPropagation()} />
+              <Popconfirm
+                title="删除该服务器？"
+                okText="删除"
+                cancelText="取消"
+                onConfirm={(e) => {
+                  e?.stopPropagation();
+                  removeServer(s.id);
+                  message.success("已删除");
+                }}
+                onCancel={(e) => e?.stopPropagation()}
+              >
+                <Button
+                  type="text"
+                  size="small"
+                  danger
+                  icon={<DeleteOutlined />}
+                  onClick={(e) => e.stopPropagation()}
+                />
               </Popconfirm>
             </Space>
           </div>
@@ -158,18 +229,40 @@ export default function ServerList() {
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {/* 顶部标题 + 操作 */}
       <div style={{ padding: "12px 12px 8px", borderBottom: "1px solid #f0f0f0" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-          <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: 0.5 }}>
-            z-Terminal
-          </span>
-          <Dropdown menu={{
-            items: [
-              { key: "import", label: "导入配置", icon: <ImportOutlined />, onClick: handleImport },
-              { key: "export", label: "导出配置", icon: <ExportOutlined />, onClick: handleExport },
-              { type: "divider" },
-              { key: "add", label: "添加服务器", icon: <PlusOutlined />, onClick: handleAdd },
-            ],
-          }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 8,
+          }}
+        >
+          <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: 0.5 }}>z-Terminal</span>
+          <Dropdown
+            menu={{
+              items: [
+                {
+                  key: "import",
+                  label: "导入配置",
+                  icon: <ImportOutlined />,
+                  onClick: handleImport,
+                },
+                {
+                  key: "export",
+                  label: "导出配置",
+                  icon: <ExportOutlined />,
+                  onClick: handleExport,
+                },
+                { type: "divider" },
+                {
+                  key: "add",
+                  label: "添加服务器",
+                  icon: <PlusOutlined />,
+                  onClick: handleAdd,
+                },
+              ],
+            }}
+          >
             <Button type="text" size="small" icon={<MoreOutlined />} />
           </Dropdown>
         </div>
@@ -188,28 +281,31 @@ export default function ServerList() {
       {/* 服务器列表 */}
       <div style={{ flex: 1, overflow: "auto", padding: "4px 8px" }}>
         {servers.length === 0 ? (
-          <div style={{ textAlign: "center", color: "#bbb", padding: "40px 16px" }}>
-            <CloudServerOutlined style={{ fontSize: 32, marginBottom: 12, display: "block" }} />
-            <div style={{ fontSize: 13, marginBottom: 4 }}>暂无服务器</div>
-            <Button type="link" size="small" icon={<PlusOutlined />} onClick={handleAdd}>
-              添加第一台服务器
-            </Button>
-          </div>
-        ) : (
-          <Tree
-            treeData={treeData}
-            defaultExpandAll
-            showLine={false}
-            blockNode
+          <EmptyState
+            title="暂无服务器"
+            description="点击右上角 + 添加"
+            icon={
+              <CloudServerOutlined
+                style={{ fontSize: 56, color: "var(--ant-color-text-tertiary)" }}
+              />
+            }
           />
+        ) : (
+          <Tree treeData={treeData} defaultExpandAll showLine={false} blockNode />
         )}
       </div>
 
       {/* 底部状态栏 */}
-      <div style={{
-        padding: "6px 12px", borderTop: "1px solid #f0f0f0", fontSize: 11, color: "#bbb",
-        display: "flex", justifyContent: "space-between",
-      }}>
+      <div
+        style={{
+          padding: "6px 12px",
+          borderTop: "1px solid #f0f0f0",
+          fontSize: 11,
+          color: "#bbb",
+          display: "flex",
+          justifyContent: "space-between",
+        }}
+      >
         <span>{servers.length} 台服务器</span>
         <span>~/.z-terminal</span>
       </div>
@@ -233,16 +329,28 @@ export default function ServerList() {
             <Input placeholder="例如: 生产环境" />
           </Form.Item>
           <Space.Compact style={{ width: "100%" }}>
-            <Form.Item name="host" label="主机地址" rules={[{ required: true, message: "请输入主机地址" }]}
-              style={{ flex: 1, marginRight: 8 }}>
+            <Form.Item
+              name="host"
+              label="主机地址"
+              rules={[{ required: true, message: "请输入主机地址" }]}
+              style={{ flex: 1, marginRight: 8 }}
+            >
               <Input placeholder="192.168.1.100" />
             </Form.Item>
-            <Form.Item name="port" label="端口" rules={[{ required: true, message: "请输入端口" }]}
-              style={{ width: 100 }}>
+            <Form.Item
+              name="port"
+              label="端口"
+              rules={[{ required: true, message: "请输入端口" }]}
+              style={{ width: 100 }}
+            >
               <InputNumber min={1} max={65535} style={{ width: "100%" }} />
             </Form.Item>
           </Space.Compact>
-          <Form.Item name="username" label="用户名" rules={[{ required: true, message: "请输入用户名" }]}>
+          <Form.Item
+            name="username"
+            label="用户名"
+            rules={[{ required: true, message: "请输入用户名" }]}
+          >
             <Input placeholder="root" />
           </Form.Item>
           <Form.Item name="authType" label="认证方式" rules={[{ required: true }]}>
@@ -259,7 +367,11 @@ export default function ServerList() {
                 </Form.Item>
               ) : (
                 <Form.Item name="privateKey" label="私钥内容 (PEM)">
-                  <Input.TextArea rows={4} placeholder="粘贴私钥内容" style={{ fontFamily: "monospace" }} />
+                  <Input.TextArea
+                    rows={4}
+                    placeholder="粘贴私钥内容"
+                    style={{ fontFamily: "monospace" }}
+                  />
                 </Form.Item>
               )
             }

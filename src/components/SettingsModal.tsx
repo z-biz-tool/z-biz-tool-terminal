@@ -35,14 +35,17 @@ export default function SettingsModal({ open, onClose }: Props) {
         </Form.Item>
         <Form.Item label="字号">
           <InputNumber
-            min={8} max={32}
+            min={8}
+            max={32}
             value={settings.font_size}
             onChange={(v) => v && updateSettings({ font_size: v })}
           />
         </Form.Item>
         <Form.Item label="回滚行数">
           <InputNumber
-            min={1000} max={100000} step={1000}
+            min={1000}
+            max={100000}
+            step={1000}
             value={settings.scrollback}
             onChange={(v) => v && updateSettings({ scrollback: v })}
           />

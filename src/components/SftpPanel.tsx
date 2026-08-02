@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Table, Button, Space, Input, message } from "antd";
+import { Table, Button, Space, Input, Breadcrumb, message } from "antd";
 import {
   FolderOutlined,
   FileOutlined,
@@ -9,6 +9,7 @@ import {
 } from "@ant-design/icons";
 import { useServerStore } from "../stores/serverStore";
 import type { SftpEntry } from "../types";
+import { EmptyState, LoadingState } from "@/_shared";
 
 interface SftpPanelProps {
   serverId: string;
@@ -36,9 +37,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
 
   const handleEntryClick = (entry: SftpEntry) => {
     if (entry.is_dir) {
-      const newPath = sftpPath.endsWith("/")
-        ? sftpPath + entry.name
-        : sftpPath + "/" + entry.name;
+      const newPath = sftpPath.endsWith("/") ? sftpPath + entry.name : sftpPath + "/" + entry.name;
       navigateTo(newPath);
     }
   };
@@ -92,8 +91,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       dataIndex: "size",
       key: "size",
       width: 100,
-      render: (size: number, record: SftpEntry) =>
-        record.is_dir ? "-" : formatSize(size),
+      render: (size: number, record: SftpEntry) => (record.is_dir ? "-" : formatSize(size)),
     },
     {
       title: "权限",
@@ -124,11 +122,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         <Space size="small">
           <Button size="small" icon={<HomeOutlined />} onClick={handleGoHome} />
           <Button size="small" icon={<ArrowLeftOutlined />} onClick={handleGoUp} />
-          <Button
-            size="small"
-            icon={<ReloadOutlined />}
-            onClick={() => navigateTo(sftpPath)}
-          />
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => navigateTo(sftpPath)} />
           <Input
             size="small"
             style={{ width: 400 }}
@@ -143,17 +137,43 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         </Button>
       </div>
 
+      {/* 面包屑导航 */}
+      <div style={{ padding: "4px 12px", borderBottom: "1px solid #e8e8e8" }}>
+        <Breadcrumb
+          items={[
+            { title: <a onClick={handleGoHome}>/</a> },
+            ...sftpPath
+              .split("/")
+              .filter(Boolean)
+              .map((p, i, arr) => {
+                const target = "/" + arr.slice(0, i + 1).join("/");
+                return { title: <a onClick={() => navigateTo(target)}>{p}</a> };
+              }),
+          ]}
+        />
+      </div>
+
       {/* 文件列表 */}
       <div style={{ flex: 1, overflow: "auto" }}>
-        <Table
-          columns={columns}
-          dataSource={sftpEntries}
-          rowKey="name"
-          size="small"
-          loading={loading}
-          pagination={false}
-          locale={{ emptyText: loading ? "加载中..." : "目录为空" }}
-        />
+        {loading ? (
+          <LoadingState tip="加载文件列表..." minHeight={120} />
+        ) : sftpEntries.length === 0 ? (
+          <EmptyState
+            title="目录为空"
+            description="该目录下没有文件或子目录"
+            icon={
+              <FolderOutlined style={{ fontSize: 48, color: "var(--ant-color-text-tertiary)" }} />
+            }
+          />
+        ) : (
+          <Table
+            columns={columns}
+            dataSource={sftpEntries}
+            rowKey="name"
+            size="small"
+            pagination={false}
+          />
+        )}
       </div>
     </div>
   );

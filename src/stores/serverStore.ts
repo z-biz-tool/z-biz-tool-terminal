@@ -128,7 +128,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   },
 
   removeServer: (id) => {
-    get().disconnectServer(id).catch(() => {});
+    get()
+      .disconnectServer(id)
+      .catch(() => {});
     set((state) => ({
       servers: state.servers.filter((s) => s.id !== id),
       tabs: state.tabs.filter((t) => t.serverId !== id),
@@ -185,9 +187,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     } catch (e: any) {
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.serverId === server.id
-            ? { ...t, state: "error", error: String(e) }
-            : t
+          t.serverId === server.id ? { ...t, state: "error", error: String(e) } : t
         ),
       }));
     }
@@ -218,7 +218,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   },
 
   closeTab: (serverId) => {
-    get().disconnectServer(serverId).catch(() => {});
+    get()
+      .disconnectServer(serverId)
+      .catch(() => {});
   },
 
   setActiveTab: (serverId) => {

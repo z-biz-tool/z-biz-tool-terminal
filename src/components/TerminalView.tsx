@@ -1,14 +1,9 @@
 import { useEffect, useRef } from "react";
-import { Button, Space, Tag, Tooltip } from "antd";
-import {
-  CloseOutlined,
-  FolderOpenOutlined,
-  ReloadOutlined,
-} from "@ant-design/icons";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { useServerStore } from "../stores/serverStore";
+import { LoadingState, ErrorState } from "@/_shared";
 
 /** 主题预设 */
 const THEMES: Record<string, { background: string; foreground: string; cursor: string }> = {
@@ -28,22 +23,14 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
   const fitRef = useRef<FitAddon | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
-  const {
-    tabs,
-    servers,
-    disconnectServer,
-    executeCommand,
-    toggleSftp,
-    sftpVisible,
-    listSftp,
-    settings,
-  } = useServerStore();
+  const { tabs, servers, connectServer, executeCommand, settings } = useServerStore();
 
   const tab = tabs.find((t) => t.serverId === serverId);
   const server = servers.find((s) => s.id === serverId);
 
-  // 终端初始化 - 使用 settings 中的字体/字号/主题，支持命令历史
+  // 终端初始化 - 仅在已连接时初始化，支持命令历史
   useEffect(() => {
+    if (tab?.state !== "connected") return;
     if (!terminalRef.current) return;
 
     const themePreset = THEMES[settings.theme] || THEMES.dark;
@@ -196,82 +183,64 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
       termRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverId, settings.font_size, settings.font_family, settings.theme, settings.scrollback, settings.cursor_blink]);
+  }, [
+    serverId,
+    settings.font_size,
+    settings.font_family,
+    settings.theme,
+    settings.scrollback,
+    settings.cursor_blink,
+    tab?.state,
+  ]);
 
-  // 监听连接错误
-  useEffect(() => {
-    if (tab?.state === "error" && termRef.current) {
-      termRef.current.writeln(`\r\n\x1b[31m● 连接错误: ${tab.error}\x1b[0m`);
-    }
-  }, [tab?.state, tab?.error]);
-
-  const handleClose = () => {
-    disconnectServer(serverId).catch(() => {});
+  const handleRetry = () => {
+    if (server) connectServer(server);
   };
 
-  const handleSftp = () => {
-    if (!sftpVisible) {
-      toggleSftp(true);
-      listSftp(serverId, "/").catch(() => {});
-    } else {
-      toggleSftp(false);
-    }
-  };
-
-  const handleRefresh = async () => {
-    try {
-      await listSftp(serverId, useServerStore.getState().sftpPath);
-    } catch {
-      /* ignore */
-    }
-  };
-
-  const stateColor =
-    tab?.state === "connected" ? "green" : tab?.state === "error" ? "red" : "orange";
-  const stateText =
-    tab?.state === "connected" ? "已连接" : tab?.state === "connecting" ? "连接中" : tab?.state === "error" ? "错误" : "未连接";
+  const themePreset = THEMES[settings.theme] || THEMES.dark;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {/* 连接状态条: 状态标签 + 服务器名称 + host:port + 用户名 */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "4px 12px",
-          borderBottom: "1px solid #e8e8e8",
-          background: "#fafafa",
-        }}
-      >
-        <Space size="small">
-          <Tag color={stateColor}>{stateText}</Tag>
-          <span style={{ fontSize: 13, fontWeight: 500 }}>{server?.name}</span>
-          <span style={{ fontSize: 12, color: "#888" }}>
-            {server?.host}:{server?.port}
-          </span>
-          <span style={{ fontSize: 12, color: "#bbb" }}>· {server?.username}</span>
-        </Space>
-        <Space size="small">
-          <Tooltip title="SFTP文件浏览">
-            <Button
-              size="small"
-              icon={<FolderOpenOutlined />}
-              onClick={handleSftp}
-              type={sftpVisible ? "primary" : "default"}
-            />
-          </Tooltip>
-          <Tooltip title="刷新文件列表">
-            <Button size="small" icon={<ReloadOutlined />} onClick={handleRefresh} />
-          </Tooltip>
-          <Tooltip title="关闭连接">
-            <Button size="small" danger icon={<CloseOutlined />} onClick={handleClose} />
-          </Tooltip>
-        </Space>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        background: themePreset.background,
+      }}
+    >
+      <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+        <div
+          className="terminal-container"
+          ref={terminalRef}
+          style={{ height: "100%", background: themePreset.background }}
+        />
+        {tab?.state === "connecting" && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: themePreset.background,
+            }}
+          >
+            <LoadingState tip="正在连接..." minHeight={200} />
+          </div>
+        )}
+        {tab?.state === "error" && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              overflow: "auto",
+              background: themePreset.background,
+            }}
+          >
+            <ErrorState message={tab.error} onRetry={handleRetry} />
+          </div>
+        )}
       </div>
-
-      {/* 终端区域 */}
-      <div className="terminal-container" ref={terminalRef} style={{ flex: 1 }} />
     </div>
   );
 }
