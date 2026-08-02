@@ -1,4 +1,5 @@
 mod commands;
+mod config;
 mod ssh;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -13,6 +14,11 @@ pub fn run() {
             commands::ssh_disconnect,
             commands::ssh_execute,
             commands::sftp_list,
+            config::get_config,
+            config::save_servers,
+            config::save_settings,
+            config::export_config,
+            config::import_config,
         ])
         .setup(|_app| {
             Ok(())

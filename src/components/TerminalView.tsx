@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Tabs, Button, Space, Tag, message } from "antd";
+import { useEffect, useRef } from "react";
+import { Button, Space, Tag, Tooltip } from "antd";
 import {
   CloseOutlined,
   FolderOpenOutlined,
@@ -10,6 +10,14 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { useServerStore } from "../stores/serverStore";
 
+/** 主题预设 */
+const THEMES: Record<string, { background: string; foreground: string; cursor: string }> = {
+  dark: { background: "#1e1e1e", foreground: "#d4d4d4", cursor: "#d4d4d4" },
+  light: { background: "#ffffff", foreground: "#1e1e1e", cursor: "#1e1e1e" },
+  dracula: { background: "#282a36", foreground: "#f8f8f2", cursor: "#f8f8f2" },
+  solarized: { background: "#002b36", foreground: "#839496", cursor: "#93a1a1" },
+};
+
 interface TerminalViewProps {
   serverId: string;
 }
@@ -18,7 +26,7 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  const [inputBuffer, setInputBuffer] = useState("");
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
   const {
     tabs,
@@ -28,25 +36,30 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
     toggleSftp,
     sftpVisible,
     listSftp,
+    settings,
   } = useServerStore();
 
   const tab = tabs.find((t) => t.serverId === serverId);
   const server = servers.find((s) => s.id === serverId);
 
-  // 初始化终端
+  // 终端初始化 - 使用 settings 中的字体/字号/主题，支持命令历史
   useEffect(() => {
     if (!terminalRef.current) return;
 
+    const themePreset = THEMES[settings.theme] || THEMES.dark;
+
     const term = new Terminal({
-      fontSize: 14,
-      fontFamily: "'SF Mono', 'Monaco', 'Menlo', 'Courier New', monospace",
+      fontSize: settings.font_size,
+      fontFamily: settings.font_family,
+      scrollback: settings.scrollback,
+      cursorBlink: settings.cursor_blink,
       theme: {
-        background: "#1e1e1e",
-        foreground: "#d4d4d4",
-        cursor: "#d4d4d4",
+        background: themePreset.background,
+        foreground: themePreset.foreground,
+        cursor: themePreset.cursor,
       },
-      cursorBlink: true,
       convertEol: true,
+      allowProposedApi: true,
     });
 
     const fitAddon = new FitAddon();
@@ -57,15 +70,75 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
     termRef.current = term;
     fitRef.current = fitAddon;
 
-    // 终端输入处理 - 逐行执行命令
+    const prompt = () =>
+      `\x1b[1;32m${server?.username || "user"}@${server?.host || "host"}\x1b[0m:\x1b[1;34m~\x1b[0m$ `;
+
+    // 连接欢迎语
     term.writeln(`\x1b[32m● 已连接到 ${server?.host || serverId}\x1b[0m`);
-    term.writeln(`\x1b[90m● 提示: 输入命令并按回车执行\x1b[0m`);
-    term.write(`\r\n\x1b[1;32m${server?.username || "user"}@${server?.host || "host"}\x1b[0m:\x1b[1;34m~\x1b[0m$ `);
+    term.writeln(`\x1b[90m● 提示: 输入命令并按回车执行，↑/↓ 浏览历史命令\x1b[0m`);
+    term.write(`\r\n${prompt()}`);
 
     let currentInput = "";
+    // 命令历史: index 0 为最旧
+    const history: string[] = [];
+    let historyIndex = -1; // -1 表示当前正在输入的新命令
 
+    const writePrompt = () => term.write(`\r\n${prompt()}`);
+
+    const runCommand = (cmd: string) => {
+      executeCommand(serverId, cmd)
+        .then((output) => {
+          if (output) {
+            term.write(output);
+            if (!output.endsWith("\n")) {
+              term.write("\r\n");
+            }
+          }
+        })
+        .catch((e) => {
+          term.write(`\x1b[31m错误: ${String(e)}\x1b[0m\r\n`);
+        })
+        .finally(() => {
+          currentInput = "";
+          historyIndex = -1;
+          writePrompt();
+        });
+    };
+
+    // 单个 onData 处理整段输入字符串(可能是单字符或多字符转义序列)
     term.onData((data) => {
-      // 处理输入字符
+      // ↑ 上箭头: \x1b[A   ↓ 下箭头: \x1b[B
+      if (data === "\x1b[A") {
+        if (history.length === 0) return;
+        term.write("\r\x1b[K"); // 回到行首并清除整行
+        if (historyIndex === -1) {
+          historyIndex = history.length - 1;
+        } else if (historyIndex > 0) {
+          historyIndex -= 1;
+        }
+        currentInput = history[historyIndex] || "";
+        term.write(prompt() + currentInput);
+        return;
+      }
+      if (data === "\x1b[B") {
+        if (history.length === 0) return;
+        term.write("\r\x1b[K");
+        if (historyIndex === -1) {
+          term.write(prompt() + currentInput);
+          return;
+        }
+        historyIndex += 1;
+        if (historyIndex >= history.length) {
+          historyIndex = -1;
+          currentInput = "";
+        } else {
+          currentInput = history[historyIndex] || "";
+        }
+        term.write(prompt() + currentInput);
+        return;
+      }
+
+      // 普通按键逐字符处理
       for (const char of data) {
         const code = char.charCodeAt(0);
 
@@ -74,25 +147,15 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
           term.write("\r\n");
           const cmd = currentInput.trim();
           if (cmd) {
-            executeCommand(serverId, cmd)
-              .then((output) => {
-                if (output) {
-                  term.write(output);
-                  if (!output.endsWith("\n")) {
-                    term.write("\r\n");
-                  }
-                }
-              })
-              .catch((e) => {
-                term.write(`\x1b[31m错误: ${String(e)}\x1b[0m\r\n`);
-              })
-              .finally(() => {
-                currentInput = "";
-                term.write(`\x1b[1;32m${server?.username || "user"}@${server?.host || "host"}\x1b[0m:\x1b[1;34m~\x1b[0m$ `);
-              });
+            history.push(cmd);
+            if (history.length > 1000) history.shift();
+            currentInput = "";
+            historyIndex = -1;
+            runCommand(cmd);
           } else {
             currentInput = "";
-            term.write(`\x1b[1;32m${server?.username || "user"}@${server?.host || "host"}\x1b[0m:\x1b[1;34m~\x1b[0m$ `);
+            historyIndex = -1;
+            writePrompt();
           }
         } else if (code === 127) {
           // Backspace
@@ -103,8 +166,9 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
         } else if (code === 3) {
           // Ctrl+C
           currentInput = "";
-          term.write("^C\r\n");
-          term.write(`\x1b[1;32m${server?.username || "user"}@${server?.host || "host"}\x1b[0m:\x1b[1;34m~\x1b[0m$ `);
+          historyIndex = -1;
+          term.write("^C");
+          writePrompt();
         } else if (code >= 32) {
           // 可打印字符
           currentInput += char;
@@ -113,7 +177,7 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
       }
     });
 
-    // 窗口大小调整
+    // ResizeObserver 监听容器大小变化自动 fit
     const handleResize = () => {
       try {
         fitAddon.fit();
@@ -121,17 +185,20 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
         // 终端可能未准备好
       }
     };
-    window.addEventListener("resize", handleResize);
+    const ro = new ResizeObserver(handleResize);
+    ro.observe(terminalRef.current);
+    resizeObserverRef.current = ro;
 
     return () => {
-      window.removeEventListener("resize", handleResize);
+      ro.disconnect();
+      resizeObserverRef.current = null;
       term.dispose();
       termRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverId]);
+  }, [serverId, settings.font_size, settings.font_family, settings.theme, settings.scrollback, settings.cursor_blink]);
 
-  // 监听连接状态变化
+  // 监听连接错误
   useEffect(() => {
     if (tab?.state === "error" && termRef.current) {
       termRef.current.writeln(`\r\n\x1b[31m● 连接错误: ${tab.error}\x1b[0m`);
@@ -145,9 +212,7 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
   const handleSftp = () => {
     if (!sftpVisible) {
       toggleSftp(true);
-      listSftp(serverId, "/").catch((e) => {
-        message.error(`获取文件列表失败: ${String(e)}`);
-      });
+      listSftp(serverId, "/").catch(() => {});
     } else {
       toggleSftp(false);
     }
@@ -156,15 +221,19 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
   const handleRefresh = async () => {
     try {
       await listSftp(serverId, useServerStore.getState().sftpPath);
-      message.success("已刷新");
-    } catch (e) {
-      message.error(String(e));
+    } catch {
+      /* ignore */
     }
   };
 
+  const stateColor =
+    tab?.state === "connected" ? "green" : tab?.state === "error" ? "red" : "orange";
+  const stateText =
+    tab?.state === "connected" ? "已连接" : tab?.state === "connecting" ? "连接中" : tab?.state === "error" ? "错误" : "未连接";
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {/* 顶部Tab栏 */}
+      {/* 连接状态条: 状态标签 + 服务器名称 + host:port + 用户名 */}
       <div
         style={{
           display: "flex",
@@ -176,24 +245,28 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
         }}
       >
         <Space size="small">
-          <Tag color={tab?.state === "connected" ? "green" : tab?.state === "error" ? "red" : "orange"}>
-            {tab?.state === "connected" ? "已连接" : tab?.state === "connecting" ? "连接中" : tab?.state === "error" ? "错误" : "未连接"}
-          </Tag>
-          <span style={{ fontSize: 13, fontWeight: 500 }}>
-            {server?.name} ({server?.host}:{server?.port})
+          <Tag color={stateColor}>{stateText}</Tag>
+          <span style={{ fontSize: 13, fontWeight: 500 }}>{server?.name}</span>
+          <span style={{ fontSize: 12, color: "#888" }}>
+            {server?.host}:{server?.port}
           </span>
+          <span style={{ fontSize: 12, color: "#bbb" }}>· {server?.username}</span>
         </Space>
         <Space size="small">
-          <Button
-            size="small"
-            icon={<FolderOpenOutlined />}
-            onClick={handleSftp}
-            type={sftpVisible ? "primary" : "default"}
-          >
-            SFTP
-          </Button>
-          <Button size="small" icon={<ReloadOutlined />} onClick={handleRefresh} />
-          <Button size="small" danger icon={<CloseOutlined />} onClick={handleClose} />
+          <Tooltip title="SFTP文件浏览">
+            <Button
+              size="small"
+              icon={<FolderOpenOutlined />}
+              onClick={handleSftp}
+              type={sftpVisible ? "primary" : "default"}
+            />
+          </Tooltip>
+          <Tooltip title="刷新文件列表">
+            <Button size="small" icon={<ReloadOutlined />} onClick={handleRefresh} />
+          </Tooltip>
+          <Tooltip title="关闭连接">
+            <Button size="small" danger icon={<CloseOutlined />} onClick={handleClose} />
+          </Tooltip>
         </Space>
       </div>
 

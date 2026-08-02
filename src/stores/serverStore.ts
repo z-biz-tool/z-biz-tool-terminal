@@ -2,46 +2,66 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { ServerConfig, TerminalTab, ConnectResult, SftpEntry } from "../types";
 
-interface ServerStore {
-  /** 服务器列表 */
-  servers: ServerConfig[];
-  /** 当前打开的终端Tab */
-  tabs: TerminalTab[];
-  /** 激活的Tab serverId */
-  activeTabId: string | null;
-  /** SFTP文件列表 */
-  sftpEntries: SftpEntry[];
-  /** SFTP当前路径 */
-  sftpPath: string;
-  /** SFTP面板是否可见 */
-  sftpVisible: boolean;
-
-  /** 添加服务器 */
-  addServer: (server: Omit<ServerConfig, "id">) => void;
-  /** 更新服务器 */
-  updateServer: (id: string, server: Partial<ServerConfig>) => void;
-  /** 删除服务器 */
-  removeServer: (id: string) => void;
-  /** 连接服务器 */
-  connectServer: (server: ServerConfig) => Promise<void>;
-  /** 断开连接 */
-  disconnectServer: (serverId: string) => Promise<void>;
-  /** 执行命令 */
-  executeCommand: (serverId: string, command: string) => Promise<string>;
-  /** 关闭Tab */
-  closeTab: (serverId: string) => void;
-  /** 切换Tab */
-  setActiveTab: (serverId: string) => void;
-  /** SFTP列表 */
-  listSftp: (serverId: string, path: string) => Promise<void>;
-  /** 切换SFTP面板 */
-  toggleSftp: (visible?: boolean) => void;
+/** 终端设置 */
+export interface TerminalSettings {
+  font_size: number;
+  font_family: string;
+  theme: string;
+  scrollback: number;
+  cursor_blink: boolean;
 }
 
-/** 生成简单ID */
+/** 持久化的完整配置 */
+export interface PersistConfig {
+  servers: ServerConfig[];
+  settings: TerminalSettings;
+}
+
+interface ServerStore {
+  servers: ServerConfig[];
+  tabs: TerminalTab[];
+  activeTabId: string | null;
+  sftpEntries: SftpEntry[];
+  sftpPath: string;
+  sftpVisible: boolean;
+  settings: TerminalSettings;
+  loaded: boolean;
+
+  /** 从 ~/.z-terminal/config.json 加载 */
+  loadConfig: () => Promise<void>;
+  /** 持久化服务器列表 */
+  persistServers: () => Promise<void>;
+  /** 持久化设置 */
+  persistSettings: () => Promise<void>;
+  /** 导出配置到文件 */
+  exportConfig: (path: string) => Promise<string>;
+  /** 导入配置 */
+  importConfig: (path: string) => Promise<void>;
+
+  addServer: (server: Omit<ServerConfig, "id">) => void;
+  updateServer: (id: string, server: Partial<ServerConfig>) => void;
+  removeServer: (id: string) => void;
+  connectServer: (server: ServerConfig) => Promise<void>;
+  disconnectServer: (serverId: string) => Promise<void>;
+  executeCommand: (serverId: string, command: string) => Promise<string>;
+  closeTab: (serverId: string) => void;
+  setActiveTab: (serverId: string) => void;
+  listSftp: (serverId: string, path: string) => Promise<void>;
+  toggleSftp: (visible?: boolean) => void;
+  updateSettings: (settings: Partial<TerminalSettings>) => void;
+}
+
 function genId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
+
+const defaultSettings: TerminalSettings = {
+  font_size: 14,
+  font_family: "SF Mono, Monaco, Menlo, Courier New, monospace",
+  theme: "dark",
+  scrollback: 10000,
+  cursor_blink: true,
+};
 
 export const useServerStore = create<ServerStore>((set, get) => ({
   servers: [],
@@ -50,16 +70,61 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   sftpEntries: [],
   sftpPath: "/",
   sftpVisible: false,
+  settings: defaultSettings,
+  loaded: false,
+
+  loadConfig: async () => {
+    try {
+      const config = await invoke<PersistConfig>("get_config");
+      set({
+        servers: config.servers || [],
+        settings: config.settings || defaultSettings,
+        loaded: true,
+      });
+    } catch {
+      set({ loaded: true });
+    }
+  },
+
+  persistServers: async () => {
+    try {
+      await invoke("save_servers", { servers: get().servers });
+    } catch (e) {
+      console.error("持久化服务器列表失败:", e);
+    }
+  },
+
+  persistSettings: async () => {
+    try {
+      await invoke("save_settings", { settings: get().settings });
+    } catch (e) {
+      console.error("持久化设置失败:", e);
+    }
+  },
+
+  exportConfig: async (path) => {
+    return await invoke<string>("export_config", { path });
+  },
+
+  importConfig: async (path) => {
+    const config = await invoke<PersistConfig>("import_config", { path });
+    set({
+      servers: config.servers || [],
+      settings: config.settings || defaultSettings,
+    });
+  },
 
   addServer: (server) => {
     const newServer: ServerConfig = { ...server, id: genId() };
     set((state) => ({ servers: [...state.servers, newServer] }));
+    get().persistServers();
   },
 
   updateServer: (id, updates) => {
     set((state) => ({
       servers: state.servers.map((s) => (s.id === id ? { ...s, ...updates } : s)),
     }));
+    get().persistServers();
   },
 
   removeServer: (id) => {
@@ -69,17 +134,16 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       tabs: state.tabs.filter((t) => t.serverId !== id),
       activeTabId: state.activeTabId === id ? null : state.activeTabId,
     }));
+    get().persistServers();
   },
 
   connectServer: async (server) => {
-    // 如果已经打开，切换到该Tab
     const existing = get().tabs.find((t) => t.serverId === server.id);
     if (existing && existing.state === "connected") {
       set({ activeTabId: server.id });
       return;
     }
 
-    // 创建或更新Tab状态
     set((state) => {
       const tabs = existing
         ? state.tabs.map((t) =>
@@ -134,9 +198,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     if (tab?.sessionId) {
       try {
         await invoke("ssh_disconnect", { sessionId: tab.sessionId });
-      } catch (e) {
-        // 忽略断开错误
-      }
+      } catch {}
     }
     set((state) => ({
       tabs: state.tabs.filter((t) => t.serverId !== serverId),
@@ -146,16 +208,12 @@ export const useServerStore = create<ServerStore>((set, get) => ({
 
   executeCommand: async (serverId, command) => {
     const tab = get().tabs.find((t) => t.serverId === serverId);
-    if (!tab?.sessionId) {
-      throw new Error("会话未连接");
-    }
+    if (!tab?.sessionId) throw new Error("会话未连接");
     const result = await invoke<{ success: boolean; output: string; error?: string }>(
       "ssh_execute",
       { sessionId: tab.sessionId, command }
     );
-    if (!result.success) {
-      throw new Error(result.error || "命令执行失败");
-    }
+    if (!result.success) throw new Error(result.error || "命令执行失败");
     return result.output;
   },
 
@@ -169,9 +227,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
 
   listSftp: async (serverId, path) => {
     const tab = get().tabs.find((t) => t.serverId === serverId);
-    if (!tab?.sessionId) {
-      throw new Error("会话未连接");
-    }
+    if (!tab?.sessionId) throw new Error("会话未连接");
     const result = await invoke<{ success: boolean; entries: SftpEntry[]; error?: string }>(
       "sftp_list",
       { sessionId: tab.sessionId, path }
@@ -185,5 +241,12 @@ export const useServerStore = create<ServerStore>((set, get) => ({
 
   toggleSftp: (visible) => {
     set((state) => ({ sftpVisible: visible ?? !state.sftpVisible }));
+  },
+
+  updateSettings: (updates) => {
+    set((state) => ({
+      settings: { ...state.settings, ...updates },
+    }));
+    get().persistSettings();
   },
 }));
