@@ -2,15 +2,109 @@ import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useServerStore } from "../stores/serverStore";
 import { LoadingState, ErrorState } from "@/_shared";
 
-/** 主题预设 */
-const THEMES: Record<string, { background: string; foreground: string; cursor: string }> = {
-  dark: { background: "#1e1e1e", foreground: "#d4d4d4", cursor: "#d4d4d4" },
-  light: { background: "#ffffff", foreground: "#1e1e1e", cursor: "#1e1e1e" },
-  dracula: { background: "#282a36", foreground: "#f8f8f2", cursor: "#f8f8f2" },
-  solarized: { background: "#002b36", foreground: "#839496", cursor: "#93a1a1" },
+const THEMES: Record<string, {
+  background: string; foreground: string; cursor: string;
+  selectionBackground: string; selectionForeground: string;
+  black: string; red: string; green: string; yellow: string;
+  blue: string; magenta: string; cyan: string; white: string;
+  brightBlack: string; brightRed: string; brightGreen: string; brightYellow: string;
+  brightBlue: string; brightMagenta: string; brightCyan: string; brightWhite: string;
+}> = {
+  dark: {
+    background: "#1e1e1e", foreground: "#d4d4d4", cursor: "#d4d4d4",
+    selectionBackground: "#264f78", selectionForeground: "#ffffff",
+    black: "#000000", red: "#cd3131", green: "#0dbc79", yellow: "#e5e510",
+    blue: "#2472c8", magenta: "#bc3fbc", cyan: "#11a8cd", white: "#e5e5e5",
+    brightBlack: "#666666", brightRed: "#f14c4c", brightGreen: "#23d18b",
+    brightYellow: "#f5f543", brightBlue: "#3b8eea", brightMagenta: "#d670d6",
+    brightCyan: "#29b8f2", brightWhite: "#ffffff",
+  },
+  light: {
+    background: "#ffffff", foreground: "#1e1e1e", cursor: "#1e1e1e",
+    selectionBackground: "#add6ff", selectionForeground: "#000000",
+    black: "#000000", red: "#cd3131", green: "#00bc00", yellow: "#949800",
+    blue: "#0451a5", magenta: "#bc05bc", cyan: "#0598bc", white: "#555555",
+    brightBlack: "#666666", brightRed: "#cd3131", brightGreen: "#14ce14",
+    brightYellow: "#b5ba00", brightBlue: "#0451a5", brightMagenta: "#bc05bc",
+    brightCyan: "#0598bc", brightWhite: "#a5a5a5",
+  },
+  dracula: {
+    background: "#282a36", foreground: "#f8f8f2", cursor: "#f8f8f2",
+    selectionBackground: "#44475a", selectionForeground: "#f8f8f2",
+    black: "#21222c", red: "#ff5555", green: "#50fa7b", yellow: "#f1fa8c",
+    blue: "#bd93f9", magenta: "#ff79c6", cyan: "#8be9fd", white: "#f8f8f2",
+    brightBlack: "#6272a4", brightRed: "#ff6e6e", brightGreen: "#69ff94",
+    brightYellow: "#ffffa5", brightBlue: "#d6acff", brightMagenta: "#ff92df",
+    brightCyan: "#a4ffff", brightWhite: "#ffffff",
+  },
+  solarized: {
+    background: "#002b36", foreground: "#839496", cursor: "#93a1a1",
+    selectionBackground: "#073642", selectionForeground: "#93a1a1",
+    black: "#073642", red: "#dc322f", green: "#859900", yellow: "#b58900",
+    blue: "#268bd2", magenta: "#d33682", cyan: "#2aa198", white: "#eee8d5",
+    brightBlack: "#002b36", brightRed: "#cb4b16", brightGreen: "#586e75",
+    brightYellow: "#657b83", brightBlue: "#839496", brightMagenta: "#6c71c4",
+    brightCyan: "#93a1a1", brightWhite: "#fdf6e3",
+  },
+  tokyonight: {
+    background: "#1a1b26", foreground: "#c0caf5", cursor: "#c0caf5",
+    selectionBackground: "#33467c", selectionForeground: "#c0caf5",
+    black: "#15161e", red: "#f7768e", green: "#9ece6a", yellow: "#e0af68",
+    blue: "#7aa2f7", magenta: "#bb9af7", cyan: "#7dcfff", white: "#a9b1d6",
+    brightBlack: "#414868", brightRed: "#f7768e", brightGreen: "#9ece6a",
+    brightYellow: "#e0af68", brightBlue: "#7aa2f7", brightMagenta: "#bb9af7",
+    brightCyan: "#7dcfff", brightWhite: "#c0caf5",
+  },
+  nord: {
+    background: "#2e3440", foreground: "#d8dee9", cursor: "#d8dee9",
+    selectionBackground: "#434c5e", selectionForeground: "#d8dee9",
+    black: "#3b4252", red: "#bf616a", green: "#a3be8c", yellow: "#ebcb8b",
+    blue: "#81a1c1", magenta: "#b48ead", cyan: "#88c0d0", white: "#e5e9f0",
+    brightBlack: "#4c566a", brightRed: "#bf616a", brightGreen: "#a3be8c",
+    brightYellow: "#ebcb8b", brightBlue: "#81a1c1", brightMagenta: "#b48ead",
+    brightCyan: "#8fbcbb", brightWhite: "#eceff4",
+  },
+  one_dark: {
+    background: "#282c34", foreground: "#abb2bf", cursor: "#528bff",
+    selectionBackground: "#3e4451", selectionForeground: "#abb2bf",
+    black: "#2c323c", red: "#e06c75", green: "#98c379", yellow: "#e5c07b",
+    blue: "#61afef", magenta: "#c678dd", cyan: "#56b6c2", white: "#abb2bf",
+    brightBlack: "#5c6370", brightRed: "#e06c75", brightGreen: "#98c379",
+    brightYellow: "#e5c07b", brightBlue: "#61afef", brightMagenta: "#c678dd",
+    brightCyan: "#56b6c2", brightWhite: "#ffffff",
+  },
+  monokai: {
+    background: "#272822", foreground: "#f8f8c2", cursor: "#f8f8c2",
+    selectionBackground: "#49483e", selectionForeground: "#f8f8c2",
+    black: "#272822", red: "#f92672", green: "#a6e22e", yellow: "#f4bf75",
+    blue: "#66d9ef", magenta: "#ae81ff", cyan: "#a1efe4", white: "#f8f8f2",
+    brightBlack: "#75715e", brightRed: "#f92672", brightGreen: "#a6e22e",
+    brightYellow: "#f4bf75", brightBlue: "#66d9ef", brightMagenta: "#ae81ff",
+    brightCyan: "#a1efe4", brightWhite: "#f9f8f5",
+  },
+  ayu: {
+    background: "#0a0e14", foreground: "#b3b1ad", cursor: "#e6b450",
+    selectionBackground: "#1a1e25", selectionForeground: "#b3b1ad",
+    black: "#01060e", red: "#ea6c73", green: "#91b362", yellow: "#f9af4f",
+    blue: "#53bdfa", magenta: "#fae994", cyan: "#90e1c6", white: "#c7c7c7",
+    brightBlack: "#686868", brightRed: "#f07178", brightGreen: "#c2d94c",
+    brightYellow: "#ffb454", brightBlue: "#59c2ff", brightMagenta: "#ffee99",
+    brightCyan: "#95e6cb", brightWhite: "#ffffff",
+  },
+  gruvbox: {
+    background: "#282828", foreground: "#ebdbb2", cursor: "#ebdbb2",
+    selectionBackground: "#665c54", selectionForeground: "#ebdbb2",
+    black: "#282828", red: "#cc241d", green: "#98971a", yellow: "#d79921",
+    blue: "#458588", magenta: "#b16286", cyan: "#689d6a", white: "#a89984",
+    brightBlack: "#928374", brightRed: "#fb4934", brightGreen: "#b8bb26",
+    brightYellow: "#fabd2f", brightBlue: "#83a598", brightMagenta: "#d3869b",
+    brightCyan: "#8ec07c", brightWhite: "#ebdbb2",
+  },
 };
 
 interface TerminalViewProps {
@@ -21,17 +115,18 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const unlistenRef = useRef<UnlistenFn | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
-  const { tabs, servers, connectServer, executeCommand, settings } = useServerStore();
-
+  const { tabs, servers, connectServer, settings } = useServerStore();
   const tab = tabs.find((t) => t.serverId === serverId);
   const server = servers.find((s) => s.id === serverId);
 
-  // 终端初始化 - 仅在已连接时初始化，支持命令历史
   useEffect(() => {
     if (tab?.state !== "connected") return;
     if (!terminalRef.current) return;
+    // Don't re-init if terminal already exists for this tab
+    if (termRef.current) return;
 
     const themePreset = THEMES[settings.theme] || THEMES.dark;
 
@@ -40,11 +135,7 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
       fontFamily: settings.font_family,
       scrollback: settings.scrollback,
       cursorBlink: settings.cursor_blink,
-      theme: {
-        background: themePreset.background,
-        foreground: themePreset.foreground,
-        cursor: themePreset.cursor,
-      },
+      theme: themePreset,
       convertEol: true,
       allowProposedApi: true,
     });
@@ -57,121 +148,41 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
     termRef.current = term;
     fitRef.current = fitAddon;
 
-    const prompt = () =>
-      `\x1b[1;32m${server?.username || "user"}@${server?.host || "host"}\x1b[0m:\x1b[1;34m~\x1b[0m$ `;
+    const sessionId = tab.sessionId!;
+    const { cols, rows } = term;
 
-    // 连接欢迎语
-    term.writeln(`\x1b[32m● 已连接到 ${server?.host || serverId}\x1b[0m`);
-    term.writeln(`\x1b[90m● 提示: 输入命令并按回车执行，↑/↓ 浏览历史命令\x1b[0m`);
-    term.write(`\r\n${prompt()}`);
-
-    let currentInput = "";
-    // 命令历史: index 0 为最旧
-    const history: string[] = [];
-    let historyIndex = -1; // -1 表示当前正在输入的新命令
-
-    const writePrompt = () => term.write(`\r\n${prompt()}`);
-
-    const runCommand = (cmd: string) => {
-      executeCommand(serverId, cmd)
-        .then((output) => {
-          if (output) {
-            term.write(output);
-            if (!output.endsWith("\n")) {
-              term.write("\r\n");
-            }
-          }
-        })
-        .catch((e) => {
-          term.write(`\x1b[31m错误: ${String(e)}\x1b[0m\r\n`);
-        })
-        .finally(() => {
-          currentInput = "";
-          historyIndex = -1;
-          writePrompt();
-        });
-    };
-
-    // 单个 onData 处理整段输入字符串(可能是单字符或多字符转义序列)
-    term.onData((data) => {
-      // ↑ 上箭头: \x1b[A   ↓ 下箭头: \x1b[B
-      if (data === "\x1b[A") {
-        if (history.length === 0) return;
-        term.write("\r\x1b[K"); // 回到行首并清除整行
-        if (historyIndex === -1) {
-          historyIndex = history.length - 1;
-        } else if (historyIndex > 0) {
-          historyIndex -= 1;
-        }
-        currentInput = history[historyIndex] || "";
-        term.write(prompt() + currentInput);
-        return;
-      }
-      if (data === "\x1b[B") {
-        if (history.length === 0) return;
-        term.write("\r\x1b[K");
-        if (historyIndex === -1) {
-          term.write(prompt() + currentInput);
-          return;
-        }
-        historyIndex += 1;
-        if (historyIndex >= history.length) {
-          historyIndex = -1;
-          currentInput = "";
-        } else {
-          currentInput = history[historyIndex] || "";
-        }
-        term.write(prompt() + currentInput);
-        return;
-      }
-
-      // 普通按键逐字符处理
-      for (const char of data) {
-        const code = char.charCodeAt(0);
-
-        if (code === 13) {
-          // Enter - 执行命令
-          term.write("\r\n");
-          const cmd = currentInput.trim();
-          if (cmd) {
-            history.push(cmd);
-            if (history.length > 1000) history.shift();
-            currentInput = "";
-            historyIndex = -1;
-            runCommand(cmd);
-          } else {
-            currentInput = "";
-            historyIndex = -1;
-            writePrompt();
-          }
-        } else if (code === 127) {
-          // Backspace
-          if (currentInput.length > 0) {
-            currentInput = currentInput.slice(0, -1);
-            term.write("\b \b");
-          }
-        } else if (code === 3) {
-          // Ctrl+C
-          currentInput = "";
-          historyIndex = -1;
-          term.write("^C");
-          writePrompt();
-        } else if (code >= 32) {
-          // 可打印字符
-          currentInput += char;
-          term.write(char);
-        }
-      }
+    // Start PTY
+    invoke("ssh_start_pty", { sessionId, cols, rows }).catch((e) => {
+      term.write(`\r\n\x1b[31mPTY启动失败: ${String(e)}\x1b[0m\r\n`);
     });
 
-    // ResizeObserver 监听容器大小变化自动 fit
+    // Listen for PTY output
+    const ptyOutputHandler = (event: any) => {
+      const payload = event.payload;
+      if (payload.session_id === sessionId) {
+        term.write(payload.data);
+      }
+    };
+
+    listen("pty-output", ptyOutputHandler).then((unlisten) => {
+      unlistenRef.current = unlisten;
+    });
+
+    // Send user input to PTY
+    term.onData((data) => {
+      invoke("ssh_pty_write", { sessionId, data }).catch(() => {});
+    });
+
+    // Handle resize
     const handleResize = () => {
       try {
         fitAddon.fit();
-      } catch {
-        // 终端可能未准备好
-      }
+        if (term.cols > 0 && term.rows > 0) {
+          invoke("ssh_pty_resize", { sessionId, cols: term.cols, rows: term.rows }).catch(() => {});
+        }
+      } catch {}
     };
+
     const ro = new ResizeObserver(handleResize);
     ro.observe(terminalRef.current);
     resizeObserverRef.current = ro;
@@ -179,19 +190,15 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
     return () => {
       ro.disconnect();
       resizeObserverRef.current = null;
+      if (unlistenRef.current) {
+        unlistenRef.current();
+        unlistenRef.current = null;
+      }
       term.dispose();
       termRef.current = null;
+      fitRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    serverId,
-    settings.font_size,
-    settings.font_family,
-    settings.theme,
-    settings.scrollback,
-    settings.cursor_blink,
-    tab?.state,
-  ]);
+  }, [tab?.state, tab?.sessionId]);
 
   const handleRetry = () => {
     if (server) connectServer(server);
@@ -200,43 +207,16 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
   const themePreset = THEMES[settings.theme] || THEMES.dark;
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        background: themePreset.background,
-      }}
-    >
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: themePreset.background }}>
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-        <div
-          className="terminal-container"
-          ref={terminalRef}
-          style={{ height: "100%", background: themePreset.background }}
-        />
+        <div className="terminal-container" ref={terminalRef} style={{ height: "100%", background: themePreset.background }} />
         {tab?.state === "connecting" && (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: themePreset.background,
-            }}
-          >
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: themePreset.background }}>
             <LoadingState tip="正在连接..." minHeight={200} />
           </div>
         )}
         {tab?.state === "error" && (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              overflow: "auto",
-              background: themePreset.background,
-            }}
-          >
+          <div style={{ position: "absolute", inset: 0, overflow: "auto", background: themePreset.background }}>
             <ErrorState message={tab.error} onRetry={handleRetry} />
           </div>
         )}

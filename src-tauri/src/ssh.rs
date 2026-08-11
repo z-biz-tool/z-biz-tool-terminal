@@ -4,6 +4,7 @@ use russh::*;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tauri::Emitter;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -27,6 +28,10 @@ pub struct SshSession {
     handle: Arc<Mutex<Option<client::Handle<ClientHandler>>>>,
     /// SFTP 子系统会话
     sftp: Arc<Mutex<Option<SftpSession>>>,
+    /// PTY 数据写入通道
+    pty_writer: Arc<Mutex<Option<tokio::sync::mpsc::Sender<String>>>>,
+    /// PTY 窗口大小调整通道
+    pty_resize_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<(u32, u32)>>>>,
 }
 
 /// 自定义SSH客户端Handler
@@ -87,6 +92,8 @@ impl SshSession {
             username: username.to_string(),
             handle: Arc::new(Mutex::new(Some(session))),
             sftp: Arc::new(Mutex::new(sftp)),
+            pty_writer: Arc::new(Mutex::new(None)),
+            pty_resize_tx: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -308,8 +315,138 @@ impl SshSession {
         }
     }
 
+    /// 启动PTY交互式Shell
+    pub async fn start_pty(
+        &self,
+        app: tauri::AppHandle,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut handle = self.handle.lock().await;
+        let session = handle.as_mut().ok_or("会话已关闭")?;
+
+        let mut channel = session.channel_open_session().await?;
+        channel
+            .request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
+            .await?;
+        channel.request_shell(false).await?;
+
+        let session_id = self.id.clone();
+
+        // 创建数据写入通道
+        let (data_tx, mut data_rx) = tokio::sync::mpsc::channel::<String>(256);
+        // 创建窗口大小调整通道
+        let (resize_tx, mut resize_rx) = tokio::sync::mpsc::channel::<(u32, u32)>(16);
+
+        *self.pty_writer.lock().await = Some(data_tx);
+        *self.pty_resize_tx.lock().await = Some(resize_tx);
+
+        // 启动PTY事件循环：读取输出、写入数据、处理resize
+        let read_app = app.clone();
+        let read_session_id = session_id.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    msg = channel.wait() => {
+                        match msg {
+                            Some(ChannelMsg::Data { ref data }) => {
+                                let output = String::from_utf8_lossy(data).to_string();
+                                let _ = read_app.emit(
+                                    "pty-output",
+                                    serde_json::json!({
+                                        "session_id": read_session_id,
+                                        "data": output,
+                                    }),
+                                );
+                            }
+                            Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                                let output = String::from_utf8_lossy(data).to_string();
+                                let _ = read_app.emit(
+                                    "pty-output",
+                                    serde_json::json!({
+                                        "session_id": read_session_id,
+                                        "data": output,
+                                    }),
+                                );
+                            }
+                            Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | None => {
+                                let _ = read_app.emit(
+                                    "pty-output",
+                                    serde_json::json!({
+                                        "session_id": read_session_id,
+                                        "data": "\r\n[会话已关闭]\r\n",
+                                    }),
+                                );
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    input = data_rx.recv() => {
+                        match input {
+                            Some(data) => {
+                                if channel.data(data.as_bytes()).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => {
+                                let _ = channel.eof().await;
+                                break;
+                            }
+                        }
+                    }
+                    resize = resize_rx.recv() => {
+                        if let Some((cols, rows)) = resize {
+                            let _ = channel.window_change(cols, rows, 0, 0).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// 向PTY写入数据
+    pub async fn pty_write(&self, data: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let writer = self.pty_writer.lock().await;
+        if let Some(tx) = writer.as_ref() {
+            tx.send(data.to_string())
+                .await
+                .map_err(|e| format!("PTY写入失败: {}", e).into())
+        } else {
+            Err("PTY未启动".into())
+        }
+    }
+
+    /// 调整PTY窗口大小
+    pub async fn pty_resize(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let resize_tx = self.pty_resize_tx.lock().await;
+        if let Some(tx) = resize_tx.as_ref() {
+            tx.send((cols as u32, rows as u32))
+                .await
+                .map_err(|e| format!("PTY resize失败: {}", e).into())
+        } else {
+            Err("PTY未启动".into())
+        }
+    }
+
     /// 断开连接
     pub async fn disconnect(&self) {
+        // 关闭PTY通道
+        {
+            let mut writer = self.pty_writer.lock().await;
+            writer.take();
+        }
+        {
+            let mut resize = self.pty_resize_tx.lock().await;
+            resize.take();
+        }
+
         // 先关闭 SFTP 会话
         let mut sftp_lock = self.sftp.lock().await;
         if let Some(sftp) = sftp_lock.take() {

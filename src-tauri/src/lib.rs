@@ -13,6 +13,9 @@ pub fn run() {
             commands::ssh_connect,
             commands::ssh_disconnect,
             commands::ssh_execute,
+            commands::ssh_start_pty,
+            commands::ssh_pty_write,
+            commands::ssh_pty_resize,
             commands::sftp_list,
             commands::sftp_upload,
             commands::sftp_download,
@@ -22,6 +25,7 @@ pub fn run() {
             config::get_config,
             config::save_servers,
             config::save_settings,
+            config::save_snippets,
             config::export_config,
             config::import_config,
         ])

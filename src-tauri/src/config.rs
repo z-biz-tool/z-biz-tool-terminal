@@ -17,11 +17,23 @@ pub struct ServerConfig {
     pub remark: Option<String>,
 }
 
+/// 快捷命令片段配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnippetConfig {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub group: Option<String>,
+    pub description: Option<String>,
+}
+
 /// 全局配置（持久化到 ~/.z-terminal/config.json）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     pub servers: Vec<ServerConfig>,
     pub settings: TerminalSettings,
+    #[serde(default)]
+    pub snippets: Vec<SnippetConfig>,
 }
 
 /// 终端设置
@@ -117,5 +129,13 @@ pub async fn save_servers(servers: Vec<ServerConfig>) -> Result<(), String> {
 pub async fn save_settings(settings: TerminalSettings) -> Result<(), String> {
     let mut config = load_config();
     config.settings = settings;
+    save_config(&config)
+}
+
+/// 保存快捷命令片段
+#[tauri::command]
+pub async fn save_snippets(snippets: Vec<SnippetConfig>) -> Result<(), String> {
+    let mut config = load_config();
+    config.snippets = snippets;
     save_config(&config)
 }

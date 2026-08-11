@@ -297,3 +297,86 @@ pub async fn sftp_rename(
         }
     }
 }
+
+/// 启动PTY交互式Shell
+#[tauri::command]
+pub async fn ssh_start_pty(
+    app: tauri::AppHandle,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        match sess.start_pty(app, cols, rows).await {
+            Ok(_) => ExecResult {
+                success: true,
+                output: "PTY已启动".into(),
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}
+
+/// 向PTY写入数据
+#[tauri::command]
+pub async fn ssh_pty_write(session_id: String, data: String) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        match sess.pty_write(&data).await {
+            Ok(_) => ExecResult {
+                success: true,
+                output: String::new(),
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}
+
+/// 调整PTY窗口大小
+#[tauri::command]
+pub async fn ssh_pty_resize(session_id: String, cols: u16, rows: u16) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        match sess.pty_resize(cols, rows).await {
+            Ok(_) => ExecResult {
+                success: true,
+                output: String::new(),
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}

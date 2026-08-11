@@ -66,3 +66,12 @@ export interface SftpListResult {
   entries: SftpEntry[];
   error?: string;
 }
+
+/** 快捷命令片段 */
+export interface Snippet {
+  id: string;
+  name: string;
+  command: string;
+  group?: string;
+  description?: string;
+}
