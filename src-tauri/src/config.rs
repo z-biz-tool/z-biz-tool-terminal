@@ -15,6 +15,8 @@ pub struct ServerConfig {
     pub password: Option<String>,
     pub private_key: Option<String>,
     pub remark: Option<String>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 /// 快捷命令片段配置
@@ -44,6 +46,19 @@ pub struct TerminalSettings {
     pub theme: String,
     pub scrollback: u32,
     pub cursor_blink: bool,
+    /// 日志目录, None 表示默认 ~/.z-terminal/logs
+    #[serde(default)]
+    pub log_directory: Option<String>,
+    /// SSH keepalive 间隔(秒), None 表示禁用
+    #[serde(default)]
+    pub keepalive_interval: Option<u64>,
+    /// 自动重连
+    #[serde(default = "default_auto_reconnect")]
+    pub auto_reconnect: bool,
+}
+
+fn default_auto_reconnect() -> bool {
+    true
 }
 
 impl Default for TerminalSettings {
@@ -54,11 +69,36 @@ impl Default for TerminalSettings {
             theme: "dark".into(),
             scrollback: 10000,
             cursor_blink: true,
+            log_directory: None,
+            keepalive_interval: Some(60),
+            auto_reconnect: true,
         }
     }
 }
 
-/// 获取 ~/.z-terminal 目录
+/// 获取日志目录
+pub fn get_log_dir() -> PathBuf {
+    let config = load_config();
+    let dir = match config.settings.log_directory {
+        Some(ref d) if !d.is_empty() => PathBuf::from(d),
+        _ => get_config_dir().join("logs"),
+    };
+    if !dir.exists() {
+        let _ = fs::create_dir_all(&dir);
+    }
+    dir
+}
+
+/// 会话日志条目
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionLogEntry {
+    pub filename: String,
+    pub path: String,
+    pub size: u64,
+    pub modified: String,
+}
+
+/// 获取配置目录
 pub fn get_config_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = home.join(".z-terminal");
@@ -138,4 +178,66 @@ pub async fn save_snippets(snippets: Vec<SnippetConfig>) -> Result<(), String> {
     let mut config = load_config();
     config.snippets = snippets;
     save_config(&config)
+}
+
+/// 获取会话日志列表
+#[tauri::command]
+pub async fn get_session_logs() -> Result<Vec<SessionLogEntry>, String> {
+    let log_dir = get_log_dir();
+    if !log_dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut entries = Vec::new();
+    let read_dir = fs::read_dir(&log_dir).map_err(|e| format!("读取日志目录失败: {}", e))?;
+    for entry in read_dir {
+        let entry = entry.map_err(|e| format!("读取目录条目失败: {}", e))?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("log") {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|e| format!("读取文件元数据失败: {}", e))?;
+        let modified = metadata.modified().map_err(|e| format!("读取修改时间失败: {}", e))?;
+        let modified_str: String = {
+            let dt: chrono::DateTime<chrono::Local> = modified.into();
+            dt.format("%Y-%m-%d %H:%M:%S").to_string()
+        };
+        let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        entries.push(SessionLogEntry {
+            filename,
+            path: path.to_string_lossy().to_string(),
+            size: metadata.len(),
+            modified: modified_str,
+        });
+    }
+    // 按修改时间倒序
+    entries.sort_by(|a, b| b.modified.cmp(&a.modified));
+    Ok(entries)
+}
+
+/// 读取会话日志内容
+#[tauri::command]
+pub async fn read_session_log(path: String) -> Result<String, String> {
+    let path = PathBuf::from(&path);
+    // 安全检查: 确保路径在日志目录内
+    let log_dir = get_log_dir();
+    let canonical_path = path.canonicalize().map_err(|e| format!("路径无效: {}", e))?;
+    let canonical_log_dir = log_dir.canonicalize().map_err(|e| format!("日志目录无效: {}", e))?;
+    if !canonical_path.starts_with(&canonical_log_dir) {
+        return Err("路径不在日志目录内".into());
+    }
+    fs::read_to_string(&path).map_err(|e| format!("读取日志失败: {}", e))
+}
+
+/// 删除会话日志
+#[tauri::command]
+pub async fn delete_session_log(path: String) -> Result<(), String> {
+    let path = PathBuf::from(&path);
+    // 安全检查: 确保路径在日志目录内
+    let log_dir = get_log_dir();
+    let canonical_path = path.canonicalize().map_err(|e| format!("路径无效: {}", e))?;
+    let canonical_log_dir = log_dir.canonicalize().map_err(|e| format!("日志目录无效: {}", e))?;
+    if !canonical_path.starts_with(&canonical_log_dir) {
+        return Err("路径不在日志目录内".into());
+    }
+    fs::remove_file(&path).map_err(|e| format!("删除日志失败: {}", e))
 }

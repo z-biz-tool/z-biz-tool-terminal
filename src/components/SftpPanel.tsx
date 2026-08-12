@@ -65,8 +65,10 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
   }, [sftpPath]);
 
   const getSessionId = useCallback(() => {
-    const tab = useServerStore.getState().tabs.find((t) => t.serverId === serverId);
-    return tab?.sessionId;
+    const state = useServerStore.getState();
+    const tab = state.tabs.find((t) => t.serverId === serverId);
+    const activePane = tab?.panes.find((p) => p.id === state.activePaneId);
+    return activePane?.sessionId || tab?.sessionId;
   }, [serverId]);
 
   const navigateTo = useCallback(
@@ -476,37 +478,11 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
   const handleEmptyContextMenu = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
-      setContextMenuEntry(null);
-      // Show a simple dropdown for the empty area
-      const items: MenuProps["items"] = [
-        {
-          key: "upload",
-          icon: <UploadOutlined />,
-          label: "上传文件...",
-          onClick: () => handleUpload(),
-        },
-        {
-          key: "newFolder",
-          icon: <FolderAddOutlined />,
-          label: "新建文件夹",
-          onClick: () => handleNewFolder(),
-        },
-        { type: "divider" as const },
-        {
-          key: "refresh",
-          icon: <ReloadOutlined />,
-          label: "刷新",
-          onClick: () => navigateTo(sftpPath),
-        },
-      ];
-
-      // Use a manual approach: render a Dropdown at the cursor position
-      // We'll use the contextMenuPos state for this
       setContextMenuPos({ x: e.clientX, y: e.clientY });
       // Store a special marker for empty area context menu
       setContextMenuEntry({ name: "__empty__", is_dir: true, size: 0 } as SftpEntry);
     },
-    [handleUpload, handleNewFolder, navigateTo, sftpPath]
+    []
   );
 
   const getEmptyAreaContextMenuItems = useCallback((): MenuProps["items"] => {

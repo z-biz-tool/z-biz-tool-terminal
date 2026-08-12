@@ -20,21 +20,39 @@ export interface ServerConfig {
   privateKey?: string;
   /** 备注 */
   remark?: string;
+  /** 是否收藏 */
+  pinned?: boolean;
 }
 
 /** 连接状态 */
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
 
-/** 终端Tab */
-export interface TerminalTab {
-  /** 服务器ID */
+/** 分屏方向 */
+export type SplitDirection = "horizontal" | "vertical";
+
+/** 分屏面板 */
+export interface SplitPane {
+  id: string;
   serverId: string;
-  /** 会话ID(SSH连接后返回) */
   sessionId?: string;
-  /** 连接状态 */
   state: ConnectionState;
-  /** 错误信息 */
   error?: string;
+}
+
+/** 终端Tab - 支持分屏 */
+export interface TerminalTab {
+  /** 服务器ID(主面板) */
+  serverId: string;
+  /** 会话ID(SSH连接后返回,主面板) */
+  sessionId?: string;
+  /** 连接状态(主面板) */
+  state: ConnectionState;
+  /** 错误信息(主面板) */
+  error?: string;
+  /** 分屏面板列表(第一个为主面板) */
+  panes: SplitPane[];
+  /** 分屏方向 */
+  splitDirection?: SplitDirection;
 }
 
 /** SSH连接结果 */

@@ -25,6 +25,8 @@ import {
   ExportOutlined,
   SearchOutlined,
   DesktopOutlined,
+  StarOutlined,
+  StarFilled,
 } from "@ant-design/icons";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { useServerStore } from "../stores/serverStore";
@@ -53,6 +55,13 @@ export default function ServerList() {
     if (!loaded) loadConfig();
   }, []);
 
+  // 监听全局快捷键触发的新建连接事件
+  useEffect(() => {
+    const handler = () => handleAdd();
+    window.addEventListener("z-terminal:add-server", handler);
+    return () => window.removeEventListener("z-terminal:add-server", handler);
+  }, []);
+
   // 搜索过滤
   const filteredServers = useMemo(() => {
     if (!searchText) return servers;
@@ -65,106 +74,154 @@ export default function ServerList() {
     );
   }, [servers, searchText]);
 
-  // 按分组组织
+  // 按分组组织（含收藏分组）
   const treeData = useMemo(() => {
+    const pinnedServers = filteredServers.filter((s) => s.pinned);
     const groups: Record<string, ServerConfig[]> = {};
     filteredServers.forEach((s) => {
       const g = s.group || "默认分组";
       if (!groups[g]) groups[g] = [];
       groups[g].push(s);
     });
-    return Object.entries(groups).map(([groupName, items]) => ({
-      key: `group-${groupName}`,
-      title: (
-        <span
-          style={{
-            fontWeight: 600,
-            fontSize: 12,
-            color: "#888",
-            textTransform: "uppercase",
-            letterSpacing: 0.5,
-          }}
-        >
-          {groupName} · {items.length}
-        </span>
-      ),
-      selectable: false,
-      children: items.map((s) => ({
-        key: s.id,
-        title: (
-          <div
+
+    const renderServerTitle = (s: ServerConfig) => (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "2px 0",
+        }}
+        onDoubleClick={() => connectServer(s)}
+      >
+        <Space size={6} style={{ minWidth: 0, flex: 1 }}>
+          <DesktopOutlined style={{ color: "#1677ff", flexShrink: 0 }} />
+          <span
             style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: "2px 0",
+              fontWeight: 500,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
             }}
-            onDoubleClick={() => connectServer(s)}
           >
-            <Space size={6} style={{ minWidth: 0, flex: 1 }}>
-              <DesktopOutlined style={{ color: "#1677ff", flexShrink: 0 }} />
-              <span
-                style={{
-                  fontWeight: 500,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {s.name}
-              </span>
-              <span style={{ color: "#bbb", fontSize: 11, flexShrink: 0 }}>
-                {s.host}:{s.port}
-              </span>
-            </Space>
-            <Space size={0} style={{ flexShrink: 0, opacity: 0.6 }}>
-              <Tooltip title="连接">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<LinkOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    connectServer(s);
-                  }}
-                />
-              </Tooltip>
-              <Tooltip title="编辑">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<EditOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleEdit(s);
-                  }}
-                />
-              </Tooltip>
-              <Popconfirm
-                title="删除该服务器？"
-                okText="删除"
-                cancelText="取消"
-                onConfirm={(e) => {
-                  e?.stopPropagation();
-                  removeServer(s.id);
-                  message.success("已删除");
-                }}
-                onCancel={(e) => e?.stopPropagation()}
-              >
-                <Button
-                  type="text"
-                  size="small"
-                  danger
-                  icon={<DeleteOutlined />}
-                  onClick={(e) => e.stopPropagation()}
-                />
-              </Popconfirm>
-            </Space>
-          </div>
+            {s.name}
+          </span>
+          <span style={{ color: "#bbb", fontSize: 11, flexShrink: 0 }}>
+            {s.host}:{s.port}
+          </span>
+        </Space>
+        <Space size={0} style={{ flexShrink: 0, opacity: 0.6 }}>
+          <Tooltip title={s.pinned ? "取消收藏" : "收藏"}>
+            <Button
+              type="text"
+              size="small"
+              icon={s.pinned ? <StarFilled style={{ color: "#faad14" }} /> : <StarOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                updateServer(s.id, { pinned: !s.pinned });
+              }}
+            />
+          </Tooltip>
+          <Tooltip title="连接">
+            <Button
+              type="text"
+              size="small"
+              icon={<LinkOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                connectServer(s);
+              }}
+            />
+          </Tooltip>
+          <Tooltip title="编辑">
+            <Button
+              type="text"
+              size="small"
+              icon={<EditOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleEdit(s);
+              }}
+            />
+          </Tooltip>
+          <Popconfirm
+            title="删除该服务器？"
+            okText="删除"
+            cancelText="取消"
+            onConfirm={(e) => {
+              e?.stopPropagation();
+              removeServer(s.id);
+              message.success("已删除");
+            }}
+            onCancel={(e) => e?.stopPropagation()}
+          >
+            <Button
+              type="text"
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={(e) => e.stopPropagation()}
+            />
+          </Popconfirm>
+        </Space>
+      </div>
+    );
+
+    const result: any[] = [];
+
+    // 收藏分组置顶
+    if (pinnedServers.length > 0) {
+      result.push({
+        key: "group-⭐ 收藏",
+        title: (
+          <span
+            style={{
+              fontWeight: 600,
+              fontSize: 12,
+              color: "#faad14",
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+            }}
+          >
+            ⭐ 收藏 · {pinnedServers.length}
+          </span>
         ),
-        isLeaf: true,
-      })),
-    }));
+        selectable: false,
+        children: pinnedServers.map((s) => ({
+          key: `pinned-${s.id}`,
+          title: renderServerTitle(s),
+          isLeaf: true,
+        })),
+      });
+    }
+
+    // 原始分组
+    Object.entries(groups).forEach(([groupName, items]) => {
+      result.push({
+        key: `group-${groupName}`,
+        title: (
+          <span
+            style={{
+              fontWeight: 600,
+              fontSize: 12,
+              color: "#888",
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+            }}
+          >
+            {groupName} · {items.length}
+          </span>
+        ),
+        selectable: false,
+        children: items.map((s) => ({
+          key: s.id,
+          title: renderServerTitle(s),
+          isLeaf: true,
+        })),
+      });
+    });
+
+    return result;
   }, [filteredServers]);
 
   const handleAdd = () => {

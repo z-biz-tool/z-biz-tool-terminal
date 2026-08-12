@@ -28,6 +28,9 @@ pub fn run() {
             config::save_snippets,
             config::export_config,
             config::import_config,
+            config::get_session_logs,
+            config::read_session_log,
+            config::delete_session_log,
         ])
         .setup(|_app| {
             Ok(())

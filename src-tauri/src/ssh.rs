@@ -9,6 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::config::get_log_dir;
+
 /// SFTP文件条目
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SftpEntry {
@@ -32,6 +34,8 @@ pub struct SshSession {
     pty_writer: Arc<Mutex<Option<tokio::sync::mpsc::Sender<String>>>>,
     /// PTY 窗口大小调整通道
     pty_resize_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<(u32, u32)>>>>,
+    /// 会话日志文件
+    log_file: Arc<Mutex<Option<tokio::fs::File>>>,
 }
 
 /// 自定义SSH客户端Handler
@@ -59,8 +63,13 @@ impl SshSession {
         auth_type: Option<&str>,
         password: Option<&str>,
         private_key: Option<&str>,
+        keepalive_interval: Option<u64>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let config = Arc::new(client::Config::default());
+        let mut config = client::Config::default();
+        if let Some(interval) = keepalive_interval {
+            config.keepalive_interval = Some(std::time::Duration::from_secs(interval));
+        }
+        let config = Arc::new(config);
         let mut session = client::connect(config, (host, port), ClientHandler).await?;
 
         // 认证
@@ -94,6 +103,7 @@ impl SshSession {
             sftp: Arc::new(Mutex::new(sftp)),
             pty_writer: Arc::new(Mutex::new(None)),
             pty_resize_tx: Arc::new(Mutex::new(None)),
+            log_file: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -341,9 +351,26 @@ impl SshSession {
         *self.pty_writer.lock().await = Some(data_tx);
         *self.pty_resize_tx.lock().await = Some(resize_tx);
 
-        // 启动PTY事件循环：读取输出、写入数据、处理resize
+        // 创建日志文件
+        let log_dir = get_log_dir();
+        let log_filename = format!(
+            "{}_{}.log",
+            session_id,
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        );
+        let log_path = log_dir.join(&log_filename);
+        let log_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .await
+            .ok();
+        *self.log_file.lock().await = log_file;
+
+        // 启动PTY事件循环：读取输出、写入数据、处理resize、写日志
         let read_app = app.clone();
         let read_session_id = session_id.clone();
+        let log_file_arc = self.log_file.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -358,6 +385,8 @@ impl SshSession {
                                         "data": output,
                                     }),
                                 );
+                                // 写入日志
+                                Self::write_log(&log_file_arc, &output).await;
                             }
                             Some(ChannelMsg::ExtendedData { ref data, .. }) => {
                                 let output = String::from_utf8_lossy(data).to_string();
@@ -368,6 +397,8 @@ impl SshSession {
                                         "data": output,
                                     }),
                                 );
+                                // 写入日志
+                                Self::write_log(&log_file_arc, &output).await;
                             }
                             Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | None => {
                                 let _ = read_app.emit(
@@ -377,6 +408,16 @@ impl SshSession {
                                         "data": "\r\n[会话已关闭]\r\n",
                                     }),
                                 );
+                                // 发送会话关闭事件
+                                let _ = read_app.emit(
+                                    "pty-closed",
+                                    serde_json::json!({
+                                        "session_id": read_session_id,
+                                    }),
+                                );
+                                // 关闭日志文件
+                                let mut lf = log_file_arc.lock().await;
+                                lf.take();
                                 break;
                             }
                             _ => {}
@@ -405,6 +446,19 @@ impl SshSession {
         });
 
         Ok(())
+    }
+
+    /// 写入日志(带时间戳)
+    async fn write_log(
+        log_file: &Arc<Mutex<Option<tokio::fs::File>>>,
+        data: &str,
+    ) {
+        let mut lf = log_file.lock().await;
+        if let Some(file) = lf.as_mut() {
+            let timestamp = chrono::Local::now().format("[%Y-%m-%d %H:%M:%S] ");
+            let log_line = format!("{}{}", timestamp, data);
+            let _ = file.write_all(log_line.as_bytes()).await;
+        }
     }
 
     /// 向PTY写入数据
@@ -445,6 +499,11 @@ impl SshSession {
         {
             let mut resize = self.pty_resize_tx.lock().await;
             resize.take();
+        }
+        // 关闭日志文件
+        {
+            let mut lf = self.log_file.lock().await;
+            lf.take();
         }
 
         // 先关闭 SFTP 会话

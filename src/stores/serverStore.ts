@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { ServerConfig, TerminalTab, ConnectResult, SftpEntry } from "../types";
+import { listen } from "@tauri-apps/api/event";
+import type { ServerConfig, TerminalTab, SplitDirection, SplitPane, ConnectResult, SftpEntry, Snippet } from "../types";
 
 /** 终端设置 */
 export interface TerminalSettings {
@@ -9,23 +10,32 @@ export interface TerminalSettings {
   theme: string;
   scrollback: number;
   cursor_blink: boolean;
+  log_directory: string | null;
+  keepalive_interval: number | null;
+  auto_reconnect: boolean;
 }
 
 /** 持久化的完整配置 */
 export interface PersistConfig {
   servers: ServerConfig[];
   settings: TerminalSettings;
+  snippets: Snippet[];
 }
 
 interface ServerStore {
   servers: ServerConfig[];
   tabs: TerminalTab[];
   activeTabId: string | null;
+  activePaneId: string | null;
   sftpEntries: SftpEntry[];
   sftpPath: string;
   sftpVisible: boolean;
+  snippets: Snippet[];
+  snippetsVisible: boolean;
   settings: TerminalSettings;
   loaded: boolean;
+  /** 正在重连的 serverId 集合 */
+  reconnectingServers: Set<string>;
 
   /** 从 ~/.z-terminal/config.json 加载 */
   loadConfig: () => Promise<void>;
@@ -33,6 +43,8 @@ interface ServerStore {
   persistServers: () => Promise<void>;
   /** 持久化设置 */
   persistSettings: () => Promise<void>;
+  /** 持久化快捷命令片段 */
+  persistSnippets: () => Promise<void>;
   /** 导出配置到文件 */
   exportConfig: (path: string) => Promise<string>;
   /** 导入配置 */
@@ -48,7 +60,22 @@ interface ServerStore {
   setActiveTab: (serverId: string) => void;
   listSftp: (serverId: string, path: string) => Promise<void>;
   toggleSftp: (visible?: boolean) => void;
+  toggleSnippets: (visible?: boolean) => void;
+  addSnippet: (snippet: Omit<Snippet, "id">) => void;
+  updateSnippet: (id: string, snippet: Partial<Snippet>) => void;
+  removeSnippet: (id: string) => void;
+  executeSnippet: (serverId: string, command: string) => void;
   updateSettings: (settings: Partial<TerminalSettings>) => void;
+  /** 分屏: 在当前活动Tab中添加新面板 */
+  splitTab: (tabServerId: string, direction: SplitDirection, targetServerId?: string) => Promise<void>;
+  /** 关闭分屏面板 */
+  closePane: (tabServerId: string, paneId: string) => Promise<void>;
+  /** 设置活动面板 */
+  setActivePane: (tabServerId: string, paneId: string) => void;
+  /** 自动重连 */
+  reconnectServer: (serverId: string) => Promise<void>;
+  /** 初始化 pty-closed 事件监听 */
+  initPtyClosedListener: () => void;
 }
 
 function genId(): string {
@@ -61,17 +88,24 @@ const defaultSettings: TerminalSettings = {
   theme: "dark",
   scrollback: 10000,
   cursor_blink: true,
+  log_directory: null,
+  keepalive_interval: 60,
+  auto_reconnect: true,
 };
 
 export const useServerStore = create<ServerStore>((set, get) => ({
   servers: [],
   tabs: [],
   activeTabId: null,
+  activePaneId: null,
   sftpEntries: [],
   sftpPath: "/",
   sftpVisible: false,
+  snippets: [],
+  snippetsVisible: false,
   settings: defaultSettings,
   loaded: false,
+  reconnectingServers: new Set(),
 
   loadConfig: async () => {
     try {
@@ -79,11 +113,14 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       set({
         servers: config.servers || [],
         settings: config.settings || defaultSettings,
+        snippets: config.snippets || [],
         loaded: true,
       });
     } catch {
       set({ loaded: true });
     }
+    // Initialize pty-closed listener for auto-reconnect
+    get().initPtyClosedListener();
   },
 
   persistServers: async () => {
@@ -102,6 +139,14 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     }
   },
 
+  persistSnippets: async () => {
+    try {
+      await invoke("save_snippets", { snippets: get().snippets });
+    } catch (e) {
+      console.error("持久化快捷命令失败:", e);
+    }
+  },
+
   exportConfig: async (path) => {
     return await invoke<string>("export_config", { path });
   },
@@ -111,6 +156,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     set({
       servers: config.servers || [],
       settings: config.settings || defaultSettings,
+      snippets: config.snippets || [],
     });
   },
 
@@ -142,20 +188,30 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   connectServer: async (server) => {
     const existing = get().tabs.find((t) => t.serverId === server.id);
     if (existing && existing.state === "connected") {
-      set({ activeTabId: server.id });
+      set({ activeTabId: server.id, activePaneId: existing.panes[0]?.id || null });
       return;
     }
 
+    const paneId = genId();
     set((state) => {
+      const newPane: SplitPane = { id: paneId, serverId: server.id, state: "connecting" };
       const tabs = existing
         ? state.tabs.map((t) =>
-            t.serverId === server.id ? { ...t, state: "connecting" as const, error: undefined } : t
+            t.serverId === server.id
+              ? {
+                  ...t,
+                  state: "connecting" as const,
+                  error: undefined,
+                  panes: [{ ...newPane, id: t.panes[0]?.id || paneId }],
+                }
+              : t
           )
-        : [...state.tabs, { serverId: server.id, state: "connecting" as const }];
-      return { tabs, activeTabId: server.id };
+        : [...state.tabs, { serverId: server.id, state: "connecting" as const, panes: [newPane] }];
+      return { tabs, activeTabId: server.id, activePaneId: paneId };
     });
 
     try {
+      const settings = get().settings;
       const result = await invoke<ConnectResult>("ssh_connect", {
         params: {
           host: server.host,
@@ -164,6 +220,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
           authType: server.authType,
           password: server.password,
           privateKey: server.privateKey,
+          keepaliveInterval: settings.keepalive_interval,
         },
       });
 
@@ -171,7 +228,14 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         set((state) => ({
           tabs: state.tabs.map((t) =>
             t.serverId === server.id
-              ? { ...t, state: "connected", sessionId: result.session_id }
+              ? {
+                  ...t,
+                  state: "connected",
+                  sessionId: result.session_id,
+                  panes: t.panes.map((p, i) =>
+                    i === 0 ? { ...p, state: "connected" as const, sessionId: result.session_id } : p
+                  ),
+                }
               : t
           ),
         }));
@@ -179,7 +243,14 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         set((state) => ({
           tabs: state.tabs.map((t) =>
             t.serverId === server.id
-              ? { ...t, state: "error", error: result.error || "连接失败" }
+              ? {
+                  ...t,
+                  state: "error",
+                  error: result.error || "连接失败",
+                  panes: t.panes.map((p, i) =>
+                    i === 0 ? { ...p, state: "error" as const, error: result.error || "连接失败" } : p
+                  ),
+                }
               : t
           ),
         }));
@@ -187,7 +258,16 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     } catch (e: any) {
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.serverId === server.id ? { ...t, state: "error", error: String(e) } : t
+          t.serverId === server.id
+            ? {
+                ...t,
+                state: "error",
+                error: String(e),
+                panes: t.panes.map((p, i) =>
+                  i === 0 ? { ...p, state: "error" as const, error: String(e) } : p
+                ),
+              }
+            : t
         ),
       }));
     }
@@ -195,23 +275,32 @@ export const useServerStore = create<ServerStore>((set, get) => ({
 
   disconnectServer: async (serverId) => {
     const tab = get().tabs.find((t) => t.serverId === serverId);
-    if (tab?.sessionId) {
-      try {
-        await invoke("ssh_disconnect", { sessionId: tab.sessionId });
-      } catch {}
+    if (tab) {
+      // Disconnect all pane sessions
+      for (const pane of tab.panes) {
+        if (pane.sessionId) {
+          try {
+            await invoke("ssh_disconnect", { sessionId: pane.sessionId });
+          } catch {}
+        }
+      }
     }
     set((state) => ({
       tabs: state.tabs.filter((t) => t.serverId !== serverId),
       activeTabId: state.activeTabId === serverId ? null : state.activeTabId,
+      activePaneId:
+        state.activeTabId === serverId ? null : state.activePaneId,
     }));
   },
 
   executeCommand: async (serverId, command) => {
     const tab = get().tabs.find((t) => t.serverId === serverId);
-    if (!tab?.sessionId) throw new Error("会话未连接");
+    const activePane = tab?.panes.find((p) => p.id === get().activePaneId);
+    const sessionId = activePane?.sessionId || tab?.sessionId;
+    if (!sessionId) throw new Error("会话未连接");
     const result = await invoke<{ success: boolean; output: string; error?: string }>(
       "ssh_execute",
-      { sessionId: tab.sessionId, command }
+      { sessionId, command }
     );
     if (!result.success) throw new Error(result.error || "命令执行失败");
     return result.output;
@@ -224,15 +313,21 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   },
 
   setActiveTab: (serverId) => {
-    set({ activeTabId: serverId });
+    const tab = get().tabs.find((t) => t.serverId === serverId);
+    set({
+      activeTabId: serverId,
+      activePaneId: tab?.panes[0]?.id || null,
+    });
   },
 
   listSftp: async (serverId, path) => {
     const tab = get().tabs.find((t) => t.serverId === serverId);
-    if (!tab?.sessionId) throw new Error("会话未连接");
+    const activePane = tab?.panes.find((p) => p.id === get().activePaneId);
+    const sessionId = activePane?.sessionId || tab?.sessionId;
+    if (!sessionId) throw new Error("会话未连接");
     const result = await invoke<{ success: boolean; entries: SftpEntry[]; error?: string }>(
       "sftp_list",
-      { sessionId: tab.sessionId, path }
+      { sessionId, path }
     );
     if (result.success) {
       set({ sftpEntries: result.entries, sftpPath: path });
@@ -245,10 +340,328 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     set((state) => ({ sftpVisible: visible ?? !state.sftpVisible }));
   },
 
+  toggleSnippets: (visible) => {
+    set((state) => ({ snippetsVisible: visible ?? !state.snippetsVisible }));
+  },
+
+  addSnippet: (snippet) => {
+    const newSnippet: Snippet = { ...snippet, id: genId() };
+    set((state) => ({ snippets: [...state.snippets, newSnippet] }));
+    get().persistSnippets();
+  },
+
+  updateSnippet: (id, updates) => {
+    set((state) => ({
+      snippets: state.snippets.map((s) => (s.id === id ? { ...s, ...updates } : s)),
+    }));
+    get().persistSnippets();
+  },
+
+  removeSnippet: (id) => {
+    set((state) => ({
+      snippets: state.snippets.filter((s) => s.id !== id),
+    }));
+    get().persistSnippets();
+  },
+
+  executeSnippet: (serverId, command) => {
+    const tab = get().tabs.find((t) => t.serverId === serverId);
+    const activePane = tab?.panes.find((p) => p.id === get().activePaneId);
+    const sessionId = activePane?.sessionId || tab?.sessionId;
+    if (!sessionId) return;
+    invoke("ssh_pty_write", { sessionId, data: command + "\n" }).catch((e) => {
+      console.error("执行快捷命令失败:", e);
+    });
+  },
+
   updateSettings: (updates) => {
     set((state) => ({
       settings: { ...state.settings, ...updates },
     }));
     get().persistSettings();
+  },
+
+  splitTab: async (tabServerId, direction, targetServerId) => {
+    const tab = get().tabs.find((t) => t.serverId === tabServerId);
+    if (!tab) return;
+
+    const serverId = targetServerId || tabServerId;
+    const server = get().servers.find((s) => s.id === serverId);
+    if (!server) return;
+
+    const newPaneId = genId();
+    const newPane: SplitPane = { id: newPaneId, serverId, state: "connecting" };
+
+    // Update tab with new pane and direction
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.serverId === tabServerId
+          ? {
+              ...t,
+              panes: [...t.panes, newPane],
+              splitDirection: t.panes.length === 1 ? direction : t.splitDirection || direction,
+            }
+          : t
+      ),
+      activePaneId: newPaneId,
+    }));
+
+    // Connect the new pane
+    try {
+      const settings = get().settings;
+      const result = await invoke<ConnectResult>("ssh_connect", {
+        params: {
+          host: server.host,
+          port: server.port,
+          username: server.username,
+          authType: server.authType,
+          password: server.password,
+          privateKey: server.privateKey,
+          keepaliveInterval: settings.keepalive_interval,
+        },
+      });
+
+      if (result.success && result.session_id) {
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.serverId === tabServerId
+              ? {
+                  ...t,
+                  panes: t.panes.map((p) =>
+                    p.id === newPaneId
+                      ? { ...p, state: "connected" as const, sessionId: result.session_id }
+                      : p
+                  ),
+                }
+              : t
+          ),
+        }));
+      } else {
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.serverId === tabServerId
+              ? {
+                  ...t,
+                  panes: t.panes.map((p) =>
+                    p.id === newPaneId
+                      ? { ...p, state: "error" as const, error: result.error || "连接失败" }
+                      : p
+                  ),
+                }
+              : t
+          ),
+        }));
+      }
+    } catch (e: any) {
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.serverId === tabServerId
+            ? {
+                ...t,
+                panes: t.panes.map((p) =>
+                  p.id === newPaneId
+                    ? { ...p, state: "error" as const, error: String(e) }
+                    : p
+                ),
+              }
+            : t
+        ),
+      }));
+    }
+  },
+
+  closePane: async (tabServerId, paneId) => {
+    const tab = get().tabs.find((t) => t.serverId === tabServerId);
+    if (!tab) return;
+
+    // Disconnect the pane's session
+    const pane = tab.panes.find((p) => p.id === paneId);
+    if (pane?.sessionId) {
+      try {
+        await invoke("ssh_disconnect", { sessionId: pane.sessionId });
+      } catch {}
+    }
+
+    const remainingPanes = tab.panes.filter((p) => p.id !== paneId);
+
+    if (remainingPanes.length === 0) {
+      // No panes left, close the entire tab
+      get().closeTab(tabServerId);
+      return;
+    }
+
+    const primaryPane = remainingPanes[0];
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.serverId === tabServerId
+          ? {
+              ...t,
+              panes: remainingPanes,
+              splitDirection: remainingPanes.length <= 1 ? undefined : t.splitDirection,
+              // Sync tab-level fields with the new primary pane
+              serverId: primaryPane.serverId,
+              sessionId: primaryPane.sessionId,
+              state: primaryPane.state,
+              error: primaryPane.error,
+            }
+          : t
+      ),
+      activePaneId:
+        state.activePaneId === paneId ? remainingPanes[0].id : state.activePaneId,
+    }));
+  },
+
+  setActivePane: (tabServerId, paneId) => {
+    const tab = get().tabs.find((t) => t.serverId === tabServerId);
+    if (!tab) return;
+    const pane = tab.panes.find((p) => p.id === paneId);
+    if (pane) {
+      set({ activePaneId: paneId });
+    }
+  },
+
+  reconnectServer: async (serverId) => {
+    const server = get().servers.find((s) => s.id === serverId);
+    if (!server) return;
+
+    const { reconnectingServers } = get();
+    if (reconnectingServers.has(serverId)) return;
+
+    set({ reconnectingServers: new Set([...reconnectingServers, serverId]) });
+
+    // Mark tab as reconnecting
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.serverId === serverId
+          ? {
+              ...t,
+              state: "connecting" as const,
+              error: undefined,
+              panes: t.panes.map((p) => ({
+                ...p,
+                state: "connecting" as const,
+                error: undefined,
+                sessionId: undefined,
+              })),
+            }
+          : t
+      ),
+    }));
+
+    // Wait 3 seconds before reconnecting
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    try {
+      const settings = get().settings;
+      const result = await invoke<ConnectResult>("ssh_connect", {
+        params: {
+          host: server.host,
+          port: server.port,
+          username: server.username,
+          authType: server.authType,
+          password: server.password,
+          privateKey: server.privateKey,
+          keepaliveInterval: settings.keepalive_interval,
+        },
+      });
+
+      if (result.success && result.session_id) {
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.serverId === serverId
+              ? {
+                  ...t,
+                  state: "connected" as const,
+                  sessionId: result.session_id,
+                  panes: t.panes.map((p, i) =>
+                    i === 0
+                      ? { ...p, state: "connected" as const, sessionId: result.session_id }
+                      : p
+                  ),
+                }
+              : t
+          ),
+          reconnectingServers: new Set(
+            [...state.reconnectingServers].filter((id) => id !== serverId)
+          ),
+        }));
+      } else {
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.serverId === serverId
+              ? {
+                  ...t,
+                  state: "error" as const,
+                  error: result.error || "重连失败",
+                  panes: t.panes.map((p, i) =>
+                    i === 0
+                      ? { ...p, state: "error" as const, error: result.error || "重连失败" }
+                      : p
+                  ),
+                }
+              : t
+          ),
+          reconnectingServers: new Set(
+            [...state.reconnectingServers].filter((id) => id !== serverId)
+          ),
+        }));
+      }
+    } catch (e: any) {
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.serverId === serverId
+            ? {
+                ...t,
+                state: "error" as const,
+                error: String(e),
+                panes: t.panes.map((p, i) =>
+                  i === 0 ? { ...p, state: "error" as const, error: String(e) } : p
+                ),
+              }
+            : t
+        ),
+        reconnectingServers: new Set(
+          [...state.reconnectingServers].filter((id) => id !== serverId)
+        ),
+      }));
+    }
+  },
+
+  initPtyClosedListener: () => {
+    listen<{ session_id: string }>("pty-closed", (event) => {
+      const { session_id } = event.payload;
+      const { tabs, settings, reconnectingServers } = get();
+
+      // Find the tab/pane that has this session_id
+      for (const tab of tabs) {
+        for (const pane of tab.panes) {
+          if (pane.sessionId === session_id) {
+            // Mark pane as disconnected
+            set((state) => ({
+              tabs: state.tabs.map((t) =>
+                t.serverId === tab.serverId
+                  ? {
+                      ...t,
+                      state: "error" as const,
+                      error: "连接已断开",
+                      panes: t.panes.map((p) =>
+                        p.id === pane.id
+                          ? { ...p, state: "error" as const, error: "连接已断开", sessionId: undefined }
+                          : p
+                      ),
+                    }
+                  : t
+              ),
+            }));
+
+            // Auto-reconnect if enabled
+            if (settings.auto_reconnect && !reconnectingServers.has(tab.serverId)) {
+              get().reconnectServer(tab.serverId);
+            }
+            return;
+          }
+        }
+      }
+    });
   },
 }));

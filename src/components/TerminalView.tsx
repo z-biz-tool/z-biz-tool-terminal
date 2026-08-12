@@ -109,23 +109,30 @@ const THEMES: Record<string, {
 
 interface TerminalViewProps {
   serverId: string;
+  paneId?: string;
 }
 
-export default function TerminalView({ serverId }: TerminalViewProps) {
+export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
-  const { tabs, servers, connectServer, settings } = useServerStore();
+  const { tabs, servers, connectServer, settings, setActivePane } = useServerStore();
   const tab = tabs.find((t) => t.serverId === serverId);
   const server = servers.find((s) => s.id === serverId);
 
+  // Look up the pane if paneId is provided, otherwise use the tab's primary pane
+  const pane = paneId ? tab?.panes.find((p) => p.id === paneId) : tab?.panes[0];
+  const paneState = pane?.state;
+  const paneSessionId = pane?.sessionId;
+  const paneError = pane?.error;
+
   useEffect(() => {
-    if (tab?.state !== "connected") return;
+    if (paneState !== "connected") return;
     if (!terminalRef.current) return;
-    // Don't re-init if terminal already exists for this tab
+    // Don't re-init if terminal already exists for this pane
     if (termRef.current) return;
 
     const themePreset = THEMES[settings.theme] || THEMES.dark;
@@ -148,7 +155,7 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
     termRef.current = term;
     fitRef.current = fitAddon;
 
-    const sessionId = tab.sessionId!;
+    const sessionId = paneSessionId!;
     const { cols, rows } = term;
 
     // Start PTY
@@ -198,26 +205,35 @@ export default function TerminalView({ serverId }: TerminalViewProps) {
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [tab?.state, tab?.sessionId]);
+  }, [paneState, paneSessionId]);
 
   const handleRetry = () => {
     if (server) connectServer(server);
   };
 
+  const handleFocus = () => {
+    if (paneId && tab) {
+      setActivePane(tab.serverId, paneId);
+    }
+  };
+
   const themePreset = THEMES[settings.theme] || THEMES.dark;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: themePreset.background }}>
+    <div
+      style={{ display: "flex", flexDirection: "column", height: "100%", background: themePreset.background }}
+      onMouseDown={handleFocus}
+    >
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
         <div className="terminal-container" ref={terminalRef} style={{ height: "100%", background: themePreset.background }} />
-        {tab?.state === "connecting" && (
+        {paneState === "connecting" && (
           <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: themePreset.background }}>
             <LoadingState tip="正在连接..." minHeight={200} />
           </div>
         )}
-        {tab?.state === "error" && (
+        {paneState === "error" && (
           <div style={{ position: "absolute", inset: 0, overflow: "auto", background: themePreset.background }}>
-            <ErrorState message={tab.error} onRetry={handleRetry} />
+            <ErrorState message={paneError} onRetry={handleRetry} />
           </div>
         )}
       </div>

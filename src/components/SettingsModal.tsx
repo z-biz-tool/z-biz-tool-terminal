@@ -1,4 +1,4 @@
-import { Modal, Form, InputNumber, Select, Switch, Input, message } from "antd";
+import { Modal, Form, InputNumber, Select, Switch, Input, Divider, message } from "antd";
 import { useServerStore } from "../stores/serverStore";
 
 interface Props {
@@ -66,6 +66,35 @@ export default function SettingsModal({ open, onClose }: Props) {
               { value: "dracula", label: "Dracula" },
               { value: "solarized", label: "Solarized" },
             ]}
+          />
+        </Form.Item>
+
+        <Divider orientation="left" plain style={{ margin: "8px 0 16px" }}>
+          连接设置
+        </Divider>
+
+        <Form.Item label="Keep-Alive 间隔(秒)" extra="0 表示禁用，建议 60">
+          <InputNumber
+            min={0}
+            max={600}
+            step={10}
+            value={settings.keepalive_interval ?? 0}
+            onChange={(v) => updateSettings({ keepalive_interval: v === 0 ? null : v })}
+          />
+        </Form.Item>
+        <Form.Item label="自动重连" extra="会话意外断开时自动尝试重新连接">
+          <Switch
+            checked={settings.auto_reconnect}
+            onChange={(v) => updateSettings({ auto_reconnect: v })}
+          />
+        </Form.Item>
+        <Form.Item label="日志目录" extra="留空使用默认 ~/.z-terminal/logs">
+          <Input
+            value={settings.log_directory ?? ""}
+            onChange={(e) =>
+              updateSettings({ log_directory: e.target.value || null })
+            }
+            placeholder="~/.z-terminal/logs"
           />
         </Form.Item>
       </Form>

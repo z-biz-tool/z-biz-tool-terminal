@@ -26,6 +26,8 @@ pub struct ConnectParams {
     pub password: Option<String>,
     /// 私钥内容(PEM格式)
     pub private_key: Option<String>,
+    /// SSH keepalive 间隔(秒), None 表示禁用
+    pub keepalive_interval: Option<u64>,
 }
 
 /// SSH连接结果
@@ -62,6 +64,7 @@ pub async fn ssh_connect(params: ConnectParams) -> ConnectResult {
         params.auth_type.as_deref(),
         params.password.as_deref(),
         params.private_key.as_deref(),
+        params.keepalive_interval,
     )
     .await;
 
