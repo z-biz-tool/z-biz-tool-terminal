@@ -7,6 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useServerStore } from "../stores/serverStore";
 import { LoadingState, ErrorState } from "@/_shared";
 import TerminalSearch from "./TerminalSearch";
+import ZmodemOverlay, { isZmodemHandshake, type ZmodemState, type ZmodemTransferType } from "./ZmodemOverlay";
 
 const THEMES: Record<string, {
   background: string; foreground: string; cursor: string;
@@ -120,6 +121,15 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [zmodemState, setZmodemState] = useState<ZmodemState>({
+    active: false,
+    type: null,
+    filename: "",
+    progress: 0,
+    status: "detecting",
+  });
+  const zmodemBufferRef = useRef<string>("");
+  const zmodemActiveRef = useRef(false);
 
   const { tabs, servers, connectServer, settings, setActivePane } = useServerStore();
   const tab = tabs.find((t) => t.serverId === serverId);
@@ -193,7 +203,47 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
     const ptyOutputHandler = (event: any) => {
       const payload = event.payload;
       if (payload.session_id === sessionId) {
-        term.write(payload.data);
+        const data = payload.data as string;
+
+        // ZMODEM detection
+        if (isZmodemHandshake(data)) {
+          zmodemActiveRef.current = true;
+          zmodemBufferRef.current = data;
+
+          // Determine transfer type based on the command context
+          // rz = upload (remote wants to receive), sz = download (remote wants to send)
+          // Check the buffer for hints
+          const isUpload = data.includes("rz") || !data.includes("000000000");
+          const transferType: ZmodemTransferType = isUpload ? "upload" : "download";
+
+          setZmodemState({
+            active: true,
+            type: transferType,
+            filename: "",
+            progress: 0,
+            status: "detecting",
+          });
+
+          // Don't write ZMODEM handshake bytes to terminal
+          return;
+        }
+
+        // If ZMODEM is active, buffer the data instead of writing to terminal
+        if (zmodemActiveRef.current) {
+          zmodemBufferRef.current += data;
+          // Check for ZMODEM end marker
+          if (data.includes("OO") || data.includes("\x18\x18\x18\x18")) {
+            zmodemActiveRef.current = false;
+            setZmodemState((prev) => ({
+              ...prev,
+              active: false,
+              status: "completed",
+            }));
+          }
+          return;
+        }
+
+        term.write(data);
       }
     };
 
@@ -243,6 +293,37 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
     }
   };
 
+  // ZMODEM handlers
+  const handleZmodemCancel = useCallback(() => {
+    zmodemActiveRef.current = false;
+    zmodemBufferRef.current = "";
+    setZmodemState({
+      active: false,
+      type: null,
+      filename: "",
+      progress: 0,
+      status: "detecting",
+    });
+  }, []);
+
+  const handleZmodemComplete = useCallback(() => {
+    zmodemActiveRef.current = false;
+    zmodemBufferRef.current = "";
+    setZmodemState({
+      active: false,
+      type: null,
+      filename: "",
+      progress: 0,
+      status: "detecting",
+    });
+  }, []);
+
+  const handleZmodemWriteToPty = useCallback((data: string) => {
+    if (paneSessionId) {
+      invoke("ssh_pty_write", { sessionId: paneSessionId, data }).catch(() => {});
+    }
+  }, [paneSessionId]);
+
   // 全局 Cmd/Ctrl+F 拦截：唤起终端内搜索
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -281,6 +362,13 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
             <ErrorState message={paneError} onRetry={handleRetry} />
           </div>
         )}
+        <ZmodemOverlay
+          state={zmodemState}
+          sessionId={paneSessionId || ""}
+          onCancel={handleZmodemCancel}
+          onComplete={handleZmodemComplete}
+          onWriteToPty={handleZmodemWriteToPty}
+        />
       </div>
     </div>
   );

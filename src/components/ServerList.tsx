@@ -27,11 +27,13 @@ import {
   DesktopOutlined,
   StarOutlined,
   StarFilled,
+  CloudUploadOutlined,
 } from "@ant-design/icons";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { useServerStore } from "../stores/serverStore";
 import type { ServerConfig } from "../types";
 import { EmptyState } from "@/_shared";
+import ImportModal from "./ImportModal";
 
 export default function ServerList() {
   const {
@@ -47,6 +49,7 @@ export default function ServerList() {
   } = useServerStore();
 
   const [modalVisible, setModalVisible] = useState(false);
+  const [importModalVisible, setImportModalVisible] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [searchText, setSearchText] = useState("");
   const [form] = Form.useForm();
@@ -299,6 +302,12 @@ export default function ServerList() {
             menu={{
               items: [
                 {
+                  key: "import-servers",
+                  label: "导入服务器",
+                  icon: <CloudUploadOutlined />,
+                  onClick: () => setImportModalVisible(true),
+                },
+                {
                   key: "import",
                   label: "导入配置",
                   icon: <ImportOutlined />,
@@ -436,8 +445,23 @@ export default function ServerList() {
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={2} placeholder="可选" />
           </Form.Item>
+          <Form.Item name="proxyJump" label="跳板机" extra="通过该服务器跳转连接">
+            <Select
+              allowClear
+              placeholder="无 (直连)"
+              options={servers
+                .filter((s) => s.id !== editingId)
+                .map((s) => ({
+                  value: s.id,
+                  label: `${s.name} (${s.host}:${s.port})`,
+                }))}
+            />
+          </Form.Item>
         </Form>
       </Modal>
+
+      {/* 导入服务器 Modal */}
+      <ImportModal open={importModalVisible} onClose={() => setImportModalVisible(false)} />
     </div>
   );
 }

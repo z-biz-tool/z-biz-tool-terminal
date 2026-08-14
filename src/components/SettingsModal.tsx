@@ -1,4 +1,4 @@
-import { Modal, Form, InputNumber, Select, Switch, Input, Divider, message } from "antd";
+import { Modal, Form, InputNumber, Select, Switch, Input, Divider, Slider, message } from "antd";
 import { useServerStore } from "../stores/serverStore";
 
 interface Props {
@@ -56,6 +56,50 @@ export default function SettingsModal({ open, onClose }: Props) {
             onChange={(v) => updateSettings({ cursor_blink: v })}
           />
         </Form.Item>
+        <Form.Item label="光标样式">
+          <Select
+            value={settings.cursor_style}
+            onChange={(v) => updateSettings({ cursor_style: v })}
+            options={[
+              { value: "block", label: "方块 (Block)" },
+              { value: "underline", label: "下划线 (Underline)" },
+              { value: "bar", label: "竖线 (Bar)" },
+            ]}
+          />
+        </Form.Item>
+        <Form.Item label="字体连字 (Font Ligatures)">
+          <Switch
+            checked={settings.font_ligatures}
+            onChange={(v) => updateSettings({ font_ligatures: v })}
+          />
+        </Form.Item>
+        <Form.Item label="背景透明度" extra="0.5 为半透明，1.0 为不透明">
+          <Slider
+            min={0.5}
+            max={1.0}
+            step={0.05}
+            value={settings.opacity}
+            onChange={(v) => updateSettings({ opacity: v })}
+          />
+        </Form.Item>
+        <Form.Item label="终端响铃 (Bell)">
+          <Switch
+            checked={settings.bell}
+            onChange={(v) => updateSettings({ bell: v })}
+          />
+        </Form.Item>
+        <Form.Item label="选中即复制" extra="选中文字时自动复制到剪贴板">
+          <Switch
+            checked={settings.copy_on_select}
+            onChange={(v) => updateSettings({ copy_on_select: v })}
+          />
+        </Form.Item>
+        <Form.Item label="右键粘贴" extra="右键点击时粘贴剪贴板内容">
+          <Switch
+            checked={settings.right_click_paste}
+            onChange={(v) => updateSettings({ right_click_paste: v })}
+          />
+        </Form.Item>
         <Form.Item label="主题">
           <Select
             value={settings.theme}
@@ -65,6 +109,12 @@ export default function SettingsModal({ open, onClose }: Props) {
               { value: "light", label: "浅色 (Light)" },
               { value: "dracula", label: "Dracula" },
               { value: "solarized", label: "Solarized" },
+              { value: "tokyonight", label: "Tokyo Night" },
+              { value: "nord", label: "Nord" },
+              { value: "one_dark", label: "One Dark" },
+              { value: "monokai", label: "Monokai" },
+              { value: "ayu", label: "Ayu" },
+              { value: "gruvbox", label: "Gruvbox" },
             ]}
           />
         </Form.Item>
@@ -82,10 +132,24 @@ export default function SettingsModal({ open, onClose }: Props) {
             onChange={(v) => updateSettings({ keepalive_interval: v === 0 ? null : v })}
           />
         </Form.Item>
+        <Form.Item label="连接超时(秒)" extra="SSH连接超时时间">
+          <InputNumber
+            min={5}
+            max={300}
+            value={settings.connection_timeout}
+            onChange={(v) => v && updateSettings({ connection_timeout: v })}
+          />
+        </Form.Item>
         <Form.Item label="自动重连" extra="会话意外断开时自动尝试重新连接">
           <Switch
             checked={settings.auto_reconnect}
             onChange={(v) => updateSettings({ auto_reconnect: v })}
+          />
+        </Form.Item>
+        <Form.Item label="SSH Agent 转发" extra="允许通过远程服务器上的 SSH Agent 进行认证">
+          <Switch
+            checked={settings.ssh_agent_forward}
+            onChange={(v) => updateSettings({ ssh_agent_forward: v })}
           />
         </Form.Item>
         <Form.Item label="日志目录" extra="留空使用默认 ~/.z-terminal/logs">

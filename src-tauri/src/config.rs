@@ -17,6 +17,8 @@ pub struct ServerConfig {
     pub remark: Option<String>,
     #[serde(default)]
     pub pinned: Option<bool>,
+    #[serde(default)]
+    pub proxy_jump: Option<String>,
 }
 
 /// 快捷命令片段配置
@@ -46,6 +48,18 @@ pub struct TerminalSettings {
     pub theme: String,
     pub scrollback: u32,
     pub cursor_blink: bool,
+    #[serde(default = "default_cursor_style")]
+    pub cursor_style: String,
+    #[serde(default)]
+    pub font_ligatures: bool,
+    #[serde(default = "default_opacity")]
+    pub opacity: f64,
+    #[serde(default)]
+    pub bell: bool,
+    #[serde(default = "default_copy_on_select")]
+    pub copy_on_select: bool,
+    #[serde(default = "default_right_click_paste")]
+    pub right_click_paste: bool,
     /// 日志目录, None 表示默认 ~/.z-terminal/logs
     #[serde(default)]
     pub log_directory: Option<String>,
@@ -55,10 +69,36 @@ pub struct TerminalSettings {
     /// 自动重连
     #[serde(default = "default_auto_reconnect")]
     pub auto_reconnect: bool,
+    /// 连接超时(秒)
+    #[serde(default = "default_connection_timeout")]
+    pub connection_timeout: u32,
+    /// SSH Agent Forwarding
+    #[serde(default)]
+    pub ssh_agent_forward: bool,
 }
 
 fn default_auto_reconnect() -> bool {
     true
+}
+
+fn default_cursor_style() -> String {
+    "block".into()
+}
+
+fn default_opacity() -> f64 {
+    1.0
+}
+
+fn default_copy_on_select() -> bool {
+    true
+}
+
+fn default_right_click_paste() -> bool {
+    true
+}
+
+fn default_connection_timeout() -> u32 {
+    30
 }
 
 impl Default for TerminalSettings {
@@ -69,9 +109,17 @@ impl Default for TerminalSettings {
             theme: "dark".into(),
             scrollback: 10000,
             cursor_blink: true,
+            cursor_style: "block".into(),
+            font_ligatures: false,
+            opacity: 1.0,
+            bell: false,
+            copy_on_select: true,
+            right_click_paste: true,
             log_directory: None,
             keepalive_interval: Some(60),
             auto_reconnect: true,
+            connection_timeout: 30,
+            ssh_agent_forward: false,
         }
     }
 }

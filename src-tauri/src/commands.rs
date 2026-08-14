@@ -30,6 +30,27 @@ pub struct ConnectParams {
     pub keepalive_interval: Option<u64>,
 }
 
+/// 通过跳板机连接SSH的参数
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectViaJumpParams {
+    /// 跳板机参数
+    pub jump_host: String,
+    pub jump_port: u16,
+    pub jump_username: String,
+    pub jump_auth_type: Option<String>,
+    pub jump_password: Option<String>,
+    pub jump_private_key: Option<String>,
+    /// 目标主机参数
+    pub target_host: String,
+    pub target_port: u16,
+    pub target_username: String,
+    pub target_auth_type: Option<String>,
+    pub target_password: Option<String>,
+    pub target_private_key: Option<String>,
+    /// SSH keepalive 间隔(秒), None 表示禁用
+    pub keepalive_interval: Option<u64>,
+}
+
 /// SSH连接结果
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectResult {
@@ -64,6 +85,45 @@ pub async fn ssh_connect(params: ConnectParams) -> ConnectResult {
         params.auth_type.as_deref(),
         params.password.as_deref(),
         params.private_key.as_deref(),
+        params.keepalive_interval,
+    )
+    .await;
+
+    match session {
+        Ok(sess) => {
+            let session_id = sess.id.clone();
+            let mut map = sessions().await.lock().await;
+            map.insert(session_id.clone(), sess);
+            ConnectResult {
+                success: true,
+                session_id: Some(session_id),
+                error: None,
+            }
+        }
+        Err(e) => ConnectResult {
+            success: false,
+            session_id: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+/// 通过跳板机连接SSH服务器
+#[tauri::command]
+pub async fn ssh_connect_via_jump(params: ConnectViaJumpParams) -> ConnectResult {
+    let session = SshSession::connect_via_jump(
+        &params.jump_host,
+        params.jump_port,
+        &params.jump_username,
+        params.jump_auth_type.as_deref(),
+        params.jump_password.as_deref(),
+        params.jump_private_key.as_deref(),
+        &params.target_host,
+        params.target_port,
+        &params.target_username,
+        params.target_auth_type.as_deref(),
+        params.target_password.as_deref(),
+        params.target_private_key.as_deref(),
         params.keepalive_interval,
     )
     .await;
@@ -150,14 +210,14 @@ pub async fn ssh_generate_keypair(
     passphrase: Option<String>,
 ) -> KeyGenResult {
     use russh::keys;
-
-    let pass = passphrase.as_deref().unwrap_or("");
+    use russh::keys::key::SignatureHash;
+    use russh::keys::PublicKeyBase64;
 
     let key_pair = match key_type.as_str() {
-        "ed25519" => keys::KeyPair::generate_ed25519(),
+        "ed25519" => keys::key::KeyPair::generate_ed25519(),
         "rsa" => {
-            let bits = key_size.unwrap_or(4096);
-            keys::KeyPair::generate_rsa(bits, russh::keys::SignatureHash::SHA2_256)
+            let bits = key_size.unwrap_or(4096) as usize;
+            keys::key::KeyPair::generate_rsa(bits, SignatureHash::SHA2_256)
         }
         _ => {
             return KeyGenResult {
@@ -169,18 +229,46 @@ pub async fn ssh_generate_keypair(
         }
     };
 
-    // Encode public key in OpenSSH format
-    let public_key = keys::serialize_public_key(&key_pair);
-
-    // Encode private key in PEM format (OpenSSH compatible)
-    let private_key = match keys::encode_openssh(&key_pair, pass) {
-        Ok(pem) => pem,
-        Err(e) => {
+    let key_pair = match key_pair {
+        Some(kp) => kp,
+        None => {
             return KeyGenResult {
                 success: false,
                 public_key: None,
                 private_key: None,
-                error: Some(format!("编码私钥失败: {}", e)),
+                error: Some("密钥生成失败".into()),
+            }
+        }
+    };
+
+    // Encode public key in OpenSSH format: "ssh-ed25519 AAAA..." or "ssh-rsa AAAA..."
+    let public_key = format!("{} {}", key_pair.name(), key_pair.public_key_base64());
+
+    // Encode private key in PKCS8 PEM format
+    let private_key = if let Some(ref pass) = passphrase {
+        let mut buf = Vec::new();
+        match keys::encode_pkcs8_pem_encrypted(&key_pair, pass.as_bytes(), 100, &mut buf) {
+            Ok(()) => String::from_utf8_lossy(&buf).to_string(),
+            Err(e) => {
+                return KeyGenResult {
+                    success: false,
+                    public_key: None,
+                    private_key: None,
+                    error: Some(format!("编码私钥失败: {}", e)),
+                }
+            }
+        }
+    } else {
+        let mut buf = Vec::new();
+        match keys::encode_pkcs8_pem(&key_pair, &mut buf) {
+            Ok(()) => String::from_utf8_lossy(&buf).to_string(),
+            Err(e) => {
+                return KeyGenResult {
+                    success: false,
+                    public_key: None,
+                    private_key: None,
+                    error: Some(format!("编码私钥失败: {}", e)),
+                }
             }
         }
     };
@@ -580,4 +668,90 @@ pub async fn ssh_pty_resize(session_id: String, cols: u16, rows: u16) -> ExecRes
             error: Some(format!("会话 {} 不存在", session_id)),
         }
     }
+}
+
+/// 读取 ~/.ssh/config 文件内容
+#[tauri::command]
+pub async fn read_ssh_config() -> Result<String, String> {
+    let home = dirs::home_dir().ok_or("无法获取HOME目录")?;
+    let path = home.join(".ssh").join("config");
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("读取失败: {}", e))
+}
+
+/// 获取系统临时目录
+#[tauri::command]
+pub async fn get_temp_dir() -> Result<String, String> {
+    Ok(std::env::temp_dir().to_string_lossy().to_string())
+}
+
+/// 使用系统默认应用打开文件
+#[tauri::command]
+pub async fn open_file_with_default_app(path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("打开失败: {}", e))?;
+    #[cfg(target_os = "linux")]
+    std::process::Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("打开失败: {}", e))?;
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("cmd")
+        .args(["/c", "start", &path])
+        .spawn()
+        .map_err(|e| format!("打开失败: {}", e))?;
+    Ok(())
+}
+
+/// 获取文件的修改时间（Unix时间戳毫秒）
+#[tauri::command]
+pub async fn get_file_modified_time(path: String) -> Result<serde_json::Value, String> {
+    let path = std::path::PathBuf::from(&path);
+    let metadata = std::fs::metadata(&path).map_err(|e| format!("获取文件信息失败: {}", e))?;
+    let modified = metadata.modified().map_err(|e| format!("获取修改时间失败: {}", e))?;
+    let duration = modified.duration_since(std::time::UNIX_EPOCH).map_err(|e| format!("时间转换失败: {}", e))?;
+    Ok(serde_json::json!({ "modified": duration.as_millis() as u64 }))
+}
+
+/// 读取文件内容为字符串
+#[tauri::command]
+pub async fn read_file_content(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {}", e))
+}
+
+/// 读取文件内容为Base64编码字符串
+#[tauri::command]
+pub async fn read_file_as_base64(path: String) -> Result<String, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败: {}", e))?;
+    Ok(base64_encode(&bytes))
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    let chunks = data.chunks(3);
+    for chunk in chunks {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
 }

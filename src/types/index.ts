@@ -22,6 +22,8 @@ export interface ServerConfig {
   remark?: string;
   /** 是否收藏 */
   pinned?: boolean;
+  /** 跳板机ID */
+  proxyJump?: string;
 }
 
 /** 连接状态 */

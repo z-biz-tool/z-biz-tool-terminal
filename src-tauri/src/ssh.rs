@@ -42,6 +42,8 @@ pub struct SshSession {
     forwards: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// 远程转发通道接收器
     forward_rx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ForwardedChannel>>>>,
+    /// 跳板机会话句柄(ProxyJump时保持跳板机连接存活)
+    _jump_handle: Option<Arc<Mutex<Option<client::Handle<ClientHandler>>>>>,
 }
 
 /// 自定义SSH客户端Handler
@@ -150,6 +152,121 @@ impl SshSession {
             log_file: Arc::new(Mutex::new(None)),
             forwards: Arc::new(Mutex::new(HashMap::new())),
             forward_rx: Arc::new(Mutex::new(Some(forward_rx))),
+            _jump_handle: None,
+        })
+    }
+
+    /// 通过跳板机连接SSH服务器 (ProxyJump)
+    pub async fn connect_via_jump(
+        jump_host: &str,
+        jump_port: u16,
+        jump_username: &str,
+        jump_auth_type: Option<&str>,
+        jump_password: Option<&str>,
+        jump_private_key: Option<&str>,
+        target_host: &str,
+        target_port: u16,
+        target_username: &str,
+        target_auth_type: Option<&str>,
+        target_password: Option<&str>,
+        target_private_key: Option<&str>,
+        keepalive_interval: Option<u64>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // 1. 先连接到跳板机
+        let mut jump_config = client::Config::default();
+        if let Some(interval) = keepalive_interval {
+            jump_config.keepalive_interval = Some(std::time::Duration::from_secs(interval));
+        }
+        let jump_config = Arc::new(jump_config);
+
+        let (jump_forward_tx, _jump_forward_rx) = tokio::sync::mpsc::unbounded_channel();
+        let jump_handler = ClientHandler {
+            forward_tx: Some(jump_forward_tx),
+        };
+        let mut jump_session = client::connect(jump_config, (jump_host, jump_port), jump_handler).await?;
+
+        // 认证跳板机
+        let jump_auth_ok = match jump_auth_type.unwrap_or("password") {
+            "key" => {
+                let key_content = jump_private_key.ok_or("未提供跳板机私钥内容")?;
+                let key_pair = keys::decode_secret_key(key_content, None)
+                    .map_err(|e| format!("解析跳板机私钥失败: {}", e))?;
+                jump_session
+                    .authenticate_publickey(jump_username, Arc::new(key_pair))
+                    .await?
+            }
+            _ => {
+                let pwd = jump_password.unwrap_or("");
+                jump_session.authenticate_password(jump_username, pwd).await?
+            }
+        };
+
+        if !jump_auth_ok {
+            return Err("跳板机认证失败: 用户名或密码错误".into());
+        }
+
+        // 2. 通过跳板机打开 direct-tcpip 通道到目标主机
+        let channel = jump_session
+            .channel_open_direct_tcpip(target_host, target_port as u32, "127.0.0.1", 0)
+            .await
+            .map_err(|e| format!("通过跳板机打开通道失败: {}", e))?;
+
+        // 3. 将通道转为流，在上面建立新的SSH会话
+        let channel_stream = channel.into_stream();
+
+        let mut target_config = client::Config::default();
+        if let Some(interval) = keepalive_interval {
+            target_config.keepalive_interval = Some(std::time::Duration::from_secs(interval));
+        }
+        let target_config = Arc::new(target_config);
+
+        let (target_forward_tx, target_forward_rx) = tokio::sync::mpsc::unbounded_channel();
+        let target_handler = ClientHandler {
+            forward_tx: Some(target_forward_tx),
+        };
+        let mut target_session = client::connect_stream(target_config, channel_stream, target_handler).await?;
+
+        // 4. 认证目标主机
+        let target_auth_ok = match target_auth_type.unwrap_or("password") {
+            "key" => {
+                let key_content = target_private_key.ok_or("未提供目标主机私钥内容")?;
+                let key_pair = keys::decode_secret_key(key_content, None)
+                    .map_err(|e| format!("解析目标主机私钥失败: {}", e))?;
+                target_session
+                    .authenticate_publickey(target_username, Arc::new(key_pair))
+                    .await?
+            }
+            _ => {
+                let pwd = target_password.unwrap_or("");
+                target_session.authenticate_password(target_username, pwd).await?
+            }
+        };
+
+        if !target_auth_ok {
+            return Err("目标主机认证失败: 用户名或密码错误".into());
+        }
+
+        // 5. 尝试初始化 SFTP 子系统
+        let sftp = Self::open_sftp(&mut target_session).await.ok();
+
+        // 注意: jump_session 需要保持存活，不能断开
+        // 我们将 jump_session 的 handle 也存储在 SshSession 中
+        // 但为了简化，我们让 jump_session 随 target session 一起存活
+        // 将 jump_session 的 handle 包装到一个不会被 drop 的地方
+        let jump_handle = Arc::new(Mutex::new(Some(jump_session)));
+
+        Ok(SshSession {
+            id: Uuid::new_v4().to_string(),
+            host: format!("{}->{}", jump_host, target_host),
+            username: target_username.to_string(),
+            handle: Arc::new(Mutex::new(Some(target_session))),
+            sftp: Arc::new(Mutex::new(sftp)),
+            pty_writer: Arc::new(Mutex::new(None)),
+            pty_resize_tx: Arc::new(Mutex::new(None)),
+            log_file: Arc::new(Mutex::new(None)),
+            forwards: Arc::new(Mutex::new(HashMap::new())),
+            forward_rx: Arc::new(Mutex::new(Some(target_forward_rx))),
+            _jump_handle: Some(jump_handle),
         })
     }
 

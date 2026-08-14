@@ -10,9 +10,17 @@ export interface TerminalSettings {
   theme: string;
   scrollback: number;
   cursor_blink: boolean;
+  cursor_style: string; // "block" | "underline" | "bar"
+  font_ligatures: boolean;
+  opacity: number; // 0.5-1.0
+  bell: boolean;
+  copy_on_select: boolean;
+  right_click_paste: boolean;
   log_directory: string | null;
   keepalive_interval: number | null;
   auto_reconnect: boolean;
+  connection_timeout: number;
+  ssh_agent_forward: boolean;
 }
 
 /** 持久化的完整配置 */
@@ -82,15 +90,65 @@ function genId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+/** 连接服务器的辅助函数，支持 ProxyJump */
+async function connectToServer(
+  server: ServerConfig,
+  settings: TerminalSettings,
+  allServers: ServerConfig[]
+): Promise<ConnectResult> {
+  if (server.proxyJump) {
+    const jumpServer = allServers.find((s) => s.id === server.proxyJump);
+    if (!jumpServer) {
+      return { success: false, error: `跳板机 ${server.proxyJump} 不存在` };
+    }
+    return await invoke<ConnectResult>("ssh_connect_via_jump", {
+      params: {
+        jumpHost: jumpServer.host,
+        jumpPort: jumpServer.port,
+        jumpUsername: jumpServer.username,
+        jumpAuthType: jumpServer.authType,
+        jumpPassword: jumpServer.password,
+        jumpPrivateKey: jumpServer.privateKey,
+        targetHost: server.host,
+        targetPort: server.port,
+        targetUsername: server.username,
+        targetAuthType: server.authType,
+        targetPassword: server.password,
+        targetPrivateKey: server.privateKey,
+        keepaliveInterval: settings.keepalive_interval,
+      },
+    });
+  }
+  return await invoke<ConnectResult>("ssh_connect", {
+    params: {
+      host: server.host,
+      port: server.port,
+      username: server.username,
+      authType: server.authType,
+      password: server.password,
+      privateKey: server.privateKey,
+      keepaliveInterval: settings.keepalive_interval,
+    },
+  });
+}
+
 const defaultSettings: TerminalSettings = {
   font_size: 14,
   font_family: "SF Mono, Monaco, Menlo, Courier New, monospace",
   theme: "dark",
   scrollback: 10000,
   cursor_blink: true,
+  cursor_style: "block",
+  font_ligatures: false,
+  opacity: 1.0,
+  bell: false,
+  copy_on_select: true,
+  right_click_paste: true,
   log_directory: null,
   keepalive_interval: 60,
   auto_reconnect: true,
+  connection_timeout: 30,
+  ssh_agent_forward: false,
 };
 
 export const useServerStore = create<ServerStore>((set, get) => ({
@@ -212,17 +270,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
 
     try {
       const settings = get().settings;
-      const result = await invoke<ConnectResult>("ssh_connect", {
-        params: {
-          host: server.host,
-          port: server.port,
-          username: server.username,
-          authType: server.authType,
-          password: server.password,
-          privateKey: server.privateKey,
-          keepaliveInterval: settings.keepalive_interval,
-        },
-      });
+      const result = await connectToServer(server, settings, get().servers);
 
       if (result.success && result.session_id) {
         set((state) => ({
@@ -409,17 +457,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     // Connect the new pane
     try {
       const settings = get().settings;
-      const result = await invoke<ConnectResult>("ssh_connect", {
-        params: {
-          host: server.host,
-          port: server.port,
-          username: server.username,
-          authType: server.authType,
-          password: server.password,
-          privateKey: server.privateKey,
-          keepaliveInterval: settings.keepalive_interval,
-        },
-      });
+      const result = await connectToServer(server, settings, get().servers);
 
       if (result.success && result.session_id) {
         set((state) => ({
@@ -553,17 +591,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
 
     try {
       const settings = get().settings;
-      const result = await invoke<ConnectResult>("ssh_connect", {
-        params: {
-          host: server.host,
-          port: server.port,
-          username: server.username,
-          authType: server.authType,
-          password: server.password,
-          privateKey: server.privateKey,
-          keepaliveInterval: settings.keepalive_interval,
-        },
-      });
+      const result = await connectToServer(server, settings, get().servers);
 
       if (result.success && result.session_id) {
         set((state) => ({

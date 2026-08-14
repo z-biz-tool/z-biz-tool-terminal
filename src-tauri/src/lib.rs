@@ -11,6 +11,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             commands::ssh_connect,
+            commands::ssh_connect_via_jump,
             commands::ssh_disconnect,
             commands::ssh_execute,
             commands::ssh_start_pty,
@@ -25,6 +26,12 @@ pub fn run() {
             commands::sftp_remove,
             commands::sftp_rename,
             commands::ssh_generate_keypair,
+            commands::read_ssh_config,
+            commands::get_temp_dir,
+            commands::open_file_with_default_app,
+            commands::get_file_modified_time,
+            commands::read_file_content,
+            commands::read_file_as_base64,
             config::get_config,
             config::save_servers,
             config::save_settings,
