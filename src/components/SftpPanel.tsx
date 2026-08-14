@@ -23,7 +23,7 @@ import {
   EditOutlined,
   DeleteOutlined,
   CopyOutlined,
-  OpenOutlined,
+  ExportOutlined,
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { useServerStore } from "../stores/serverStore";
@@ -390,7 +390,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
     return [
       {
         key: "open",
-        icon: <OpenOutlined />,
+        icon: <ExportOutlined />,
         label: entry.is_dir ? "打开" : "下载",
         onClick: () => handleOpen(entry),
       },

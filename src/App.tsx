@@ -1,12 +1,14 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Tabs, theme, Button, Space, Tag, Tooltip } from "antd";
-import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined } from "@ant-design/icons";
+import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined, SearchOutlined } from "@ant-design/icons";
 import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
 import SnippetsPanel from "./components/SnippetsPanel";
 import SettingsModal from "./components/SettingsModal";
 import ShortcutsModal from "./components/ShortcutsModal";
+import SessionLogModal from "./components/SessionLogModal";
+import CommandPalette from "./components/CommandPalette";
 import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 
@@ -34,6 +36,7 @@ function AppInner() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   // SFTP 面板高度(px)
   const [sftpHeight, setSftpHeight] = useState(260);
@@ -133,6 +136,20 @@ function AppInner() {
       if (modKey && e.key === "/") {
         e.preventDefault();
         setShortcutsOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + K - 命令面板
+      if (modKey && (e.key === "k" || e.key === "K") && !e.shiftKey) {
+        e.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + Shift + P - 命令面板（VSCode 风格）
+      if (modKey && e.shiftKey && (e.key === "P" || e.key === "p")) {
+        e.preventDefault();
+        setPaletteOpen(true);
         return;
       }
     };
@@ -290,6 +307,14 @@ function AppInner() {
 
   const headerExtra = (
     <Space>
+      <Tooltip title="命令面板 (Ctrl+K / Cmd+K)">
+        <Button
+          size="small"
+          type="text"
+          icon={<SearchOutlined />}
+          onClick={() => setPaletteOpen(true)}
+        />
+      </Tooltip>
       {activeTab && (
         <Tag color={stateColor}>
           {stateText}
@@ -581,6 +606,13 @@ function AppInner() {
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       <SessionLogModal open={logsOpen} onClose={() => setLogsOpen(false)} />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenShortcuts={() => setShortcutsOpen(true)}
+        onOpenLogs={() => setLogsOpen(true)}
+      />
     </AppShell>
   );
 }

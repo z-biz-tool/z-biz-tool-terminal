@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useServerStore } from "../stores/serverStore";
 import { LoadingState, ErrorState } from "@/_shared";
+import TerminalSearch from "./TerminalSearch";
 
 const THEMES: Record<string, {
   background: string; foreground: string; cursor: string;
@@ -118,6 +119,7 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
   const fitRef = useRef<FitAddon | null>(null);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
 
   const { tabs, servers, connectServer, settings, setActivePane } = useServerStore();
   const tab = tabs.find((t) => t.serverId === serverId);
@@ -128,6 +130,30 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
   const paneState = pane?.state;
   const paneSessionId = pane?.sessionId;
   const paneError = pane?.error;
+
+  // 暴露给搜索组件的 buffer 访问函数
+  const bufferApi = {
+    getLine: (line: number): string | null => {
+      const term = termRef.current;
+      if (!term) return null;
+      const buffer = term.buffer.active;
+      const targetLine = buffer.length - 1 - line;
+      if (targetLine < 0 || targetLine >= buffer.length) return null;
+      const lineObj = buffer.getLine(targetLine);
+      return lineObj ? lineObj.translateToString(true) : "";
+    },
+    getLineCount: (): number => {
+      const term = termRef.current;
+      if (!term) return 0;
+      return term.buffer.active.length;
+    },
+    scrollToLine: (line: number) => {
+      const term = termRef.current;
+      if (!term) return;
+      const targetLine = term.buffer.active.length - 1 - line;
+      term.scrollToLine(targetLine);
+    },
+  };
 
   useEffect(() => {
     if (paneState !== "connected") return;
@@ -217,6 +243,18 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
     }
   };
 
+  // 全局 Cmd/Ctrl+F 拦截：唤起终端内搜索
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const themePreset = THEMES[settings.theme] || THEMES.dark;
 
   return (
@@ -226,6 +264,13 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
     >
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
         <div className="terminal-container" ref={terminalRef} style={{ height: "100%", background: themePreset.background }} />
+        <TerminalSearch
+          open={searchOpen}
+          onClose={() => setSearchOpen(false)}
+          getLine={bufferApi.getLine}
+          getLineCount={bufferApi.getLineCount}
+          scrollToLine={bufferApi.scrollToLine}
+        />
         {paneState === "connecting" && (
           <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: themePreset.background }}>
             <LoadingState tip="正在连接..." minHeight={200} />

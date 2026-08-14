@@ -69,7 +69,7 @@ export default function SettingsModal({ open, onClose }: Props) {
           />
         </Form.Item>
 
-        <Divider orientation="left" plain style={{ margin: "8px 0 16px" }}>
+        <Divider plain style={{ margin: "8px 0 16px" }}>
           连接设置
         </Divider>
 

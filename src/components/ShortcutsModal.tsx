@@ -11,6 +11,9 @@ interface ShortcutsModalProps {
 const shortcuts = [
   { keys: [mod, "T"], description: "新建连接" },
   { keys: [mod, "W"], description: "关闭当前标签" },
+  { keys: [mod, "K"], description: "打开命令面板" },
+  { keys: [mod, "Shift", "P"], description: "命令面板（VSCode 风格）" },
+  { keys: [mod, "F"], description: "在终端中搜索" },
   { keys: [mod, "Shift", "E"], description: "切换 SFTP 面板" },
   { keys: [mod, "Shift", "S"], description: "切换命令片段面板" },
   { keys: [mod, "Shift", "H"], description: "水平分屏" },
@@ -18,6 +21,7 @@ const shortcuts = [
   { keys: [mod, "1-9"], description: "切换到第 N 个标签" },
   { keys: [mod, "Tab"], description: "切换到下一个标签" },
   { keys: [mod, "/"], description: "显示快捷键" },
+  { keys: ["Esc"], description: "关闭对话框/搜索" },
 ];
 
 export default function ShortcutsModal({ open, onClose }: ShortcutsModalProps) {
