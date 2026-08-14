@@ -3,9 +3,11 @@ use russh::keys;
 use russh::*;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -36,10 +38,26 @@ pub struct SshSession {
     pty_resize_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<(u32, u32)>>>>,
     /// 会话日志文件
     log_file: Arc<Mutex<Option<tokio::fs::File>>>,
+    /// 活跃的端口转发任务: forward_id -> JoinHandle
+    forwards: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// 远程转发通道接收器
+    forward_rx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ForwardedChannel>>>>,
 }
 
 /// 自定义SSH客户端Handler
-struct ClientHandler;
+struct ClientHandler {
+    /// 远程转发通道: 当服务器推送 forwarded-tcpip 通道时, 通过此发送器传递
+    forward_tx: Option<tokio::sync::mpsc::UnboundedSender<ForwardedChannel>>,
+}
+
+/// 转发的通道信息
+pub struct ForwardedChannel {
+    pub channel: Channel<client::Msg>,
+    pub connected_address: String,
+    pub connected_port: u32,
+    pub originator_address: String,
+    pub originator_port: u32,
+}
 
 #[async_trait::async_trait]
 impl client::Handler for ClientHandler {
@@ -51,6 +69,27 @@ impl client::Handler for ClientHandler {
     ) -> Result<bool, Self::Error> {
         // 自动接受服务器公钥(生产环境应验证known_hosts)
         Ok(true)
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        originator_address: &str,
+        originator_port: u32,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(tx) = &self.forward_tx {
+            let _ = tx.send(ForwardedChannel {
+                channel,
+                connected_address: connected_address.to_string(),
+                connected_port,
+                originator_address: originator_address.to_string(),
+                originator_port,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -70,7 +109,12 @@ impl SshSession {
             config.keepalive_interval = Some(std::time::Duration::from_secs(interval));
         }
         let config = Arc::new(config);
-        let mut session = client::connect(config, (host, port), ClientHandler).await?;
+
+        let (forward_tx, forward_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handler = ClientHandler {
+            forward_tx: Some(forward_tx),
+        };
+        let mut session = client::connect(config, (host, port), handler).await?;
 
         // 认证
         let auth_ok = match auth_type.unwrap_or("password") {
@@ -104,6 +148,8 @@ impl SshSession {
             pty_writer: Arc::new(Mutex::new(None)),
             pty_resize_tx: Arc::new(Mutex::new(None)),
             log_file: Arc::new(Mutex::new(None)),
+            forwards: Arc::new(Mutex::new(HashMap::new())),
+            forward_rx: Arc::new(Mutex::new(Some(forward_rx))),
         })
     }
 
@@ -489,6 +535,240 @@ impl SshSession {
         }
     }
 
+    /// 启动本地端口转发 (-L)
+    pub async fn start_local_forward(
+        &self,
+        local_addr: &str,
+        local_port: u16,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+        let forward_id = Uuid::new_v4().to_string();
+        let listener = TcpListener::bind((local_addr, local_port)).await?;
+        let actual_port = listener.local_addr()?.port();
+
+        let handle = self.handle.clone();
+        let fid = forward_id.clone();
+        let fwd_map = self.forwards.clone();
+        let la = local_addr.to_string();
+        let rh = remote_host.to_string();
+
+        let join = tokio::spawn(async move {
+            loop {
+                let (mut tcp_stream, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+
+                let h = handle.lock().await;
+                let session = match h.as_ref() {
+                    Some(s) => s,
+                    None => break,
+                };
+
+                let channel = match session
+                    .channel_open_direct_tcpip(
+                        &rh,
+                        remote_port as u32,
+                        &la,
+                        actual_port as u32,
+                    )
+                    .await
+                {
+                    Ok(ch) => ch,
+                    Err(_) => continue,
+                };
+                drop(h); // release lock before I/O
+
+                let channel_stream = channel.into_stream();
+                tokio::spawn(async move {
+                    let (mut tcp_read, mut tcp_write) = tcp_stream.split();
+                    let (mut ssh_read, mut ssh_write) =
+                        tokio::io::split(channel_stream);
+                    let c2s = tokio::io::copy(&mut tcp_read, &mut ssh_write);
+                    let s2c = tokio::io::copy(&mut ssh_read, &mut tcp_write);
+                    let _ = tokio::try_join!(c2s, s2c);
+                });
+            }
+            // 清理
+            fwd_map.lock().await.remove(&fid);
+        });
+
+        self.forwards.lock().await.insert(forward_id.clone(), join);
+        Ok((forward_id, actual_port))
+    }
+
+    /// 启动远程端口转发 (-R)
+    pub async fn start_remote_forward(
+        &self,
+        remote_addr: &str,
+        remote_port: u16,
+        local_host: &str,
+        local_port: u16,
+    ) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+        let forward_id = Uuid::new_v4().to_string();
+
+        // 请求服务器监听远程端口
+        let actual_port = {
+            let mut h = self.handle.lock().await;
+            let session = h
+                .as_mut()
+                .ok_or("会话已关闭")?;
+            session
+                .tcpip_forward(remote_addr, remote_port as u32)
+                .await? as u16
+        };
+
+        let fid = forward_id.clone();
+        let fwd_map = self.forwards.clone();
+        let forward_rx = self.forward_rx.clone();
+        let lh = local_host.to_string();
+        let lp = local_port;
+
+        let join = tokio::spawn(async move {
+            // 获取 forward_rx
+            let mut rx_guard = forward_rx.lock().await;
+            let rx = match rx_guard.as_mut() {
+                Some(r) => r,
+                None => return,
+            };
+
+            loop {
+                // 等待服务器推送 forwarded-tcpip 通道
+                let fwd_ch = match rx.recv().await {
+                    Some(ch) => ch,
+                    None => break,
+                };
+
+                // 连接本地端口
+                let mut tcp_stream = match TcpStream::connect((&*lh, lp)).await {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
+                let channel_stream = fwd_ch.channel.into_stream();
+                tokio::spawn(async move {
+                    let (mut tcp_read, mut tcp_write) = tcp_stream.split();
+                    let (mut ssh_read, mut ssh_write) =
+                        tokio::io::split(channel_stream);
+                    let c2s = tokio::io::copy(&mut tcp_read, &mut ssh_write);
+                    let s2c = tokio::io::copy(&mut ssh_read, &mut tcp_write);
+                    let _ = tokio::try_join!(c2s, s2c);
+                });
+            }
+            // 清理
+            fwd_map.lock().await.remove(&fid);
+        });
+
+        self.forwards.lock().await.insert(forward_id.clone(), join);
+        Ok((forward_id, actual_port))
+    }
+
+    /// 启动动态端口转发 / SOCKS5 代理 (-D)
+    pub async fn start_dynamic_forward(
+        &self,
+        local_addr: &str,
+        local_port: u16,
+    ) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+        let forward_id = Uuid::new_v4().to_string();
+        let listener = TcpListener::bind((local_addr, local_port)).await?;
+        let actual_port = listener.local_addr()?.port();
+
+        let handle = self.handle.clone();
+        let fid = forward_id.clone();
+        let fwd_map = self.forwards.clone();
+        let la = local_addr.to_string();
+
+        let join = tokio::spawn(async move {
+            loop {
+                let (mut tcp_stream, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+
+                // SOCKS5 握手
+                if let Err(_) = socks5_handshake(&mut tcp_stream).await {
+                    let _ = tcp_stream.shutdown().await;
+                    continue;
+                }
+
+                // 读取 SOCKS5 CONNECT 请求
+                let (target_host, target_port) = match socks5_read_connect(&mut tcp_stream).await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let _ = tcp_stream.shutdown().await;
+                        continue;
+                    }
+                };
+
+                // 打开 SSH direct-tcpip 通道
+                let channel = {
+                    let h = handle.lock().await;
+                    let session = match h.as_ref() {
+                        Some(s) => s,
+                        None => break,
+                    };
+                    match session
+                        .channel_open_direct_tcpip(
+                            &target_host,
+                            target_port as u32,
+                            &la,
+                            actual_port as u32,
+                        )
+                        .await
+                    {
+                        Ok(ch) => ch,
+                        Err(_) => {
+                            // 回复 SOCKS5 连接失败
+                            let _ = tcp_stream
+                                .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                                .await;
+                            continue;
+                        }
+                    }
+                };
+
+                // 回复 SOCKS5 连接成功
+                if tcp_stream
+                    .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+
+                let channel_stream = channel.into_stream();
+                tokio::spawn(async move {
+                    let (mut tcp_read, mut tcp_write) = tcp_stream.split();
+                    let (mut ssh_read, mut ssh_write) =
+                        tokio::io::split(channel_stream);
+                    let c2s = tokio::io::copy(&mut tcp_read, &mut ssh_write);
+                    let s2c = tokio::io::copy(&mut ssh_read, &mut tcp_write);
+                    let _ = tokio::try_join!(c2s, s2c);
+                });
+            }
+            // 清理
+            fwd_map.lock().await.remove(&fid);
+        });
+
+        self.forwards.lock().await.insert(forward_id.clone(), join);
+        Ok((forward_id, actual_port))
+    }
+
+    /// 停止端口转发
+    pub async fn stop_forward(
+        &self,
+        forward_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut map = self.forwards.lock().await;
+        if let Some(handle) = map.remove(forward_id) {
+            handle.abort();
+            Ok(())
+        } else {
+            Err(format!("转发任务 {} 不存在", forward_id).into())
+        }
+    }
+
     /// 断开连接
     pub async fn disconnect(&self) {
         // 关闭PTY通道
@@ -549,4 +829,66 @@ fn format_permission(mode: u32) -> String {
         result.push(if mode & mask != 0 { *ch } else { '-' });
     }
     result
+}
+
+/// SOCKS5 握手: 读取客户端问候, 回复选择无认证方式
+async fn socks5_handshake(
+    stream: &mut TcpStream,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut buf = [0u8; 2];
+    stream.read_exact(&mut buf).await?;
+    if buf[0] != 0x05 {
+        return Err("不是SOCKS5协议".into());
+    }
+    let n_methods = buf[1] as usize;
+    let mut methods = vec![0u8; n_methods];
+    stream.read_exact(&mut methods).await?;
+    // 回复: 版本5, 无需认证(0x00)
+    stream.write_all(&[0x05, 0x00]).await?;
+    Ok(())
+}
+
+/// 读取 SOCKS5 CONNECT 请求, 返回目标 (host, port)
+async fn socks5_read_connect(
+    stream: &mut TcpStream,
+) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).await?;
+    if header[0] != 0x05 {
+        return Err("SOCKS5版本错误".into());
+    }
+    if header[1] != 0x01 {
+        return Err("仅支持CONNECT命令".into());
+    }
+
+    let host = match header[3] {
+        // IPv4
+        0x01 => {
+            let mut addr = [0u8; 4];
+            stream.read_exact(&mut addr).await?;
+            std::net::Ipv4Addr::from(addr).to_string()
+        }
+        // 域名
+        0x03 => {
+            let mut len_buf = [0u8; 1];
+            stream.read_exact(&mut len_buf).await?;
+            let len = len_buf[0] as usize;
+            let mut domain = vec![0u8; len];
+            stream.read_exact(&mut domain).await?;
+            String::from_utf8(domain)?
+        }
+        // IPv6
+        0x04 => {
+            let mut addr = [0u8; 16];
+            stream.read_exact(&mut addr).await?;
+            std::net::Ipv6Addr::from(addr).to_string()
+        }
+        _ => return Err("不支持的地址类型".into()),
+    };
+
+    let mut port_buf = [0u8; 2];
+    stream.read_exact(&mut port_buf).await?;
+    let port = u16::from_be_bytes(port_buf);
+
+    Ok((host, port))
 }

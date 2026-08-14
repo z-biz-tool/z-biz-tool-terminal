@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Tabs, theme, Button, Space, Tag, Tooltip } from "antd";
-import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined, SearchOutlined } from "@ant-design/icons";
+import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
@@ -9,6 +9,10 @@ import SettingsModal from "./components/SettingsModal";
 import ShortcutsModal from "./components/ShortcutsModal";
 import SessionLogModal from "./components/SessionLogModal";
 import CommandPalette from "./components/CommandPalette";
+import QuickConnectBar from "./components/QuickConnectBar";
+import RecentConnections from "./components/RecentConnections";
+import PortForwardModal from "./components/PortForwardModal";
+import KeyGenModal from "./components/KeyGenModal";
 import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 
@@ -37,6 +41,10 @@ function AppInner() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [quickConnectOpen, setQuickConnectOpen] = useState(false);
+  const [recentOpen, setRecentOpen] = useState(false);
+  const [portForwardOpen, setPortForwardOpen] = useState(false);
+  const [keyGenOpen, setKeyGenOpen] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   // SFTP 面板高度(px)
   const [sftpHeight, setSftpHeight] = useState(260);
@@ -143,6 +151,13 @@ function AppInner() {
       if (modKey && (e.key === "k" || e.key === "K") && !e.shiftKey) {
         e.preventDefault();
         setPaletteOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + L - 快速连接栏
+      if (modKey && (e.key === "l" || e.key === "L") && !e.shiftKey) {
+        e.preventDefault();
+        setQuickConnectOpen((prev) => !prev);
         return;
       }
 
@@ -315,6 +330,15 @@ function AppInner() {
           onClick={() => setPaletteOpen(true)}
         />
       </Tooltip>
+      <Tooltip title="最近连接">
+        <RecentConnections open={recentOpen} onClose={() => setRecentOpen(false)}>
+          <Button
+            size="small"
+            type="text"
+            icon={<HistoryOutlined />}
+          />
+        </RecentConnections>
+      </Tooltip>
       {activeTab && (
         <Tag color={stateColor}>
           {stateText}
@@ -361,10 +385,30 @@ function AppInner() {
           />
         </Tooltip>
       )}
+      {activeTab?.state === "connected" && (
+        <Tooltip title="端口转发">
+          <Button
+            size="small"
+            type="text"
+            icon={<ApiOutlined />}
+            onClick={() => setPortForwardOpen(true)}
+          >
+            端口转发
+          </Button>
+        </Tooltip>
+      )}
+      <Tooltip title="SSH密钥">
+        <Button
+          size="small"
+          type="text"
+          icon={<KeyOutlined />}
+          onClick={() => setKeyGenOpen(true)}
+        />
+      </Tooltip>
       <Button
         size="small"
         type="text"
-        icon={<KeyOutlined />}
+        icon={<ThunderboltOutlined />}
         onClick={() => setShortcutsOpen(true)}
         title="快捷键"
       />
@@ -424,6 +468,8 @@ function AppInner() {
             />
           </div>
         )}
+
+        <QuickConnectBar open={quickConnectOpen} onClose={() => setQuickConnectOpen(false)} />
 
         {tabs.length === 0 ? (
           <EmptyState
@@ -606,6 +652,8 @@ function AppInner() {
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       <SessionLogModal open={logsOpen} onClose={() => setLogsOpen(false)} />
+      <PortForwardModal open={portForwardOpen} onClose={() => setPortForwardOpen(false)} />
+      <KeyGenModal open={keyGenOpen} onClose={() => setKeyGenOpen(false)} />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}

@@ -133,6 +133,204 @@ pub async fn ssh_execute(session_id: String, command: String) -> ExecResult {
     }
 }
 
+/// SSH密钥生成结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct KeyGenResult {
+    pub success: bool,
+    pub public_key: Option<String>,
+    pub private_key: Option<String>,
+    pub error: Option<String>,
+}
+
+/// 生成SSH密钥对
+#[tauri::command]
+pub async fn ssh_generate_keypair(
+    key_type: String,
+    key_size: Option<u32>,
+    passphrase: Option<String>,
+) -> KeyGenResult {
+    use russh::keys;
+
+    let pass = passphrase.as_deref().unwrap_or("");
+
+    let key_pair = match key_type.as_str() {
+        "ed25519" => keys::KeyPair::generate_ed25519(),
+        "rsa" => {
+            let bits = key_size.unwrap_or(4096);
+            keys::KeyPair::generate_rsa(bits, russh::keys::SignatureHash::SHA2_256)
+        }
+        _ => {
+            return KeyGenResult {
+                success: false,
+                public_key: None,
+                private_key: None,
+                error: Some(format!("不支持的密钥类型: {}", key_type)),
+            }
+        }
+    };
+
+    // Encode public key in OpenSSH format
+    let public_key = keys::serialize_public_key(&key_pair);
+
+    // Encode private key in PEM format (OpenSSH compatible)
+    let private_key = match keys::encode_openssh(&key_pair, pass) {
+        Ok(pem) => pem,
+        Err(e) => {
+            return KeyGenResult {
+                success: false,
+                public_key: None,
+                private_key: None,
+                error: Some(format!("编码私钥失败: {}", e)),
+            }
+        }
+    };
+
+    KeyGenResult {
+        success: true,
+        public_key: Some(public_key),
+        private_key: Some(private_key),
+        error: None,
+    }
+}
+
+/// 端口转发参数
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortForwardParams {
+    pub session_id: String,
+    /// 转发类型: "local" | "remote" | "dynamic"
+    pub forward_type: String,
+    pub local_addr: Option<String>,
+    pub local_port: Option<u16>,
+    pub remote_host: Option<String>,
+    pub remote_port: Option<u16>,
+}
+
+/// 端口转发结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PortForwardResult {
+    pub success: bool,
+    pub forward_id: Option<String>,
+    pub actual_port: Option<u16>,
+    pub error: Option<String>,
+}
+
+/// 启动端口转发
+#[tauri::command]
+pub async fn ssh_start_forward(params: PortForwardParams) -> PortForwardResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&params.session_id) {
+        let result = match params.forward_type.as_str() {
+            "local" => {
+                let local_addr = params.local_addr.as_deref().unwrap_or("127.0.0.1");
+                let local_port = params.local_port.unwrap_or(0);
+                let remote_host = params.remote_host.as_deref().unwrap_or("127.0.0.1");
+                let remote_port = params.remote_port.unwrap_or(0);
+                match sess
+                    .start_local_forward(local_addr, local_port, remote_host, remote_port)
+                    .await
+                {
+                    Ok((forward_id, actual_port)) => PortForwardResult {
+                        success: true,
+                        forward_id: Some(forward_id),
+                        actual_port: Some(actual_port),
+                        error: None,
+                    },
+                    Err(e) => PortForwardResult {
+                        success: false,
+                        forward_id: None,
+                        actual_port: None,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
+            "remote" => {
+                let remote_addr = params.local_addr.as_deref().unwrap_or("127.0.0.1");
+                let remote_port = params.remote_port.unwrap_or(0);
+                let local_host = params.remote_host.as_deref().unwrap_or("127.0.0.1");
+                let local_port = params.local_port.unwrap_or(0);
+                match sess
+                    .start_remote_forward(remote_addr, remote_port, local_host, local_port)
+                    .await
+                {
+                    Ok((forward_id, actual_port)) => PortForwardResult {
+                        success: true,
+                        forward_id: Some(forward_id),
+                        actual_port: Some(actual_port),
+                        error: None,
+                    },
+                    Err(e) => PortForwardResult {
+                        success: false,
+                        forward_id: None,
+                        actual_port: None,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
+            "dynamic" => {
+                let local_addr = params.local_addr.as_deref().unwrap_or("127.0.0.1");
+                let local_port = params.local_port.unwrap_or(0);
+                match sess.start_dynamic_forward(local_addr, local_port).await {
+                    Ok((forward_id, actual_port)) => PortForwardResult {
+                        success: true,
+                        forward_id: Some(forward_id),
+                        actual_port: Some(actual_port),
+                        error: None,
+                    },
+                    Err(e) => PortForwardResult {
+                        success: false,
+                        forward_id: None,
+                        actual_port: None,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
+            _ => PortForwardResult {
+                success: false,
+                forward_id: None,
+                actual_port: None,
+                error: Some(format!("不支持的转发类型: {}", params.forward_type)),
+            },
+        };
+        result
+    } else {
+        PortForwardResult {
+            success: false,
+            forward_id: None,
+            actual_port: None,
+            error: Some(format!("会话 {} 不存在", params.session_id)),
+        }
+    }
+}
+
+/// 停止端口转发
+#[tauri::command]
+pub async fn ssh_stop_forward(session_id: String, forward_id: String) -> PortForwardResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        match sess.stop_forward(&forward_id).await {
+            Ok(()) => PortForwardResult {
+                success: true,
+                forward_id: Some(forward_id),
+                actual_port: None,
+                error: None,
+            },
+            Err(e) => PortForwardResult {
+                success: false,
+                forward_id: None,
+                actual_port: None,
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        PortForwardResult {
+            success: false,
+            forward_id: None,
+            actual_port: None,
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}
+
 /// SFTP文件列表
 #[tauri::command]
 pub async fn sftp_list(session_id: String, path: String) -> SftpListResult {
