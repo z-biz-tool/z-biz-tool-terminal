@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -178,10 +178,13 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
       fontFamily: settings.font_family,
       scrollback: settings.scrollback,
       cursorBlink: settings.cursor_blink,
+      cursorStyle: (settings.cursor_style as any) || "block",
+      fontLigatures: settings.font_ligatures || false,
+      bellStyle: settings.bell ? "sound" : "none",
       theme: themePreset,
       convertEol: true,
       allowProposedApi: true,
-    });
+    } as any);
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
@@ -283,6 +286,40 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
     };
   }, [paneState, paneSessionId]);
 
+  // 响应式更新终端选项：设置变更时立即生效，无需重连
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+
+    const opts = term.options as any;
+    opts.cursorStyle = settings.cursor_style || "block";
+    opts.fontLigatures = settings.font_ligatures;
+    opts.bellStyle = settings.bell ? "sound" : "none";
+    term.options.fontSize = settings.font_size;
+    term.options.fontFamily = settings.font_family;
+    term.options.scrollback = settings.scrollback;
+    term.options.cursorBlink = settings.cursor_blink;
+  }, [settings]);
+
+  // copy_on_select: 选中时自动复制到剪贴板
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+
+    const disposable = term.onSelectionChange(() => {
+      if (settings.copy_on_select && term.hasSelection()) {
+        const selection = term.getSelection();
+        if (selection) {
+          navigator.clipboard.writeText(selection).catch(() => {});
+        }
+      }
+    });
+
+    return () => {
+      disposable.dispose();
+    };
+  }, [settings.copy_on_select]);
+
   const handleRetry = () => {
     if (server) connectServer(server);
   };
@@ -344,7 +381,21 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
       onMouseDown={handleFocus}
     >
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-        <div className="terminal-container" ref={terminalRef} style={{ height: "100%", background: themePreset.background }} />
+        <div
+          className="terminal-container"
+          ref={terminalRef}
+          style={{ height: "100%", background: themePreset.background, opacity: settings.opacity }}
+          onContextMenu={(e) => {
+            if (!settings.right_click_paste) return;
+            e.preventDefault();
+            if (!paneSessionId) return;
+            navigator.clipboard.readText().then((text) => {
+              if (text) {
+                invoke("ssh_pty_write", { sessionId: paneSessionId, data: text }).catch(() => {});
+              }
+            }).catch(() => {});
+          }}
+        />
         <TerminalSearch
           open={searchOpen}
           onClose={() => setSearchOpen(false)}

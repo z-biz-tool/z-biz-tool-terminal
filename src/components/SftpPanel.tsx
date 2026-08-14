@@ -228,6 +228,120 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
     [sftpPath, selectedEntry, getSessionId]
   );
 
+  // ---- Remote file editing ----
+
+  const handleEditFile = useCallback(
+    async (entry: SftpEntry) => {
+      const sessionId = getSessionId();
+      if (!sessionId) {
+        message.error("会话未连接");
+        return;
+      }
+
+      if (entry.is_dir) {
+        message.warning("不能编辑目录");
+        return;
+      }
+
+      const remotePath = sftpPath.endsWith("/")
+        ? sftpPath + entry.name
+        : sftpPath + "/" + entry.name;
+
+      // Check if already editing this file
+      const alreadyEditing = editingFiles.find((f) => f.remotePath === remotePath);
+      if (alreadyEditing) {
+        message.info(`${entry.name} 已在编辑中`);
+        return;
+      }
+
+      try {
+        // Get temp directory
+        const tempDir = await invoke<string>("get_temp_dir");
+        // Create a unique subdirectory for this edit session
+        const editDir = `${tempDir}/z-terminal-edit`;
+        // Ensure the directory exists (use a simple approach)
+        const localPath = `${editDir}/${entry.name}`;
+
+        // Download the file to temp location
+        setTransfer({ type: "download", filename: entry.name, progress: 0 });
+        await invoke("sftp_download", {
+          sessionId,
+          remotePath,
+          localPath,
+        });
+        setTransfer(null);
+
+        // Get initial modification time
+        const statResult = await invoke<{ modified: number }>("get_file_modified_time", { path: localPath }).catch(() => ({ modified: Date.now() }));
+        const lastModified = statResult.modified || Date.now();
+
+        // Open with default application
+        await invoke("open_file_with_default_app", { path: localPath });
+        message.success(`已打开 ${entry.name} 进行编辑`);
+
+        // Set up polling watcher for file changes
+        const watcherId = window.setInterval(async () => {
+          try {
+            const currentStat = await invoke<{ modified: number }>("get_file_modified_time", { path: localPath }).catch(() => ({ modified: 0 }));
+            if (currentStat.modified && currentStat.modified > lastModified) {
+              // File has been modified, re-upload
+              const currentSessionId = getSessionId();
+              if (!currentSessionId) {
+                clearInterval(watcherId);
+                return;
+              }
+              try {
+                await invoke("sftp_upload", {
+                  sessionId: currentSessionId,
+                  localPath,
+                  remotePath,
+                });
+                message.success(`${entry.name} 已自动上传更新`);
+                // Update the lastModified in editingFiles
+                setEditingFiles((prev) =>
+                  prev.map((f) =>
+                    f.remotePath === remotePath ? { ...f, lastModified: currentStat.modified } : f
+                  )
+                );
+                // Refresh the file list
+                navigateTo(sftpPath);
+              } catch (e) {
+                message.error(`自动上传失败: ${String(e)}`);
+              }
+            }
+          } catch {
+            // File might have been deleted or is temporarily unavailable during save
+          }
+        }, 3000) as unknown as number;
+
+        // Add to editing files list
+        const editEntry: EditingFile = {
+          remotePath,
+          localPath,
+          filename: entry.name,
+          lastModified,
+          watcher: watcherId,
+        };
+        setEditingFiles((prev) => [...prev, editEntry]);
+      } catch (e) {
+        setTransfer(null);
+        message.error(`编辑文件失败: ${String(e)}`);
+      }
+    },
+    [sftpPath, getSessionId, editingFiles, navigateTo]
+  );
+
+  // Cleanup watchers on unmount
+  useEffect(() => {
+    return () => {
+      editingFiles.forEach((f) => {
+        if (f.watcher !== null) {
+          clearInterval(f.watcher);
+        }
+      });
+    };
+  }, []);
+
   const handleOpen = useCallback(
     (entry: SftpEntry) => {
       if (entry.is_dir) {
@@ -380,120 +494,6 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
     },
     [sftpPath]
   );
-
-  // ---- Remote file editing ----
-
-  const handleEditFile = useCallback(
-    async (entry: SftpEntry) => {
-      const sessionId = getSessionId();
-      if (!sessionId) {
-        message.error("会话未连接");
-        return;
-      }
-
-      if (entry.is_dir) {
-        message.warning("不能编辑目录");
-        return;
-      }
-
-      const remotePath = sftpPath.endsWith("/")
-        ? sftpPath + entry.name
-        : sftpPath + "/" + entry.name;
-
-      // Check if already editing this file
-      const alreadyEditing = editingFiles.find((f) => f.remotePath === remotePath);
-      if (alreadyEditing) {
-        message.info(`${entry.name} 已在编辑中`);
-        return;
-      }
-
-      try {
-        // Get temp directory
-        const tempDir = await invoke<string>("get_temp_dir");
-        // Create a unique subdirectory for this edit session
-        const editDir = `${tempDir}/z-terminal-edit`;
-        // Ensure the directory exists (use a simple approach)
-        const localPath = `${editDir}/${entry.name}`;
-
-        // Download the file to temp location
-        setTransfer({ type: "download", filename: entry.name, progress: 0 });
-        await invoke("sftp_download", {
-          sessionId,
-          remotePath,
-          localPath,
-        });
-        setTransfer(null);
-
-        // Get initial modification time
-        const statResult = await invoke<{ modified: number }>("get_file_modified_time", { path: localPath }).catch(() => ({ modified: Date.now() }));
-        const lastModified = statResult.modified || Date.now();
-
-        // Open with default application
-        await invoke("open_file_with_default_app", { path: localPath });
-        message.success(`已打开 ${entry.name} 进行编辑`);
-
-        // Set up polling watcher for file changes
-        const watcherId = window.setInterval(async () => {
-          try {
-            const currentStat = await invoke<{ modified: number }>("get_file_modified_time", { path: localPath }).catch(() => ({ modified: 0 }));
-            if (currentStat.modified && currentStat.modified > lastModified) {
-              // File has been modified, re-upload
-              const currentSessionId = getSessionId();
-              if (!currentSessionId) {
-                clearInterval(watcherId);
-                return;
-              }
-              try {
-                await invoke("sftp_upload", {
-                  sessionId: currentSessionId,
-                  localPath,
-                  remotePath,
-                });
-                message.success(`${entry.name} 已自动上传更新`);
-                // Update the lastModified in editingFiles
-                setEditingFiles((prev) =>
-                  prev.map((f) =>
-                    f.remotePath === remotePath ? { ...f, lastModified: currentStat.modified } : f
-                  )
-                );
-                // Refresh the file list
-                navigateTo(sftpPath);
-              } catch (e) {
-                message.error(`自动上传失败: ${String(e)}`);
-              }
-            }
-          } catch {
-            // File might have been deleted or is temporarily unavailable during save
-          }
-        }, 3000) as unknown as number;
-
-        // Add to editing files list
-        const editEntry: EditingFile = {
-          remotePath,
-          localPath,
-          filename: entry.name,
-          lastModified,
-          watcher: watcherId,
-        };
-        setEditingFiles((prev) => [...prev, editEntry]);
-      } catch (e) {
-        setTransfer(null);
-        message.error(`编辑文件失败: ${String(e)}`);
-      }
-    },
-    [sftpPath, getSessionId, editingFiles, navigateTo]
-  );
-
-  // Cleanup watchers on unmount
-  useEffect(() => {
-    return () => {
-      editingFiles.forEach((f) => {
-        if (f.watcher !== null) {
-          clearInterval(f.watcher);
-        }
-      });
-    };
-  }, []);
 
   // ---- Context menu ----
 

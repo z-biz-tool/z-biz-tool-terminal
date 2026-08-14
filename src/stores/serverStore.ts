@@ -96,40 +96,52 @@ async function connectToServer(
   settings: TerminalSettings,
   allServers: ServerConfig[]
 ): Promise<ConnectResult> {
+  const timeoutMs = (settings.connection_timeout || 30) * 1000;
+
+  const timeoutPromise = new Promise<ConnectResult>((_, reject) => {
+    setTimeout(() => reject(new Error(`连接超时（${settings.connection_timeout || 30}秒）`)), timeoutMs);
+  });
+
   if (server.proxyJump) {
     const jumpServer = allServers.find((s) => s.id === server.proxyJump);
     if (!jumpServer) {
       return { success: false, error: `跳板机 ${server.proxyJump} 不存在` };
     }
-    return await invoke<ConnectResult>("ssh_connect_via_jump", {
+    return await Promise.race([
+      invoke<ConnectResult>("ssh_connect_via_jump", {
+        params: {
+          jumpHost: jumpServer.host,
+          jumpPort: jumpServer.port,
+          jumpUsername: jumpServer.username,
+          jumpAuthType: jumpServer.authType,
+          jumpPassword: jumpServer.password,
+          jumpPrivateKey: jumpServer.privateKey,
+          targetHost: server.host,
+          targetPort: server.port,
+          targetUsername: server.username,
+          targetAuthType: server.authType,
+          targetPassword: server.password,
+          targetPrivateKey: server.privateKey,
+          keepaliveInterval: settings.keepalive_interval,
+        },
+      }),
+      timeoutPromise,
+    ]);
+  }
+  return await Promise.race([
+    invoke<ConnectResult>("ssh_connect", {
       params: {
-        jumpHost: jumpServer.host,
-        jumpPort: jumpServer.port,
-        jumpUsername: jumpServer.username,
-        jumpAuthType: jumpServer.authType,
-        jumpPassword: jumpServer.password,
-        jumpPrivateKey: jumpServer.privateKey,
-        targetHost: server.host,
-        targetPort: server.port,
-        targetUsername: server.username,
-        targetAuthType: server.authType,
-        targetPassword: server.password,
-        targetPrivateKey: server.privateKey,
+        host: server.host,
+        port: server.port,
+        username: server.username,
+        authType: server.authType,
+        password: server.password,
+        privateKey: server.privateKey,
         keepaliveInterval: settings.keepalive_interval,
       },
-    });
-  }
-  return await invoke<ConnectResult>("ssh_connect", {
-    params: {
-      host: server.host,
-      port: server.port,
-      username: server.username,
-      authType: server.authType,
-      password: server.password,
-      privateKey: server.privateKey,
-      keepaliveInterval: settings.keepalive_interval,
-    },
-  });
+    }),
+    timeoutPromise,
+  ]);
 }
 
 const defaultSettings: TerminalSettings = {

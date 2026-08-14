@@ -2,7 +2,7 @@ import { useState, useCallback } from "react";
 import { Modal, Select, Input, Button, Table, Checkbox, message } from "antd";
 import { UploadOutlined, FileTextOutlined } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useServerStore } from "../stores/serverStore";
 
 type ImportSource = "mobaxterm" | "winscp" | "csv" | "sshconfig";
@@ -301,7 +301,7 @@ export default function ImportModal({ open, onClose }: ImportModalProps) {
 
   const handleLoadFile = useCallback(async () => {
     try {
-      const selected = await open({
+      const selected = await openDialog({
         title: "选择导入文件",
         filters: [
           { name: "所有文件", extensions: ["*"] },
@@ -311,11 +311,10 @@ export default function ImportModal({ open, onClose }: ImportModalProps) {
         ],
       });
       if (!selected) return;
-      // Read file content via Tauri FS
-      const fileContent = await invoke<string>("read_file_content", { path: selected });
+      const filePath = typeof selected === "string" ? selected : selected;
+      const fileContent = await invoke<string>("read_file_content", { path: filePath });
       setContent(fileContent);
-    } catch (e) {
-      // Fallback: if read_file_content doesn't exist, just show a message
+    } catch {
       message.info("请将文件内容复制粘贴到文本框中");
     }
   }, []);
@@ -455,7 +454,7 @@ export default function ImportModal({ open, onClose }: ImportModalProps) {
           style={{ fontFamily: "monospace", fontSize: 12 }}
         />
 
-        <Button type="primary" onClick={handleParse} loading={loading} disabled={!content.trim()}>
+        <Button type="primary" onClick={handleParse} disabled={!content.trim()}>
           解析内容
         </Button>
 

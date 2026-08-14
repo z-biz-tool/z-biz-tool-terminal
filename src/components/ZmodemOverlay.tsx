@@ -1,5 +1,5 @@
-import { useState, useCallback, useRef, useEffect } from "react";
-import { Button, Progress, Space, Typography, theme } from "antd";
+import { useCallback, useRef } from "react";
+import { Button, Progress, Typography, theme } from "antd";
 import {
   UploadOutlined,
   DownloadOutlined,
@@ -52,7 +52,6 @@ export default function ZmodemOverlay({
   onWriteToPty,
 }: ZmodemOverlayProps) {
   const { token } = theme.useToken();
-  const [uploadPath, setUploadPath] = useState<string | null>(null);
   const abortRef = useRef(false);
 
   // Handle file upload via rz
@@ -65,7 +64,6 @@ export default function ZmodemOverlay({
       if (!selected) return;
 
       const filePath = typeof selected === "string" ? selected : selected;
-      setUploadPath(filePath);
 
       // Read file as base64 and send through PTY
       // This is a simplified approach - in a full implementation,
