@@ -731,6 +731,92 @@ pub async fn read_file_as_base64(path: String) -> Result<String, String> {
     Ok(base64_encode(&bytes))
 }
 
+/// 诊断: Ping
+#[tauri::command]
+pub async fn ssh_diagnose_ping(session_id: String, host: String, count: Option<u32>) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        let c = count.unwrap_or(4);
+        let command = format!("ping -c {} {} 2>&1", c, host);
+        match sess.execute(&command).await {
+            Ok(output) => ExecResult {
+                success: true,
+                output,
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}
+
+/// 诊断: 端口检测
+#[tauri::command]
+pub async fn ssh_diagnose_port(session_id: String, host: String, port: u16) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        // Try nc first, fall back to bash /dev/tcp
+        let command = format!(
+            "(nc -z -w 5 {} {} 2>/dev/null && echo 'OPEN') || (timeout 5 bash -c '</dev/tcp/{}/{}' 2>/dev/null && echo 'OPEN') || echo 'CLOSED'",
+            host, port, host, port
+        );
+        match sess.execute(&command).await {
+            Ok(output) => ExecResult {
+                success: true,
+                output,
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}
+
+/// 诊断: Traceroute
+#[tauri::command]
+pub async fn ssh_diagnose_traceroute(session_id: String, host: String) -> ExecResult {
+    let map = sessions().await.lock().await;
+    if let Some(sess) = map.get(&session_id) {
+        let command = format!("traceroute {} 2>&1 || tracepath {} 2>&1", host, host);
+        match sess.execute(&command).await {
+            Ok(output) => ExecResult {
+                success: true,
+                output,
+                error: None,
+            },
+            Err(e) => ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!("会话 {} 不存在", session_id)),
+        }
+    }
+}
+
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();

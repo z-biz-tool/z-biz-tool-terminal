@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { Tabs, theme, Button, Space, Tag, Tooltip } from "antd";
-import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined } from "@ant-design/icons";
+import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message } from "antd";
+import type { MenuProps } from "antd";
+import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined } from "@ant-design/icons";
 import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
@@ -13,6 +14,8 @@ import QuickConnectBar from "./components/QuickConnectBar";
 import RecentConnections from "./components/RecentConnections";
 import PortForwardModal from "./components/PortForwardModal";
 import KeyGenModal from "./components/KeyGenModal";
+import BatchExecModal from "./components/BatchExecModal";
+import DiagnosticModal from "./components/DiagnosticModal";
 import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 
@@ -36,6 +39,8 @@ function AppInner() {
     closePane,
     setActivePane,
     reconnectingServers,
+    connectServer,
+    reconnectServer,
   } = useServerStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -45,6 +50,8 @@ function AppInner() {
   const [recentOpen, setRecentOpen] = useState(false);
   const [portForwardOpen, setPortForwardOpen] = useState(false);
   const [keyGenOpen, setKeyGenOpen] = useState(false);
+  const [batchExecOpen, setBatchExecOpen] = useState(false);
+  const [diagnosticOpen, setDiagnosticOpen] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   // SFTP 面板高度(px)
   const [sftpHeight, setSftpHeight] = useState(260);
@@ -286,35 +293,135 @@ function AppInner() {
     }
   };
 
+  const getTabContextMenu = (serverId: string, tabState: string): MenuProps["items"] => {
+    const server = servers.find((s) => s.id === serverId);
+    const items: MenuProps["items"] = [];
+
+    if (tabState === "error" || tabState === "disconnected") {
+      items.push({
+        key: "reconnect",
+        icon: <ReloadOutlined />,
+        label: "重连",
+        onClick: () => reconnectServer(serverId),
+      });
+    }
+
+    items.push(
+      {
+        key: "clone",
+        icon: <CopyOutlined />,
+        label: "克隆会话",
+        onClick: () => {
+          if (server) connectServer(server);
+        },
+      },
+      {
+        key: "sftp",
+        icon: <FolderOpenOutlined />,
+        label: "SFTP",
+        onClick: () => {
+          if (!sftpVisible) toggleSftp(true);
+          listSftp(serverId, "/").catch(() => {});
+          setActiveTab(serverId);
+        },
+      },
+      {
+        key: "snippets",
+        icon: <CodeOutlined />,
+        label: "快捷命令",
+        onClick: () => {
+          if (!snippetsVisible) toggleSnippets(true);
+          setActiveTab(serverId);
+        },
+      },
+      {
+        key: "portforward",
+        icon: <ApiOutlined />,
+        label: "端口转发",
+        onClick: () => {
+          setActiveTab(serverId);
+          setPortForwardOpen(true);
+        },
+      },
+      {
+        key: "copyInfo",
+        icon: <CopyOutlined />,
+        label: "复制连接信息",
+        onClick: () => {
+          if (server) {
+            const info = `${server.username}@${server.host}:${server.port}`;
+            navigator.clipboard.writeText(info).then(() => {
+              message.success("已复制: " + info);
+            });
+          }
+        },
+      },
+      { type: "divider" },
+      {
+        key: "close",
+        icon: <CloseOutlined />,
+        label: "关闭",
+        onClick: () => closeTab(serverId),
+      },
+      {
+        key: "closeOthers",
+        label: "关闭其他",
+        onClick: () => {
+          tabs.filter((t) => t.serverId !== serverId).forEach((t) => closeTab(t.serverId));
+        },
+      },
+      {
+        key: "closeRight",
+        label: "关闭右侧",
+        onClick: () => {
+          const idx = tabs.findIndex((t) => t.serverId === serverId);
+          if (idx >= 0) {
+            tabs.slice(idx + 1).forEach((t) => closeTab(t.serverId));
+          }
+        },
+      }
+    );
+
+    return items;
+  };
+
   const tabItems = tabs.map((tab) => {
     const server = servers.find((s) => s.id === tab.serverId);
+    const tabLabel = (
+      <Space size={4}>
+        <Tag
+          color={tab.state === "connected" ? "green" : tab.state === "error" ? "red" : "orange"}
+          style={{
+            margin: 0,
+            marginRight: 2,
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            padding: 0,
+            minWidth: 6,
+          }}
+        />
+        <span
+          style={{
+            maxWidth: 120,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {server?.name || tab.serverId}
+        </span>
+      </Space>
+    );
     return {
       key: tab.serverId,
       label: (
-        <Space size={4}>
-          <Tag
-            color={tab.state === "connected" ? "green" : tab.state === "error" ? "red" : "orange"}
-            style={{
-              margin: 0,
-              marginRight: 2,
-              width: 6,
-              height: 6,
-              borderRadius: "50%",
-              padding: 0,
-              minWidth: 6,
-            }}
-          />
-          <span
-            style={{
-              maxWidth: 120,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {server?.name || tab.serverId}
-          </span>
-        </Space>
+        <Dropdown
+          menu={{ items: getTabContextMenu(tab.serverId, tab.state) }}
+          trigger={["contextMenu"]}
+        >
+          {tabLabel}
+        </Dropdown>
       ),
       closable: true,
     };
@@ -365,6 +472,18 @@ function AppInner() {
           命令
         </Button>
       )}
+      {tabs.filter((t) => t.state === "connected").length >= 2 && (
+        <Tooltip title="批量执行">
+          <Button
+            size="small"
+            type="text"
+            icon={<TeamOutlined />}
+            onClick={() => setBatchExecOpen(true)}
+          >
+            批量执行
+          </Button>
+        </Tooltip>
+      )}
       {activeTabId && (
         <Tooltip title="水平分屏 (Ctrl+Shift+H)">
           <Button
@@ -394,6 +513,18 @@ function AppInner() {
             onClick={() => setPortForwardOpen(true)}
           >
             端口转发
+          </Button>
+        </Tooltip>
+      )}
+      {activeTab?.state === "connected" && (
+        <Tooltip title="连接诊断">
+          <Button
+            size="small"
+            type="text"
+            icon={<BugOutlined />}
+            onClick={() => setDiagnosticOpen(true)}
+          >
+            诊断
           </Button>
         </Tooltip>
       )}
@@ -654,6 +785,8 @@ function AppInner() {
       <SessionLogModal open={logsOpen} onClose={() => setLogsOpen(false)} />
       <PortForwardModal open={portForwardOpen} onClose={() => setPortForwardOpen(false)} />
       <KeyGenModal open={keyGenOpen} onClose={() => setKeyGenOpen(false)} />
+      <BatchExecModal open={batchExecOpen} onClose={() => setBatchExecOpen(false)} />
+      <DiagnosticModal open={diagnosticOpen} onClose={() => setDiagnosticOpen(false)} />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}

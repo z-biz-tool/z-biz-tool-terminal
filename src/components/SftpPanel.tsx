@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import {
   Table,
   Button,
@@ -11,6 +11,7 @@ import {
   Modal,
   theme,
   Tag,
+  Tooltip,
 } from "antd";
 import {
   FolderOutlined,
@@ -25,6 +26,10 @@ import {
   DeleteOutlined,
   CopyOutlined,
   ExportOutlined,
+  SelectOutlined,
+  DragOutlined,
+  CaretUpOutlined,
+  CaretDownOutlined,
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { useServerStore } from "../stores/serverStore";
@@ -52,17 +57,26 @@ interface EditingFile {
   watcher: number | null; // setInterval ID
 }
 
+type SortField = "name" | "size" | "modified" | "permissions";
+type SortOrder = "asc" | "desc";
+
 export default function SftpPanel({ serverId }: SftpPanelProps) {
   const { token } = theme.useToken();
   const { sftpEntries, sftpPath, listSftp, toggleSftp } = useServerStore();
   const [pathInput, setPathInput] = useState(sftpPath);
   const [loading, setLoading] = useState(false);
-  const [selectedEntry, setSelectedEntry] = useState<SftpEntry | null>(null);
+  const [selectedEntries, setSelectedEntries] = useState<Set<string>>(new Set());
+  const [lastClickedName, setLastClickedName] = useState<string | null>(null);
+  const [focusedIndex, setFocusedIndex] = useState(-1);
   const [transfer, setTransfer] = useState<TransferState | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [contextMenuEntry, setContextMenuEntry] = useState<SftpEntry | null>(null);
   const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
   const [editingFiles, setEditingFiles] = useState<EditingFile[]>([]);
+  const [sortField, setSortField] = useState<SortField>("name");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
+  const [dragDownloadEntry, setDragDownloadEntry] = useState<SftpEntry | null>(null);
+  const [dropZoneActive, setDropZoneActive] = useState(false);
   const tableRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -71,7 +85,9 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
 
   // Clear selection when directory changes
   useEffect(() => {
-    setSelectedEntry(null);
+    setSelectedEntries(new Set());
+    setLastClickedName(null);
+    setFocusedIndex(-1);
   }, [sftpPath]);
 
   const getSessionId = useCallback(() => {
@@ -80,6 +96,49 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
     const activePane = tab?.panes.find((p) => p.id === state.activePaneId);
     return activePane?.sessionId || tab?.sessionId;
   }, [serverId]);
+
+  // ---- Sorting ----
+
+  const sortedEntries = useMemo(() => {
+    const sorted = [...sftpEntries];
+    sorted.sort((a, b) => {
+      // Directories always first
+      if (a.is_dir && !b.is_dir) return -1;
+      if (!a.is_dir && b.is_dir) return 1;
+
+      let cmp = 0;
+      switch (sortField) {
+        case "name":
+          cmp = a.name.localeCompare(b.name);
+          break;
+        case "size":
+          cmp = a.size - b.size;
+          break;
+        case "modified":
+          cmp = (a.modified || "").localeCompare(b.modified || "");
+          break;
+        case "permissions":
+          cmp = (a.permissions || "").localeCompare(b.permissions || "");
+          break;
+      }
+      return sortOrder === "asc" ? cmp : -cmp;
+    });
+    return sorted;
+  }, [sftpEntries, sortField, sortOrder]);
+
+  const handleSort = useCallback(
+    (field: SortField) => {
+      if (sortField === field) {
+        setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
+      } else {
+        setSortField(field);
+        setSortOrder("asc");
+      }
+    },
+    [sortField]
+  );
+
+  // ---- Navigation ----
 
   const navigateTo = useCallback(
     async (path: string) => {
@@ -97,21 +156,61 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
 
   const handleEntryClick = useCallback(
     (entry: SftpEntry, e?: React.MouseEvent) => {
-      // If ctrl/meta key is held, toggle selection without navigating
-      if (e?.ctrlKey || e?.metaKey) {
-        setSelectedEntry((prev) => (prev?.name === entry.name ? null : entry));
+      const entryName = entry.name;
+
+      // Shift+Click: range select
+      if (e?.shiftKey && lastClickedName) {
+        const names = sortedEntries.map((en) => en.name);
+        const lastIdx = names.indexOf(lastClickedName);
+        const curIdx = names.indexOf(entryName);
+        if (lastIdx >= 0 && curIdx >= 0) {
+          const [from, to] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+          const rangeNames = names.slice(from, to + 1);
+          setSelectedEntries((prev) => {
+            const next = new Set(prev);
+            rangeNames.forEach((n) => next.add(n));
+            return next;
+          });
+        }
+        setLastClickedName(entryName);
         return;
       }
+
+      // Ctrl/Cmd+Click: toggle select
+      if (e?.ctrlKey || e?.metaKey) {
+        setSelectedEntries((prev) => {
+          const next = new Set(prev);
+          if (next.has(entryName)) {
+            next.delete(entryName);
+          } else {
+            next.add(entryName);
+          }
+          return next;
+        });
+        setLastClickedName(entryName);
+        return;
+      }
+
+      // Normal click: single select or navigate
       if (entry.is_dir) {
         const newPath = sftpPath.endsWith("/") ? sftpPath + entry.name : sftpPath + "/" + entry.name;
         navigateTo(newPath);
       } else {
-        // Select the file
-        setSelectedEntry(entry);
+        setSelectedEntries(new Set([entryName]));
       }
+      setLastClickedName(entryName);
     },
-    [sftpPath, navigateTo]
+    [sftpPath, navigateTo, sortedEntries, lastClickedName]
   );
+
+  const handleSelectAll = useCallback(() => {
+    const allNames = sortedEntries.map((e) => e.name);
+    if (selectedEntries.size === allNames.length && allNames.length > 0) {
+      setSelectedEntries(new Set());
+    } else {
+      setSelectedEntries(new Set(allNames));
+    }
+  }, [sortedEntries, selectedEntries.size]);
 
   const handleGoUp = useCallback(() => {
     const parts = sftpPath.split("/").filter(Boolean);
@@ -126,11 +225,84 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === "Enter") {
-        navigateTo(pathInput);
+      // If focus is on the path input, only handle Enter
+      if ((e.target as HTMLElement).tagName === "INPUT") {
+        if (e.key === "Enter") {
+          navigateTo(pathInput);
+        }
+        return;
+      }
+
+      const total = sortedEntries.length;
+      if (total === 0) return;
+
+      switch (e.key) {
+        case "ArrowUp": {
+          e.preventDefault();
+          setFocusedIndex((prev) => {
+            const next = prev <= 0 ? 0 : prev - 1;
+            const name = sortedEntries[next]?.name;
+            if (name && !e.shiftKey) {
+              setSelectedEntries(new Set([name]));
+            } else if (name && e.shiftKey) {
+              setSelectedEntries((prevSet) => {
+                const s = new Set(prevSet);
+                s.add(name);
+                return s;
+              });
+            }
+            return next;
+          });
+          break;
+        }
+        case "ArrowDown": {
+          e.preventDefault();
+          setFocusedIndex((prev) => {
+            const next = prev >= total - 1 ? total - 1 : prev + 1;
+            const name = sortedEntries[next]?.name;
+            if (name && !e.shiftKey) {
+              setSelectedEntries(new Set([name]));
+            } else if (name && e.shiftKey) {
+              setSelectedEntries((prevSet) => {
+                const s = new Set(prevSet);
+                s.add(name);
+                return s;
+              });
+            }
+            return next;
+          });
+          break;
+        }
+        case "Enter": {
+          e.preventDefault();
+          if (focusedIndex >= 0 && focusedIndex < total) {
+            const entry = sortedEntries[focusedIndex];
+            if (entry) handleOpen(entry);
+          }
+          break;
+        }
+        case "Delete": {
+          e.preventDefault();
+          if (selectedEntries.size > 0) {
+            handleBatchDelete();
+          }
+          break;
+        }
+        case "Backspace": {
+          e.preventDefault();
+          handleGoUp();
+          break;
+        }
+        case "a": {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            handleSelectAll();
+          }
+          break;
+        }
       }
     },
-    [pathInput, navigateTo]
+    [pathInput, navigateTo, sortedEntries, focusedIndex, selectedEntries.size, handleSelectAll, handleGoUp]
   );
 
   const formatSize = (bytes: number) => {
@@ -157,7 +329,6 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
           title: "选择要上传的文件",
         });
         if (!selected) return;
-        // open() returns string | string[] | null depending on multiple
         filePaths = Array.isArray(selected) ? selected : [selected];
       }
 
@@ -176,11 +347,9 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         } catch (e) {
           message.error(`上传失败: ${String(e)}`);
         } finally {
-          // Small delay to show 100% before clearing
           setTimeout(() => setTransfer(null), 800);
         }
       }
-      // Refresh the file list
       navigateTo(sftpPath);
     },
     [sftpPath, getSessionId, navigateTo]
@@ -194,7 +363,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         return;
       }
 
-      const target = entry || selectedEntry;
+      const target = entry;
       if (!target || target.is_dir) {
         message.warning("请选择一个文件进行下载");
         return;
@@ -225,8 +394,144 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         setTimeout(() => setTransfer(null), 800);
       }
     },
-    [sftpPath, selectedEntry, getSessionId]
+    [sftpPath, getSessionId]
   );
+
+  // ---- Batch operations ----
+
+  const handleBatchDownload = useCallback(async () => {
+    const sessionId = getSessionId();
+    if (!sessionId) {
+      message.error("会话未连接");
+      return;
+    }
+
+    const selectedNames = Array.from(selectedEntries);
+    const entries = selectedNames
+      .map((name) => sortedEntries.find((e) => e.name === name))
+      .filter((e): e is SftpEntry => !!e);
+
+    const dirs = entries.filter((e) => e.is_dir);
+    const files = entries.filter((e) => !e.is_dir);
+
+    if (dirs.length > 0) {
+      message.warning(`跳过 ${dirs.length} 个目录（不支持下载目录）: ${dirs.map((d) => d.name).join(", ")}`);
+    }
+
+    if (files.length === 0) {
+      message.warning("没有可下载的文件");
+      return;
+    }
+
+    for (const entry of files) {
+      const remotePath = sftpPath.endsWith("/")
+        ? sftpPath + entry.name
+        : sftpPath + "/" + entry.name;
+
+      const localPath = await save({
+        defaultPath: entry.name,
+        title: `保存文件到 (${entry.name})`,
+      });
+      if (!localPath) continue;
+
+      setTransfer({ type: "download", filename: entry.name, progress: 0 });
+      try {
+        await invoke("sftp_download", {
+          sessionId,
+          remotePath,
+          localPath,
+        });
+        setTransfer((prev) => (prev ? { ...prev, progress: 100 } : null));
+        message.success(`下载成功: ${entry.name}`);
+      } catch (e) {
+        message.error(`下载失败: ${entry.name}: ${String(e)}`);
+      } finally {
+        setTimeout(() => setTransfer(null), 800);
+      }
+    }
+  }, [sftpPath, selectedEntries, sortedEntries, getSessionId]);
+
+  const handleBatchDelete = useCallback(() => {
+    const sessionId = getSessionId();
+    if (!sessionId) {
+      message.error("会话未连接");
+      return;
+    }
+
+    const selectedNames = Array.from(selectedEntries);
+    if (selectedNames.length === 0) return;
+
+    const entries = selectedNames
+      .map((name) => sortedEntries.find((e) => e.name === name))
+      .filter((e): e is SftpEntry => !!e);
+
+    const dirCount = entries.filter((e) => e.is_dir).length;
+
+    let contentText = `确定要删除选中的 ${entries.length} 项吗？`;
+    if (dirCount > 0) {
+      contentText += `（包含 ${dirCount} 个目录，将递归删除）`;
+    }
+
+    Modal.confirm({
+      title: "批量删除确认",
+      content: (
+        <div>
+          <p>{contentText}</p>
+          <div style={{ maxHeight: 120, overflow: "auto", fontSize: 12, color: token.colorTextSecondary }}>
+            {entries.map((e) => (
+              <div key={e.name}>
+                {e.is_dir ? "📁 " : "📄 "}
+                {e.name}
+              </div>
+            ))}
+          </div>
+        </div>
+      ),
+      okText: `删除 ${entries.length} 项`,
+      okType: "danger",
+      cancelText: "取消",
+      onOk: async () => {
+        let successCount = 0;
+        let failCount = 0;
+        for (const entry of entries) {
+          const remotePath = sftpPath.endsWith("/")
+            ? sftpPath + entry.name
+            : sftpPath + "/" + entry.name;
+          try {
+            await invoke("sftp_remove", { sessionId, path: remotePath });
+            successCount++;
+          } catch (e) {
+            failCount++;
+            message.error(`删除失败: ${entry.name}: ${String(e)}`);
+          }
+        }
+        if (successCount > 0) {
+          message.success(`成功删除 ${successCount} 项${failCount > 0 ? `，${failCount} 项失败` : ""}`);
+        }
+        setSelectedEntries(new Set());
+        navigateTo(sftpPath);
+      },
+    });
+  }, [sftpPath, selectedEntries, sortedEntries, getSessionId, navigateTo, token.colorTextSecondary]);
+
+  const handleBatchCopyPath = useCallback(async () => {
+    const selectedNames = Array.from(selectedEntries);
+    const paths = selectedNames.map((name) =>
+      sftpPath.endsWith("/") ? sftpPath + name : sftpPath + "/" + name
+    );
+    const text = paths.join("\n");
+    try {
+      await writeText(text);
+      message.success(`已复制 ${paths.length} 个路径到剪贴板`);
+    } catch {
+      try {
+        await navigator.clipboard.writeText(text);
+        message.success(`已复制 ${paths.length} 个路径到剪贴板`);
+      } catch {
+        message.error("复制路径失败");
+      }
+    }
+  }, [sftpPath, selectedEntries]);
 
   // ---- Remote file editing ----
 
@@ -247,7 +552,6 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         ? sftpPath + entry.name
         : sftpPath + "/" + entry.name;
 
-      // Check if already editing this file
       const alreadyEditing = editingFiles.find((f) => f.remotePath === remotePath);
       if (alreadyEditing) {
         message.info(`${entry.name} 已在编辑中`);
@@ -255,14 +559,10 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       }
 
       try {
-        // Get temp directory
         const tempDir = await invoke<string>("get_temp_dir");
-        // Create a unique subdirectory for this edit session
         const editDir = `${tempDir}/z-terminal-edit`;
-        // Ensure the directory exists (use a simple approach)
         const localPath = `${editDir}/${entry.name}`;
 
-        // Download the file to temp location
         setTransfer({ type: "download", filename: entry.name, progress: 0 });
         await invoke("sftp_download", {
           sessionId,
@@ -271,20 +571,16 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         });
         setTransfer(null);
 
-        // Get initial modification time
         const statResult = await invoke<{ modified: number }>("get_file_modified_time", { path: localPath }).catch(() => ({ modified: Date.now() }));
         const lastModified = statResult.modified || Date.now();
 
-        // Open with default application
         await invoke("open_file_with_default_app", { path: localPath });
         message.success(`已打开 ${entry.name} 进行编辑`);
 
-        // Set up polling watcher for file changes
         const watcherId = window.setInterval(async () => {
           try {
             const currentStat = await invoke<{ modified: number }>("get_file_modified_time", { path: localPath }).catch(() => ({ modified: 0 }));
             if (currentStat.modified && currentStat.modified > lastModified) {
-              // File has been modified, re-upload
               const currentSessionId = getSessionId();
               if (!currentSessionId) {
                 clearInterval(watcherId);
@@ -297,13 +593,11 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
                   remotePath,
                 });
                 message.success(`${entry.name} 已自动上传更新`);
-                // Update the lastModified in editingFiles
                 setEditingFiles((prev) =>
                   prev.map((f) =>
                     f.remotePath === remotePath ? { ...f, lastModified: currentStat.modified } : f
                   )
                 );
-                // Refresh the file list
                 navigateTo(sftpPath);
               } catch (e) {
                 message.error(`自动上传失败: ${String(e)}`);
@@ -314,7 +608,6 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
           }
         }, 3000) as unknown as number;
 
-        // Add to editing files list
         const editEntry: EditingFile = {
           remotePath,
           localPath,
@@ -348,7 +641,6 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         const newPath = sftpPath.endsWith("/") ? sftpPath + entry.name : sftpPath + "/" + entry.name;
         navigateTo(newPath);
       } else {
-        // Double-click on file: edit it
         handleEditFile(entry);
       }
     },
@@ -461,9 +753,11 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
           try {
             await invoke("sftp_remove", { sessionId, path: remotePath });
             message.success(`删除成功: ${entry.name}`);
-            if (selectedEntry?.name === entry.name) {
-              setSelectedEntry(null);
-            }
+            setSelectedEntries((prev) => {
+              const next = new Set(prev);
+              next.delete(entry.name);
+              return next;
+            });
             navigateTo(sftpPath);
           } catch (e) {
             message.error(`删除失败: ${String(e)}`);
@@ -471,7 +765,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         },
       });
     },
-    [sftpPath, selectedEntry, getSessionId, navigateTo]
+    [sftpPath, getSessionId, navigateTo]
   );
 
   const handleCopyPath = useCallback(
@@ -483,7 +777,6 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         await writeText(fullPath);
         message.success(`已复制路径: ${fullPath}`);
       } catch {
-        // Fallback: try clipboard API
         try {
           await navigator.clipboard.writeText(fullPath);
           message.success(`已复制路径: ${fullPath}`);
@@ -503,14 +796,44 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       e.stopPropagation();
       setContextMenuEntry(entry);
       setContextMenuPos({ x: e.clientX, y: e.clientY });
-      setSelectedEntry(entry);
+      // If the right-clicked entry is not in the selection, select only it
+      if (!selectedEntries.has(entry.name)) {
+        setSelectedEntries(new Set([entry.name]));
+      }
     },
-    []
+    [selectedEntries]
   );
 
   const getContextMenuItems = useCallback((): MenuProps["items"] => {
     if (!contextMenuEntry) return [];
     const entry = contextMenuEntry;
+    const isMultiSelected = selectedEntries.size > 1 && selectedEntries.has(entry.name);
+
+    if (isMultiSelected) {
+      return [
+        {
+          key: "batchDownload",
+          icon: <DownloadOutlined />,
+          label: `批量下载 (${selectedEntries.size} 项)`,
+          onClick: () => handleBatchDownload(),
+        },
+        {
+          key: "batchCopyPath",
+          icon: <CopyOutlined />,
+          label: `批量复制路径 (${selectedEntries.size} 项)`,
+          onClick: () => handleBatchCopyPath(),
+        },
+        { type: "divider" as const },
+        {
+          key: "batchDelete",
+          icon: <DeleteOutlined />,
+          label: `批量删除 (${selectedEntries.size} 项)`,
+          danger: true,
+          onClick: () => handleBatchDelete(),
+        },
+      ];
+    }
+
     return [
       {
         key: "open",
@@ -556,9 +879,9 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         onClick: () => handleCopyPath(entry),
       },
     ];
-  }, [contextMenuEntry, handleOpen, handleDownload, handleEditFile, handleRename, handleDelete, handleCopyPath]);
+  }, [contextMenuEntry, selectedEntries, handleOpen, handleDownload, handleEditFile, handleRename, handleDelete, handleCopyPath, handleBatchDownload, handleBatchCopyPath, handleBatchDelete]);
 
-  // ---- Drag and drop ----
+  // ---- Drag and drop (upload) ----
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -578,12 +901,9 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       e.stopPropagation();
       setDragOver(false);
 
-      // Try to get file paths from the drop event
-      // In Tauri, the dataTransfer may contain file paths
       const files = e.dataTransfer.files;
       if (!files || files.length === 0) return;
 
-      // In Tauri webview, dropped files have a `path` property on the File object
       const filePaths: string[] = [];
       for (let i = 0; i < files.length; i++) {
         const file = files[i] as File & { path?: string };
@@ -595,12 +915,71 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       if (filePaths.length > 0) {
         await handleUpload(filePaths);
       } else {
-        // Fallback: read files as array buffers and write to temp location
-        // This path is for browsers where file.path is not available
         message.info("拖拽上传需要 Tauri 环境，请使用工具栏上传按钮");
       }
     },
     [handleUpload]
+  );
+
+  // ---- Drag to download ----
+
+  const handleRowDragStart = useCallback(
+    (e: React.DragEvent, entry: SftpEntry) => {
+      setDragDownloadEntry(entry);
+      // Set transfer data for the drag
+      e.dataTransfer.setData("text/plain", entry.name);
+      e.dataTransfer.effectAllowed = "copy";
+      // Add a drag image
+      const dragEl = document.createElement("div");
+      dragEl.style.cssText = "position:absolute;top:-9999px;left:-9999px;padding:4px 12px;background:#1677ff;color:#fff;border-radius:4px;font-size:12px;white-space:nowrap;";
+      dragEl.textContent = entry.is_dir ? `📁 ${entry.name}` : `📄 ${entry.name}`;
+      document.body.appendChild(dragEl);
+      e.dataTransfer.setDragImage(dragEl, 0, 0);
+      // Clean up after a tick
+      requestAnimationFrame(() => document.body.removeChild(dragEl));
+    },
+    []
+  );
+
+  const handleRowDragEnd = useCallback(() => {
+    // If the drag ended outside the app (dropZone wasn't activated), we can't detect
+    // desktop drops in Tauri webview. The drop zone at the bottom is the primary mechanism.
+    setDragDownloadEntry(null);
+    setDropZoneActive(false);
+  }, []);
+
+  const handleDropZoneDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "copy";
+    setDropZoneActive(true);
+  }, []);
+
+  const handleDropZoneDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDropZoneActive(false);
+  }, []);
+
+  const handleDropZoneDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDropZoneActive(false);
+
+      if (!dragDownloadEntry) return;
+
+      // Download the dragged entry
+      if (dragDownloadEntry.is_dir) {
+        message.warning("不支持拖拽下载目录");
+        setDragDownloadEntry(null);
+        return;
+      }
+
+      await handleDownload(dragDownloadEntry);
+      setDragDownloadEntry(null);
+    },
+    [dragDownloadEntry, handleDownload]
   );
 
   // ---- Empty area context menu ----
@@ -609,7 +988,6 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
     (e: React.MouseEvent) => {
       e.preventDefault();
       setContextMenuPos({ x: e.clientX, y: e.clientY });
-      // Store a special marker for empty area context menu
       setContextMenuEntry({ name: "__empty__", is_dir: true, size: 0 } as SftpEntry);
     },
     []
@@ -631,19 +1009,61 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       },
       { type: "divider" as const },
       {
+        key: "selectAll",
+        icon: <SelectOutlined />,
+        label: "全选 (Ctrl+A)",
+        onClick: () => handleSelectAll(),
+      },
+      { type: "divider" as const },
+      {
         key: "refresh",
         icon: <ReloadOutlined />,
         label: "刷新",
         onClick: () => navigateTo(sftpPath),
       },
     ];
-  }, [handleUpload, handleNewFolder, navigateTo, sftpPath]);
+  }, [handleUpload, handleNewFolder, handleSelectAll, navigateTo, sftpPath]);
+
+  // ---- Status bar info ----
+
+  const selectedTotalSize = useMemo(() => {
+    let total = 0;
+    selectedEntries.forEach((name) => {
+      const entry = sortedEntries.find((e) => e.name === name);
+      if (entry && !entry.is_dir) {
+        total += entry.size;
+      }
+    });
+    return total;
+  }, [selectedEntries, sortedEntries]);
+
+  const dirCount = useMemo(() => sortedEntries.filter((e) => e.is_dir).length, [sortedEntries]);
+  const fileCount = useMemo(() => sortedEntries.filter((e) => !e.is_dir).length, [sortedEntries]);
 
   // ---- Table columns ----
 
+  const renderSortIcon = useCallback(
+    (field: SortField) => {
+      if (sortField !== field) return null;
+      return sortOrder === "asc" ? (
+        <CaretUpOutlined style={{ fontSize: 10, marginLeft: 4 }} />
+      ) : (
+        <CaretDownOutlined style={{ fontSize: 10, marginLeft: 4 }} />
+      );
+    },
+    [sortField, sortOrder]
+  );
+
   const columns = [
     {
-      title: "名称",
+      title: (
+        <span
+          style={{ cursor: "pointer", userSelect: "none" }}
+          onClick={() => handleSort("name")}
+        >
+          名称 {renderSortIcon("name")}
+        </span>
+      ),
       dataIndex: "name",
       key: "name",
       render: (name: string, record: SftpEntry) => (
@@ -663,20 +1083,41 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       ),
     },
     {
-      title: "大小",
+      title: (
+        <span
+          style={{ cursor: "pointer", userSelect: "none" }}
+          onClick={() => handleSort("size")}
+        >
+          大小 {renderSortIcon("size")}
+        </span>
+      ),
       dataIndex: "size",
       key: "size",
       width: 100,
       render: (size: number, record: SftpEntry) => (record.is_dir ? "-" : formatSize(size)),
     },
     {
-      title: "权限",
+      title: (
+        <span
+          style={{ cursor: "pointer", userSelect: "none" }}
+          onClick={() => handleSort("permissions")}
+        >
+          权限 {renderSortIcon("permissions")}
+        </span>
+      ),
       dataIndex: "permissions",
       key: "permissions",
       width: 120,
     },
     {
-      title: "修改时间",
+      title: (
+        <span
+          style={{ cursor: "pointer", userSelect: "none" }}
+          onClick={() => handleSort("modified")}
+        >
+          修改时间 {renderSortIcon("modified")}
+        </span>
+      ),
       dataIndex: "modified",
       key: "modified",
       width: 160,
@@ -689,6 +1130,15 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
     ? getEmptyAreaContextMenuItems()
     : getContextMenuItems();
 
+  // Single selected entry for single-item operations (download button, etc.)
+  const singleSelected = useMemo(() => {
+    if (selectedEntries.size === 1) {
+      const name = Array.from(selectedEntries)[0];
+      return sortedEntries.find((e) => e.name === name) || null;
+    }
+    return null;
+  }, [selectedEntries, sortedEntries]);
+
   return (
     <div
       style={{
@@ -699,6 +1149,8 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         position: "relative",
       }}
       onContextMenu={handleEmptyContextMenu}
+      onKeyDown={handleKeyDown}
+      tabIndex={0}
     >
       {/* Context menu overlay */}
       {contextMenuEntry && (
@@ -748,6 +1200,47 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
           />
         </Space>
         <Space size="small">
+          {/* Batch operations when multiple selected */}
+          {selectedEntries.size > 1 && (
+            <>
+              <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>
+                已选 {selectedEntries.size} 项
+              </Tag>
+              <Tooltip title="批量下载选中文件">
+                <Button
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={handleBatchDownload}
+                >
+                  批量下载
+                </Button>
+              </Tooltip>
+              <Tooltip title="批量删除选中项">
+                <Button
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  danger
+                  onClick={handleBatchDelete}
+                >
+                  批量删除
+                </Button>
+              </Tooltip>
+              <Tooltip title="批量复制路径">
+                <Button
+                  size="small"
+                  icon={<CopyOutlined />}
+                  onClick={handleBatchCopyPath}
+                >
+                  复制路径
+                </Button>
+              </Tooltip>
+            </>
+          )}
+          {selectedEntries.size === 1 && (
+            <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>
+              已选 1 项
+            </Tag>
+          )}
           <Button
             size="small"
             icon={<UploadOutlined />}
@@ -759,9 +1252,9 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
           <Button
             size="small"
             icon={<DownloadOutlined />}
-            onClick={() => handleDownload()}
-            disabled={!selectedEntry || selectedEntry.is_dir}
-            title={selectedEntry && !selectedEntry.is_dir ? `下载 ${selectedEntry.name}` : "请先选择文件"}
+            onClick={() => singleSelected && handleDownload(singleSelected)}
+            disabled={!singleSelected || singleSelected.is_dir}
+            title={singleSelected && !singleSelected.is_dir ? `下载 ${singleSelected.name}` : "请先选择文件"}
           >
             下载
           </Button>
@@ -868,7 +1361,6 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
           flex: 1,
           overflow: "auto",
           position: "relative",
-          // Drag and drop overlay styles
           outline: dragOver ? `2px dashed ${token.colorPrimary}` : "none",
           outlineOffset: -2,
           background: dragOver ? token.colorPrimaryBg : "transparent",
@@ -912,16 +1404,14 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         ) : (
           <Table
             columns={columns}
-            dataSource={sftpEntries}
+            dataSource={sortedEntries}
             rowKey="name"
             size="small"
             pagination={false}
-            onRow={(record) => ({
+            onRow={(record, index) => ({
               onClick: (e) => {
-                // Click on the row (not just the name column)
-                if ((e.target as HTMLElement).closest(".ant-table-cell") && record) {
-                  // Only handle if not already handled by the name column click
-                }
+                handleEntryClick(record, e);
+                setFocusedIndex(index ?? -1);
               },
               onDoubleClick: () => {
                 handleOpen(record);
@@ -929,13 +1419,73 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
               onContextMenu: (e) => {
                 handleContextMenu(e, record);
               },
+              draggable: true,
+              onDragStart: (e) => {
+                handleRowDragStart(e, record);
+              },
+              onDragEnd: () => {
+                handleRowDragEnd();
+              },
               style: {
                 cursor: "pointer",
-                background:
-                  selectedEntry?.name === record.name ? token.colorPrimaryBg : undefined,
+                background: selectedEntries.has(record.name)
+                  ? token.colorPrimaryBg
+                  : undefined,
+                outline: focusedIndex === index ? `2px solid ${token.colorPrimary}` : "none",
+                outlineOffset: -2,
               },
             })}
           />
+        )}
+      </div>
+
+      {/* 拖拽下载区域 */}
+      {dragDownloadEntry && (
+        <div
+          style={{
+            padding: "8px 12px",
+            borderTop: `2px dashed ${dropZoneActive ? token.colorPrimary : token.colorBorderSecondary}`,
+            background: dropZoneActive ? token.colorPrimaryBg : token.colorBgElevated,
+            transition: "all 0.2s",
+            textAlign: "center",
+          }}
+          onDragOver={handleDropZoneDragOver}
+          onDragLeave={handleDropZoneDragLeave}
+          onDrop={handleDropZoneDrop}
+        >
+          <Space>
+            <DragOutlined style={{ color: dropZoneActive ? token.colorPrimary : token.colorTextSecondary }} />
+            <span style={{ fontSize: 12, color: dropZoneActive ? token.colorPrimary : token.colorTextSecondary }}>
+              {dropZoneActive ? "释放以下载" : "拖拽下载区域 — 将文件拖到此处下载"}
+            </span>
+          </Space>
+        </div>
+      )}
+
+      {/* 状态栏 */}
+      <div
+        style={{
+          padding: "2px 12px",
+          borderTop: `1px solid ${token.colorBorderSecondary}`,
+          background: token.colorBgElevated,
+          display: "flex",
+          justifyContent: "space-between",
+          fontSize: 11,
+          color: token.colorTextTertiary,
+          flexShrink: 0,
+        }}
+      >
+        <span>
+          {dirCount > 0 && `${dirCount} 个目录`}
+          {dirCount > 0 && fileCount > 0 && "，"}
+          {fileCount > 0 && `${fileCount} 个文件`}
+          {dirCount === 0 && fileCount === 0 && "空目录"}
+        </span>
+        {selectedEntries.size > 0 && (
+          <span>
+            已选 {selectedEntries.size} 项
+            {selectedTotalSize > 0 && ` · ${formatSize(selectedTotalSize)}`}
+          </span>
         )}
       </div>
     </div>

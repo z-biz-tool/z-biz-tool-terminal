@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
+import type { ILinkProvider, ILink, IBufferRange, IBufferCellPosition } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
@@ -319,6 +320,165 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
       disposable.dispose();
     };
   }, [settings.copy_on_select]);
+
+  // URL/路径自动检测: 使用 xterm.js link provider API
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+
+    // Tooltip element for hover
+    let tooltipEl: HTMLDivElement | null = null;
+
+    const createTooltip = (text: string, action: string, x: number, y: number) => {
+      removeTooltip();
+      const el = document.createElement("div");
+      el.className = "xterm-hover";
+      el.style.cssText = `
+        position: fixed;
+        left: ${x + 10}px;
+        top: ${y + 10}px;
+        background: #1e1e1e;
+        color: #d4d4d4;
+        border: 1px solid #444;
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 12px;
+        font-family: SF Mono, Monaco, Menlo, monospace;
+        z-index: 10000;
+        pointer-events: none;
+        white-space: nowrap;
+        max-width: 400px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      `;
+      el.textContent = `${action}: ${text}`;
+      if (term.element) {
+        term.element.appendChild(el);
+      }
+      tooltipEl = el;
+    };
+
+    const removeTooltip = () => {
+      if (tooltipEl && tooltipEl.parentElement) {
+        tooltipEl.parentElement.removeChild(tooltipEl);
+      }
+      tooltipEl = null;
+    };
+
+    const linkProvider: ILinkProvider = {
+      provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void) {
+        const line = term.buffer.active.getLine(bufferLineNumber - 1);
+        if (!line) {
+          callback(undefined);
+          return;
+        }
+        const text = line.translateToString(true);
+        const links: ILink[] = [];
+
+        // URL detection: http/https
+        const urlRegex = /https?:\/\/[^\s,;)"']+/g;
+        let match;
+        while ((match = urlRegex.exec(text)) !== null) {
+          const startCol = match.index + 1;
+          const endCol = match.index + match[0].length;
+          links.push({
+            range: {
+              start: { x: startCol, y: bufferLineNumber } as IBufferCellPosition,
+              end: { x: endCol, y: bufferLineNumber } as IBufferCellPosition,
+            } as IBufferRange,
+            text: match[0],
+            decorations: { underline: true, pointerCursor: true },
+            activate: (_event: MouseEvent, text: string) => {
+              invoke("plugin:shell|open", { path: text }).catch(() => {
+                window.open(text, "_blank");
+              });
+            },
+            hover: (_event: MouseEvent, text: string) => {
+              const rect = term.element?.getBoundingClientRect();
+              if (rect) {
+                createTooltip(text, "点击打开链接", _event.clientX, _event.clientY);
+              }
+            },
+            leave: () => {
+              removeTooltip();
+            },
+            dispose: () => {},
+          });
+        }
+
+        // IP:Port detection
+        const ipPortRegex = /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})\b/g;
+        while ((match = ipPortRegex.exec(text)) !== null) {
+          const startCol = match.index + 1;
+          const endCol = match.index + match[0].length;
+          // Skip if already matched as part of a URL
+          const isInsideUrl = links.some(
+            (l) => match!.index >= (l.range.start.x - 1) && match!.index + match![0].length <= (l.range.end.x - 1)
+          );
+          if (isInsideUrl) continue;
+          links.push({
+            range: {
+              start: { x: startCol, y: bufferLineNumber } as IBufferCellPosition,
+              end: { x: endCol, y: bufferLineNumber } as IBufferCellPosition,
+            } as IBufferRange,
+            text: match[0],
+            decorations: { underline: true, pointerCursor: true },
+            activate: (_event: MouseEvent, text: string) => {
+              navigator.clipboard.writeText(text).catch(() => {});
+            },
+            hover: (_event: MouseEvent, text: string) => {
+              createTooltip(text, "点击复制", _event.clientX, _event.clientY);
+            },
+            leave: () => {
+              removeTooltip();
+            },
+            dispose: () => {},
+          });
+        }
+
+        // File path detection: /path or ~/path or C:\path
+        const pathRegex = /(?:~\/[\w\/.\-]+|\/[\w\/.\-]+|C:\\[\w\\.\-]+)/g;
+        while ((match = pathRegex.exec(text)) !== null) {
+          const startCol = match.index + 1;
+          const endCol = match.index + match[0].length;
+          // Skip if already matched as part of a URL or IP:Port
+          const isInsideExisting = links.some(
+            (l) => match!.index >= (l.range.start.x - 1) && match!.index + match![0].length <= (l.range.end.x - 1)
+          );
+          if (isInsideExisting) continue;
+          // Skip very short matches (likely not real paths)
+          if (match[0].length < 3) continue;
+          links.push({
+            range: {
+              start: { x: startCol, y: bufferLineNumber } as IBufferCellPosition,
+              end: { x: endCol, y: bufferLineNumber } as IBufferCellPosition,
+            } as IBufferRange,
+            text: match[0],
+            decorations: { underline: true, pointerCursor: true },
+            activate: (_event: MouseEvent, text: string) => {
+              navigator.clipboard.writeText(text).catch(() => {});
+            },
+            hover: (_event: MouseEvent, text: string) => {
+              createTooltip(text, "点击复制路径", _event.clientX, _event.clientY);
+            },
+            leave: () => {
+              removeTooltip();
+            },
+            dispose: () => {},
+          });
+        }
+
+        callback(links.length > 0 ? links : undefined);
+      },
+    };
+
+    const disposable = term.registerLinkProvider(linkProvider);
+
+    return () => {
+      disposable.dispose();
+      removeTooltip();
+    };
+  }, [paneState, paneSessionId]);
 
   const handleRetry = () => {
     if (server) connectServer(server);
