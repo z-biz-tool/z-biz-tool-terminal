@@ -21,6 +21,8 @@ export interface TerminalSettings {
   auto_reconnect: boolean;
   connection_timeout: number;
   ssh_agent_forward: boolean;
+  background_image: string | null;
+  custom_css: string | null;
 }
 
 /** 持久化的完整配置 */
@@ -161,6 +163,8 @@ const defaultSettings: TerminalSettings = {
   auto_reconnect: true,
   connection_timeout: 30,
   ssh_agent_forward: false,
+  background_image: null,
+  custom_css: null,
 };
 
 export const useServerStore = create<ServerStore>((set, get) => ({

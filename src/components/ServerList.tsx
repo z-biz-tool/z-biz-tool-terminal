@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import {
   Button,
   Modal,
@@ -14,6 +14,7 @@ import {
   Tooltip,
   Input as AntInput,
 } from "antd";
+import type { TreeProps } from "antd";
 import {
   PlusOutlined,
   EditOutlined,
@@ -86,6 +87,15 @@ export default function ServerList() {
       if (!groups[g]) groups[g] = [];
       groups[g].push(s);
     });
+
+    // 按 order 字段排序（升序，null 排最后），再按 name 字母排序
+    const sortServers = (items: ServerConfig[]) =>
+      [...items].sort((a, b) => {
+        if (a.order != null && b.order == null) return -1;
+        if (a.order == null && b.order != null) return 1;
+        if (a.order != null && b.order != null) return a.order - b.order;
+        return a.name.localeCompare(b.name);
+      });
 
     const renderServerTitle = (s: ServerConfig) => (
       <div
@@ -190,7 +200,7 @@ export default function ServerList() {
           </span>
         ),
         selectable: false,
-        children: pinnedServers.map((s) => ({
+        children: sortServers(pinnedServers).map((s) => ({
           key: `pinned-${s.id}`,
           title: renderServerTitle(s),
           isLeaf: true,
@@ -216,7 +226,7 @@ export default function ServerList() {
           </span>
         ),
         selectable: false,
-        children: items.map((s) => ({
+        children: sortServers(items).map((s) => ({
           key: s.id,
           title: renderServerTitle(s),
           isLeaf: true,
@@ -284,6 +294,99 @@ export default function ServerList() {
       message.error(String(e));
     }
   };
+
+  // 拖拽排序处理
+  const handleDrop: TreeProps["onDrop"] = useCallback(
+    (info: any) => {
+      const dragKey = info.dragNode.key as string;
+      const dropKey = info.node.key as string;
+      const dropToGap = info.dropToGap;
+
+      // 判断拖拽的是否是服务器节点（非分组节点）
+      const isDragServer = !String(dragKey).startsWith("group-");
+      const isDropGroup = String(dropKey).startsWith("group-");
+
+      if (!isDragServer) {
+        // 拖拽分组节点：暂不支持分组间排序
+        return;
+      }
+
+      // 获取拖拽的服务器 ID（pinned- 前缀需要去掉）
+      const serverId = String(dragKey).startsWith("pinned-")
+        ? String(dragKey).replace("pinned-", "")
+        : String(dragKey);
+
+      const dragServer = servers.find((s) => s.id === serverId);
+      if (!dragServer) return;
+
+      if (isDropGroup && !dropToGap) {
+        // 拖拽服务器到分组节点上：移动到该分组
+        const groupName = String(dropKey).replace("group-", "");
+        if (groupName === "⭐ 收藏") {
+          // 拖入收藏分组 = 设置 pinned
+          updateServer(serverId, { pinned: true });
+        } else {
+          updateServer(serverId, { group: groupName === "默认分组" ? "" : groupName });
+        }
+        return;
+      }
+
+      // 拖拽到其他服务器节点之间：重新排序
+      // 确定目标分组
+      let targetGroup = dragServer.group || "默认分组";
+      let targetServerId: string | null = null;
+
+      if (!isDropGroup) {
+        // drop 到服务器节点
+        const dropServerId = String(dropKey).startsWith("pinned-")
+          ? String(dropKey).replace("pinned-", "")
+          : String(dropKey);
+        const dropServer = servers.find((s) => s.id === dropServerId);
+        if (dropServer) {
+          targetGroup = dropServer.group || "默认分组";
+          targetServerId = dropServerId;
+        }
+      }
+
+      // 获取目标分组中的所有服务器，按 order 排序
+      const groupServers = servers
+        .filter((s) => (s.group || "默认分组") === targetGroup)
+        .sort((a, b) => {
+          if (a.order != null && b.order == null) return -1;
+          if (a.order == null && b.order != null) return 1;
+          if (a.order != null && b.order != null) return a.order - b.order;
+          return a.name.localeCompare(b.name);
+        });
+
+      // 移除拖拽的服务器（如果它在同一分组）
+      const withoutDrag = groupServers.filter((s) => s.id !== serverId);
+
+      // 计算插入位置
+      let insertIndex: number;
+      if (targetServerId) {
+        const targetIdx = withoutDrag.findIndex((s) => s.id === targetServerId);
+        insertIndex = dropToGap ? targetIdx : targetIdx + 1;
+      } else {
+        insertIndex = withoutDrag.length;
+      }
+
+      // 插入拖拽的服务器
+      withoutDrag.splice(insertIndex, 0, dragServer);
+
+      // 重新分配 order 值
+      withoutDrag.forEach((s, idx) => {
+        if (s.id === serverId) {
+          // 拖拽的服务器：更新 group 和 order
+          const newGroup = targetGroup === "默认分组" ? "" : targetGroup;
+          updateServer(serverId, { order: idx, group: newGroup });
+        } else if (s.order !== idx) {
+          // 其他服务器：只更新 order（如果变化了）
+          updateServer(s.id, { order: idx });
+        }
+      });
+    },
+    [servers, updateServer]
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -357,7 +460,7 @@ export default function ServerList() {
             }
           />
         ) : (
-          <Tree treeData={treeData} defaultExpandAll showLine={false} blockNode />
+          <Tree treeData={treeData} defaultExpandAll showLine={false} blockNode draggable={{ icon: false }} onDrop={handleDrop} />
         )}
       </div>
 

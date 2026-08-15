@@ -1,5 +1,7 @@
-import { Modal, Form, InputNumber, Select, Switch, Input, Divider, Slider, message } from "antd";
+import { Modal, Form, InputNumber, Select, Switch, Input, Divider, Slider, message, Button, Space } from "antd";
 import { useServerStore } from "../stores/serverStore";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { useState } from "react";
 
 interface Props {
   open: boolean;
@@ -8,11 +10,34 @@ interface Props {
 
 export default function SettingsModal({ open, onClose }: Props) {
   const { settings, updateSettings } = useServerStore();
+  const [bgPreview, setBgPreview] = useState<string | null>(settings.background_image);
 
   const handleSave = async () => {
     updateSettings(settings);
     message.success("设置已保存");
     onClose();
+  };
+
+  const handleBgFilePick = async () => {
+    try {
+      const path = await openDialog({
+        title: "选择背景图片",
+        filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+        multiple: false,
+      });
+      if (path) {
+        const filePath = path as string;
+        updateSettings({ background_image: filePath });
+        setBgPreview(filePath);
+      }
+    } catch (e) {
+      message.error(String(e));
+    }
+  };
+
+  const handleBgClear = () => {
+    updateSettings({ background_image: null });
+    setBgPreview(null);
   };
 
   return (
@@ -116,6 +141,48 @@ export default function SettingsModal({ open, onClose }: Props) {
               { value: "ayu", label: "Ayu" },
               { value: "gruvbox", label: "Gruvbox" },
             ]}
+          />
+        </Form.Item>
+
+        <Divider plain style={{ margin: "8px 0 16px" }}>
+          外观自定义
+        </Divider>
+
+        <Form.Item label="背景图片" extra="设置终端背景图片，支持本地文件路径或 URL">
+          <Space.Compact style={{ width: "100%" }}>
+            <Input
+              value={settings.background_image ?? ""}
+              onChange={(e) => {
+                const val = e.target.value || null;
+                updateSettings({ background_image: val });
+                setBgPreview(val);
+              }}
+              placeholder="输入图片 URL 或文件路径"
+              style={{ flex: 1 }}
+            />
+            <Button onClick={handleBgFilePick}>选择文件</Button>
+            {settings.background_image && (
+              <Button danger onClick={handleBgClear}>清除</Button>
+            )}
+          </Space.Compact>
+          {bgPreview && (
+            <div style={{ marginTop: 8, borderRadius: 6, overflow: "hidden", border: "1px solid #f0f0f0", display: "inline-block" }}>
+              <img
+                src={bgPreview.startsWith("http") ? bgPreview : `file://${bgPreview}`}
+                alt="背景预览"
+                style={{ maxWidth: 200, maxHeight: 80, display: "block", objectFit: "cover" }}
+                onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+              />
+            </div>
+          )}
+        </Form.Item>
+        <Form.Item label="自定义 CSS" extra="注入到终端的自定义 CSS 样式">
+          <Input.TextArea
+            rows={4}
+            value={settings.custom_css ?? ""}
+            onChange={(e) => updateSettings({ custom_css: e.target.value || null })}
+            placeholder={`/* 示例：修改终端光标颜色 */\n/* .xterm-cursor { color: #ff0 !important; } */`}
+            style={{ fontFamily: "monospace" }}
           />
         </Form.Item>
 

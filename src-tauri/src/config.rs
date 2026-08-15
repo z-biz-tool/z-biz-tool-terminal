@@ -19,6 +19,8 @@ pub struct ServerConfig {
     pub pinned: Option<bool>,
     #[serde(default)]
     pub proxy_jump: Option<String>,
+    #[serde(default)]
+    pub order: Option<u32>,
 }
 
 /// 快捷命令片段配置
@@ -75,6 +77,12 @@ pub struct TerminalSettings {
     /// SSH Agent Forwarding
     #[serde(default)]
     pub ssh_agent_forward: bool,
+    /// 背景图片 URL 或文件路径
+    #[serde(default)]
+    pub background_image: Option<String>,
+    /// 自定义 CSS
+    #[serde(default)]
+    pub custom_css: Option<String>,
 }
 
 fn default_auto_reconnect() -> bool {
@@ -120,6 +128,8 @@ impl Default for TerminalSettings {
             auto_reconnect: true,
             connection_timeout: 30,
             ssh_agent_forward: false,
+            background_image: None,
+            custom_css: None,
         }
     }
 }

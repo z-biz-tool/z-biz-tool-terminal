@@ -173,6 +173,9 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
     if (termRef.current) return;
 
     const themePreset = THEMES[settings.theme] || THEMES.dark;
+    const initTheme = settings.background_image
+      ? { ...themePreset, background: themePreset.background + 'cc' }
+      : themePreset;
 
     const term = new Terminal({
       fontSize: settings.font_size,
@@ -182,7 +185,7 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
       cursorStyle: (settings.cursor_style as any) || "block",
       fontLigatures: settings.font_ligatures || false,
       bellStyle: settings.bell ? "sound" : "none",
-      theme: themePreset,
+      theme: initTheme,
       convertEol: true,
       allowProposedApi: true,
     } as any);
@@ -300,6 +303,14 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
     term.options.fontFamily = settings.font_family;
     term.options.scrollback = settings.scrollback;
     term.options.cursorBlink = settings.cursor_blink;
+
+    // 当有背景图片时，修改主题背景为半透明
+    const themePreset = THEMES[settings.theme] || THEMES.dark;
+    if (settings.background_image) {
+      term.options.theme = { ...themePreset, background: themePreset.background + 'cc' };
+    } else {
+      term.options.theme = themePreset;
+    }
   }, [settings]);
 
   // copy_on_select: 选中时自动复制到剪贴板
@@ -320,6 +331,41 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
       disposable.dispose();
     };
   }, [settings.copy_on_select]);
+
+  // 背景图片
+  useEffect(() => {
+    const container = terminalRef.current;
+    if (!container) return;
+    if (settings.background_image) {
+      const src = settings.background_image.startsWith("http")
+        ? settings.background_image
+        : `file://${settings.background_image}`;
+      container.style.backgroundImage = `url(${src})`;
+      container.style.backgroundSize = "cover";
+      container.style.backgroundPosition = "center";
+    } else {
+      container.style.backgroundImage = "none";
+    }
+  }, [settings.background_image]);
+
+  // 自定义 CSS
+  useEffect(() => {
+    let styleEl = document.getElementById("z-terminal-custom-css") as HTMLStyleElement | null;
+    if (!settings.custom_css) {
+      if (styleEl) styleEl.remove();
+      return;
+    }
+    if (!styleEl) {
+      styleEl = document.createElement("style");
+      styleEl.id = "z-terminal-custom-css";
+      document.head.appendChild(styleEl);
+    }
+    styleEl.textContent = settings.custom_css;
+    return () => {
+      const el = document.getElementById("z-terminal-custom-css");
+      if (el) el.remove();
+    };
+  }, [settings.custom_css]);
 
   // URL/路径自动检测: 使用 xterm.js link provider API
   useEffect(() => {
@@ -534,17 +580,20 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
   }, []);
 
   const themePreset = THEMES[settings.theme] || THEMES.dark;
+  const bgWithAlpha = settings.background_image
+    ? themePreset.background + "cc"
+    : themePreset.background;
 
   return (
     <div
-      style={{ display: "flex", flexDirection: "column", height: "100%", background: themePreset.background }}
+      style={{ display: "flex", flexDirection: "column", height: "100%", background: bgWithAlpha }}
       onMouseDown={handleFocus}
     >
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
         <div
           className="terminal-container"
           ref={terminalRef}
-          style={{ height: "100%", background: themePreset.background, opacity: settings.opacity }}
+          style={{ height: "100%", background: bgWithAlpha, opacity: settings.opacity }}
           onContextMenu={(e) => {
             if (!settings.right_click_paste) return;
             e.preventDefault();
@@ -564,12 +613,12 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
           scrollToLine={bufferApi.scrollToLine}
         />
         {paneState === "connecting" && (
-          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: themePreset.background }}>
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: bgWithAlpha }}>
             <LoadingState tip="正在连接..." minHeight={200} />
           </div>
         )}
         {paneState === "error" && (
-          <div style={{ position: "absolute", inset: 0, overflow: "auto", background: themePreset.background }}>
+          <div style={{ position: "absolute", inset: 0, overflow: "auto", background: bgWithAlpha }}>
             <ErrorState message={paneError} onRetry={handleRetry} />
           </div>
         )}

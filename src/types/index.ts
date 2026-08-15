@@ -24,6 +24,8 @@ export interface ServerConfig {
   pinned?: boolean;
   /** 跳板机ID */
   proxyJump?: string;
+  /** 排序权重(升序, null排最后) */
+  order?: number;
 }
 
 /** 连接状态 */
