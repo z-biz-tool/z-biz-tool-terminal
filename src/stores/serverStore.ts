@@ -1,7 +1,16 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ServerConfig, TerminalTab, SplitDirection, SplitPane, ConnectResult, SftpEntry, Snippet, ServerSystemInfo } from "../types";
+import type {
+  ServerConfig,
+  TerminalTab,
+  SplitDirection,
+  SplitPane,
+  ConnectResult,
+  SftpEntry,
+  Snippet,
+  ServerSystemInfo,
+} from "../types";
 
 /** 终端设置 */
 export interface TerminalSettings {
@@ -25,12 +34,29 @@ export interface TerminalSettings {
   custom_css: string | null;
 }
 
+/** 持久化的分屏面板(只保存结构) */
+export interface PersistPane {
+  id: string;
+  serverId: string;
+}
+
+/** 持久化的终端 Tab(只保存结构) */
+export interface PersistTab {
+  id: string;
+  serverId: string;
+  panes: PersistPane[];
+  splitDirection?: SplitDirection;
+}
+
 /** 持久化的完整配置 */
 export interface PersistConfig {
   servers: ServerConfig[];
   settings: TerminalSettings;
   snippets: Snippet[];
   custom_groups?: string[];
+  tabs?: PersistTab[];
+  active_tab_id?: string;
+  active_pane_id?: string;
 }
 
 interface ServerStore {
@@ -45,8 +71,8 @@ interface ServerStore {
   snippetsVisible: boolean;
   settings: TerminalSettings;
   loaded: boolean;
-  /** 正在重连的 serverId 集合 */
-  reconnectingServers: Set<string>;
+  /** 正在重连的 tabId 集合(每个 tab 独立重连) */
+  reconnectingTabs: Set<string>;
   /** 已连接会话的服务器系统信息: sessionId -> info */
   serverInfos: Record<string, ServerSystemInfo>;
   /** 正在采集信息的 sessionId 集合,避免重复请求 */
@@ -68,15 +94,28 @@ interface ServerStore {
   importConfig: (path: string) => Promise<void>;
   /** 持久化自定义分组 */
   persistCustomGroups: () => Promise<void>;
+  /** 持久化 Tab 结构 + 活动 tab/pane(用于重启后恢复) */
+  persistTabs: () => Promise<void>;
 
   addServer: (server: Omit<ServerConfig, "id">) => void;
   updateServer: (id: string, server: Partial<ServerConfig>) => void;
   removeServer: (id: string) => void;
+
+  /** 连接到服务器: 若已存在同服务器 tab 则聚焦第一个, 否则新建一个 tab */
   connectServer: (server: ServerConfig) => Promise<void>;
+  /** 始终为该服务器新建一个 tab(支持同服务器多开) */
+  openNewTab: (server: ServerConfig) => Promise<void>;
+  /** 内部辅助: 创建一个新 tab 并发起 SSH 连接 */
+  _createTabForServer: (server: ServerConfig, targetTabId?: string) => Promise<string>;
+  /** 关闭指定 tab(断开该 tab 全部面板的 SSH 会话) */
+  closeTab: (tabId: string) => Promise<void>;
+  /** 激活指定 tab */
+  setActiveTab: (tabId: string) => void;
+  /** 关闭该服务器下所有 tab */
   disconnectServer: (serverId: string) => Promise<void>;
+  /** 在当前活动 tab 上执行命令 */
   executeCommand: (serverId: string, command: string) => Promise<string>;
-  closeTab: (serverId: string) => void;
-  setActiveTab: (serverId: string) => void;
+
   listSftp: (serverId: string, path: string) => Promise<void>;
   toggleSftp: (visible?: boolean) => void;
   toggleSnippets: (visible?: boolean) => void;
@@ -85,14 +124,14 @@ interface ServerStore {
   removeSnippet: (id: string) => void;
   executeSnippet: (serverId: string, command: string) => void;
   updateSettings: (settings: Partial<TerminalSettings>) => void;
-  /** 分屏: 在当前活动Tab中添加新面板 */
-  splitTab: (tabServerId: string, direction: SplitDirection, targetServerId?: string) => Promise<void>;
-  /** 关闭分屏面板 */
-  closePane: (tabServerId: string, paneId: string) => Promise<void>;
+  /** 分屏: 在指定 tab 中添加新面板(可指定连接其他服务器) */
+  splitTab: (tabId: string, direction: SplitDirection, targetServerId?: string) => Promise<void>;
+  /** 关闭分屏面板(若该 tab 无面板则关闭整个 tab) */
+  closePane: (tabId: string, paneId: string) => Promise<void>;
   /** 设置活动面板 */
-  setActivePane: (tabServerId: string, paneId: string) => void;
-  /** 自动重连 */
-  reconnectServer: (serverId: string) => Promise<void>;
+  setActivePane: (tabId: string, paneId: string) => void;
+  /** 自动重连某个 tab */
+  reconnectTab: (tabId: string) => Promise<void>;
   /** 初始化 pty-closed 事件监听 */
   initPtyClosedListener: () => void;
   /** 采集并缓存某个 sessionId 的服务器系统信息 */
@@ -120,7 +159,10 @@ async function connectToServer(
   const timeoutMs = (settings.connection_timeout || 30) * 1000;
 
   const timeoutPromise = new Promise<ConnectResult>((_, reject) => {
-    setTimeout(() => reject(new Error(`连接超时（${settings.connection_timeout || 30}秒）`)), timeoutMs);
+    setTimeout(
+      () => reject(new Error(`连接超时（${settings.connection_timeout || 30}秒）`)),
+      timeoutMs
+    );
   });
 
   if (server.proxyJump) {
@@ -198,14 +240,15 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   snippetsVisible: false,
   settings: defaultSettings,
   loaded: false,
-  reconnectingServers: new Set(),
+  reconnectingTabs: new Set(),
   serverInfos: {},
   fetchingServerInfo: new Set(),
   customGroups: [],
 
   loadConfig: async () => {
+    let config: PersistConfig | null = null;
     try {
-      const config = await invoke<PersistConfig>("get_config");
+      config = await invoke<PersistConfig>("get_config");
       set({
         servers: config.servers || [],
         settings: config.settings || defaultSettings,
@@ -218,6 +261,52 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     }
     // Initialize pty-closed listener for auto-reconnect
     get().initPtyClosedListener();
+
+    // 恢复 Tab 结构(只恢复结构, sessionId/state 不恢复, 默认 disconnected)
+    if (config?.tabs && config.tabs.length > 0) {
+      const servers = get().servers;
+      const restoredTabs: TerminalTab[] = [];
+      for (const t of config.tabs) {
+        // tab 引用的 server 必须还存在(否则跳过)
+        if (!servers.find((s) => s.id === t.serverId)) continue;
+        const restoredPanes: SplitPane[] = [];
+        for (const p of t.panes) {
+          // pane 引用的 server 也必须存在
+          if (!servers.find((s) => s.id === p.serverId)) continue;
+          restoredPanes.push({
+            id: p.id,
+            serverId: p.serverId,
+            state: "disconnected",
+          });
+        }
+        if (restoredPanes.length === 0) continue;
+        restoredTabs.push({
+          id: t.id,
+          serverId: t.serverId,
+          state: "disconnected",
+          panes: restoredPanes,
+          splitDirection: t.splitDirection,
+        });
+      }
+      if (restoredTabs.length > 0) {
+        // 恢复活动 tab/pane (如果还存在)
+        const activeTabId = config.active_tab_id && restoredTabs.find((t) => t.id === config.active_tab_id)
+          ? config.active_tab_id
+          : restoredTabs[0].id;
+        const activeTab = restoredTabs.find((t) => t.id === activeTabId);
+        const activePaneId = config.active_pane_id && activeTab?.panes.find((p) => p.id === config.active_pane_id)
+          ? config.active_pane_id
+          : activeTab?.panes[0]?.id || null;
+        set({ tabs: restoredTabs, activeTabId, activePaneId });
+        // 自动重连所有恢复的 tab
+        for (const tab of restoredTabs) {
+          const server = servers.find((s) => s.id === tab.serverId);
+          if (server) {
+            get().reconnectTab(tab.id);
+          }
+        }
+      }
+    }
   },
 
   persistServers: async () => {
@@ -249,6 +338,25 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       await invoke("save_custom_groups", { groups: get().customGroups });
     } catch (e) {
       console.error("持久化自定义分组失败:", e);
+    }
+  },
+
+  persistTabs: async () => {
+    try {
+      const { tabs, activeTabId, activePaneId } = get();
+      const persistableTabs: PersistTab[] = tabs.map((t) => ({
+        id: t.id,
+        serverId: t.serverId,
+        panes: t.panes.map((p) => ({ id: p.id, serverId: p.serverId })),
+        splitDirection: t.splitDirection,
+      }));
+      await invoke("save_tabs", {
+        tabs: persistableTabs,
+        activeTabId,
+        activePaneId,
+      });
+    } catch (e) {
+      console.error("持久化 Tab 失败:", e);
     }
   },
 
@@ -286,16 +394,18 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     set((state) => ({
       servers: state.servers.filter((s) => s.id !== id),
       tabs: state.tabs.filter((t) => t.serverId !== id),
-      activeTabId: state.activeTabId === id ? null : state.activeTabId,
+      activeTabId: state.tabs.find((t) => t.id === state.activeTabId && t.serverId === id)
+        ? null
+        : state.activeTabId,
     }));
     get().persistServers();
+    get().persistTabs();
   },
 
   addGroup: (name) => {
     const trimmed = name.trim();
     if (!trimmed) return;
     const { customGroups, servers } = get();
-    // 已存在同名分组(无论是 customGroup 还是 server.group)则跳过
     if (customGroups.includes(trimmed)) return;
     if (servers.some((s) => (s.group || "") === trimmed)) return;
     set({ customGroups: [...customGroups, trimmed] });
@@ -306,51 +416,34 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     const trimmed = newName.trim();
     if (!trimmed || trimmed === oldName) return;
     const { customGroups, servers } = get();
-    // 改名后不能与已有的其他分组冲突
     if (customGroups.includes(trimmed) && trimmed !== oldName) return;
     if (servers.some((s) => (s.group || "") === trimmed) && trimmed !== oldName) return;
     set({
       customGroups: customGroups.map((g) => (g === oldName ? trimmed : g)),
-      servers: servers.map((s) =>
-        (s.group || "") === oldName ? { ...s, group: trimmed } : s
-      ),
+      servers: servers.map((s) => (s.group || "") === oldName ? { ...s, group: trimmed } : s),
     });
     get().persistCustomGroups();
     get().persistServers();
   },
 
   removeGroup: (name) => {
-    // 仅从 customGroups 列表中移除。若该分组下还有服务器, 树依然会展示(因为 server.group 字段仍存在)。
     set((state) => ({
       customGroups: state.customGroups.filter((g) => g !== name),
     }));
     get().persistCustomGroups();
   },
 
-  connectServer: async (server) => {
-    const existing = get().tabs.find((t) => t.serverId === server.id);
-    if (existing && existing.state === "connected") {
-      set({ activeTabId: server.id, activePaneId: existing.panes[0]?.id || null });
-      return;
-    }
-
+  // 内部辅助: 为指定 server 创建一个新 tab (含 pane + SSH 连接)
+  _createTabForServer: async (server: ServerConfig, targetTabId?: string): Promise<string> => {
+    const tabId = targetTabId || genId();
     const paneId = genId();
-    set((state) => {
-      const newPane: SplitPane = { id: paneId, serverId: server.id, state: "connecting" };
-      const tabs = existing
-        ? state.tabs.map((t) =>
-            t.serverId === server.id
-              ? {
-                  ...t,
-                  state: "connecting" as const,
-                  error: undefined,
-                  panes: [{ ...newPane, id: t.panes[0]?.id || paneId }],
-                }
-              : t
-          )
-        : [...state.tabs, { serverId: server.id, state: "connecting" as const, panes: [newPane] }];
-      return { tabs, activeTabId: server.id, activePaneId: paneId };
-    });
+    const newPane: SplitPane = { id: paneId, serverId: server.id, state: "connecting" };
+
+    set((state) => ({
+      tabs: [...state.tabs, { id: tabId, serverId: server.id, state: "connecting", panes: [newPane] }],
+      activeTabId: tabId,
+      activePaneId: paneId,
+    }));
 
     try {
       const settings = get().settings;
@@ -359,13 +452,15 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       if (result.success && result.session_id) {
         set((state) => ({
           tabs: state.tabs.map((t) =>
-            t.serverId === server.id
+            t.id === tabId
               ? {
                   ...t,
                   state: "connected",
                   sessionId: result.session_id,
-                  panes: t.panes.map((p, i) =>
-                    i === 0 ? { ...p, state: "connected" as const, sessionId: result.session_id } : p
+                  panes: t.panes.map((p) =>
+                    p.id === paneId
+                      ? { ...p, state: "connected" as const, sessionId: result.session_id }
+                      : p
                   ),
                 }
               : t
@@ -374,13 +469,15 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       } else {
         set((state) => ({
           tabs: state.tabs.map((t) =>
-            t.serverId === server.id
+            t.id === tabId
               ? {
                   ...t,
                   state: "error",
                   error: result.error || "连接失败",
-                  panes: t.panes.map((p, i) =>
-                    i === 0 ? { ...p, state: "error" as const, error: result.error || "连接失败" } : p
+                  panes: t.panes.map((p) =>
+                    p.id === paneId
+                      ? { ...p, state: "error" as const, error: result.error || "连接失败" }
+                      : p
                   ),
                 }
               : t
@@ -390,52 +487,105 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     } catch (e: any) {
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.serverId === server.id
+          t.id === tabId
             ? {
                 ...t,
                 state: "error",
                 error: String(e),
-                panes: t.panes.map((p, i) =>
-                  i === 0 ? { ...p, state: "error" as const, error: String(e) } : p
+                panes: t.panes.map((p) =>
+                  p.id === paneId
+                    ? { ...p, state: "error" as const, error: String(e) }
+                    : p
                 ),
               }
             : t
         ),
       }));
     }
+    return tabId;
   },
 
-  disconnectServer: async (serverId) => {
-    const tab = get().tabs.find((t) => t.serverId === serverId);
-    if (tab) {
-      // Disconnect all pane sessions
-      for (const pane of tab.panes) {
-        if (pane.sessionId) {
-          try {
-            await invoke("ssh_disconnect", { sessionId: pane.sessionId });
-          } catch {}
-        }
+  connectServer: async (server) => {
+    // 若已有该服务器的 tab, 聚焦第一个; 否则新建
+    const existing = get().tabs.find((t) => t.serverId === server.id);
+    if (existing) {
+      const firstPane = existing.panes[0];
+      set({
+        activeTabId: existing.id,
+        activePaneId: firstPane?.id || null,
+      });
+      get().persistTabs();
+      return;
+    }
+    await get()._createTabForServer(server);
+    get().persistTabs();
+  },
+
+  openNewTab: async (server) => {
+    // 总是新建, 不论是否已有同服务器 tab
+    await get()._createTabForServer(server);
+    get().persistTabs();
+  },
+
+  closeTab: async (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+
+    // 断开该 tab 全部面板的 SSH 会话
+    for (const pane of tab.panes) {
+      if (pane.sessionId) {
+        try {
+          await invoke("ssh_disconnect", { sessionId: pane.sessionId });
+        } catch {}
       }
     }
-    // 清理该 serverId 相关所有 session 的采集信息
+
+    // 清理该 tab 相关 session 的采集信息
     set((state) => {
-      if (!tab) return {};
       const remaining = { ...state.serverInfos };
       for (const pane of tab.panes) {
         if (pane.sessionId) delete remaining[pane.sessionId];
       }
+      const remainingTabs = state.tabs.filter((t) => t.id !== tabId);
+      const wasActive = state.activeTabId === tabId;
+      const newActiveId = wasActive
+        ? remainingTabs[0]?.id || null
+        : state.activeTabId;
       return {
-        tabs: state.tabs.filter((t) => t.serverId !== serverId),
-        activeTabId: state.activeTabId === serverId ? null : state.activeTabId,
+        tabs: remainingTabs,
+        activeTabId: newActiveId,
         activePaneId:
-          state.activeTabId === serverId ? null : state.activePaneId,
+          wasActive
+            ? remainingTabs[0]?.panes[0]?.id || null
+            : state.activePaneId,
         serverInfos: remaining,
       };
     });
+    get().persistTabs();
+  },
+
+  setActiveTab: (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    set({
+      activeTabId: tabId,
+      activePaneId: tab?.panes[0]?.id || null,
+    });
+    get().persistTabs();
+  },
+
+  disconnectServer: async (serverId) => {
+    // 关闭该服务器下所有 tab
+    const serverTabIds = get().tabs.filter((t) => t.serverId === serverId).map((t) => t.id);
+    for (const tid of serverTabIds) {
+      await get().closeTab(tid);
+    }
   },
 
   executeCommand: async (serverId, command) => {
-    const tab = get().tabs.find((t) => t.serverId === serverId);
+    // 在该服务器的活动 tab 上执行 (优先 activeTab, 否则任意一个)
+    const tab =
+      get().tabs.find((t) => t.serverId === serverId && t.id === get().activeTabId) ||
+      get().tabs.find((t) => t.serverId === serverId);
     const activePane = tab?.panes.find((p) => p.id === get().activePaneId);
     const sessionId = activePane?.sessionId || tab?.sessionId;
     if (!sessionId) throw new Error("会话未连接");
@@ -447,22 +597,10 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     return result.output;
   },
 
-  closeTab: (serverId) => {
-    get()
-      .disconnectServer(serverId)
-      .catch(() => {});
-  },
-
-  setActiveTab: (serverId) => {
-    const tab = get().tabs.find((t) => t.serverId === serverId);
-    set({
-      activeTabId: serverId,
-      activePaneId: tab?.panes[0]?.id || null,
-    });
-  },
-
   listSftp: async (serverId, path) => {
-    const tab = get().tabs.find((t) => t.serverId === serverId);
+    const tab =
+      get().tabs.find((t) => t.serverId === serverId && t.id === get().activeTabId) ||
+      get().tabs.find((t) => t.serverId === serverId);
     const activePane = tab?.panes.find((p) => p.id === get().activePaneId);
     const sessionId = activePane?.sessionId || tab?.sessionId;
     if (!sessionId) throw new Error("会话未连接");
@@ -506,7 +644,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   },
 
   executeSnippet: (serverId, command) => {
-    const tab = get().tabs.find((t) => t.serverId === serverId);
+    const tab =
+      get().tabs.find((t) => t.serverId === serverId && t.id === get().activeTabId) ||
+      get().tabs.find((t) => t.serverId === serverId);
     const activePane = tab?.panes.find((p) => p.id === get().activePaneId);
     const sessionId = activePane?.sessionId || tab?.sessionId;
     if (!sessionId) return;
@@ -522,21 +662,20 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     get().persistSettings();
   },
 
-  splitTab: async (tabServerId, direction, targetServerId) => {
-    const tab = get().tabs.find((t) => t.serverId === tabServerId);
+  splitTab: async (tabId, direction, targetServerId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
 
-    const serverId = targetServerId || tabServerId;
+    const serverId = targetServerId || tab.serverId;
     const server = get().servers.find((s) => s.id === serverId);
     if (!server) return;
 
     const newPaneId = genId();
     const newPane: SplitPane = { id: newPaneId, serverId, state: "connecting" };
 
-    // Update tab with new pane and direction
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.serverId === tabServerId
+        t.id === tabId
           ? {
               ...t,
               panes: [...t.panes, newPane],
@@ -547,7 +686,6 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       activePaneId: newPaneId,
     }));
 
-    // Connect the new pane
     try {
       const settings = get().settings;
       const result = await connectToServer(server, settings, get().servers);
@@ -555,7 +693,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       if (result.success && result.session_id) {
         set((state) => ({
           tabs: state.tabs.map((t) =>
-            t.serverId === tabServerId
+            t.id === tabId
               ? {
                   ...t,
                   panes: t.panes.map((p) =>
@@ -570,7 +708,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       } else {
         set((state) => ({
           tabs: state.tabs.map((t) =>
-            t.serverId === tabServerId
+            t.id === tabId
               ? {
                   ...t,
                   panes: t.panes.map((p) =>
@@ -586,7 +724,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     } catch (e: any) {
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.serverId === tabServerId
+          t.id === tabId
             ? {
                 ...t,
                 panes: t.panes.map((p) =>
@@ -599,13 +737,13 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         ),
       }));
     }
+    get().persistTabs();
   },
 
-  closePane: async (tabServerId, paneId) => {
-    const tab = get().tabs.find((t) => t.serverId === tabServerId);
+  closePane: async (tabId, paneId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
 
-    // Disconnect the pane's session
     const pane = tab.panes.find((p) => p.id === paneId);
     if (pane?.sessionId) {
       try {
@@ -616,20 +754,20 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     const remainingPanes = tab.panes.filter((p) => p.id !== paneId);
 
     if (remainingPanes.length === 0) {
-      // No panes left, close the entire tab
-      get().closeTab(tabServerId);
+      // 无面板剩,关闭整个 tab
+      await get().closeTab(tabId);
       return;
     }
 
     const primaryPane = remainingPanes[0];
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.serverId === tabServerId
+        t.id === tabId
           ? {
               ...t,
               panes: remainingPanes,
               splitDirection: remainingPanes.length <= 1 ? undefined : t.splitDirection,
-              // Sync tab-level fields with the new primary pane
+              // 同步 tab 顶层字段到新的主面板
               serverId: primaryPane.serverId,
               sessionId: primaryPane.sessionId,
               state: primaryPane.state,
@@ -637,33 +775,36 @@ export const useServerStore = create<ServerStore>((set, get) => ({
             }
           : t
       ),
-      activePaneId:
-        state.activePaneId === paneId ? remainingPanes[0].id : state.activePaneId,
+      activePaneId: state.activePaneId === paneId ? remainingPanes[0].id : state.activePaneId,
     }));
+    get().persistTabs();
   },
 
-  setActivePane: (tabServerId, paneId) => {
-    const tab = get().tabs.find((t) => t.serverId === tabServerId);
+  setActivePane: (tabId, paneId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
     const pane = tab.panes.find((p) => p.id === paneId);
     if (pane) {
       set({ activePaneId: paneId });
+      get().persistTabs();
     }
   },
 
-  reconnectServer: async (serverId) => {
-    const server = get().servers.find((s) => s.id === serverId);
+  reconnectTab: async (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    const server = get().servers.find((s) => s.id === tab.serverId);
     if (!server) return;
 
-    const { reconnectingServers } = get();
-    if (reconnectingServers.has(serverId)) return;
+    const { reconnectingTabs } = get();
+    if (reconnectingTabs.has(tabId)) return;
 
-    set({ reconnectingServers: new Set([...reconnectingServers, serverId]) });
+    set({ reconnectingTabs: new Set([...reconnectingTabs, tabId]) });
 
-    // Mark tab as reconnecting
+    // 标记 tab 为重连中
     set((state) => ({
       tabs: state.tabs.map((t) =>
-        t.serverId === serverId
+        t.id === tabId
           ? {
               ...t,
               state: "connecting" as const,
@@ -679,7 +820,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       ),
     }));
 
-    // Wait 3 seconds before reconnecting
+    // 等待 3 秒再重连
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
     try {
@@ -689,7 +830,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       if (result.success && result.session_id) {
         set((state) => ({
           tabs: state.tabs.map((t) =>
-            t.serverId === serverId
+            t.id === tabId
               ? {
                   ...t,
                   state: "connected" as const,
@@ -702,14 +843,14 @@ export const useServerStore = create<ServerStore>((set, get) => ({
                 }
               : t
           ),
-          reconnectingServers: new Set(
-            [...state.reconnectingServers].filter((id) => id !== serverId)
+          reconnectingTabs: new Set(
+            [...state.reconnectingTabs].filter((id) => id !== tabId)
           ),
         }));
       } else {
         set((state) => ({
           tabs: state.tabs.map((t) =>
-            t.serverId === serverId
+            t.id === tabId
               ? {
                   ...t,
                   state: "error" as const,
@@ -722,15 +863,15 @@ export const useServerStore = create<ServerStore>((set, get) => ({
                 }
               : t
           ),
-          reconnectingServers: new Set(
-            [...state.reconnectingServers].filter((id) => id !== serverId)
+          reconnectingTabs: new Set(
+            [...state.reconnectingTabs].filter((id) => id !== tabId)
           ),
         }));
       }
     } catch (e: any) {
       set((state) => ({
         tabs: state.tabs.map((t) =>
-          t.serverId === serverId
+          t.id === tabId
             ? {
                 ...t,
                 state: "error" as const,
@@ -741,8 +882,8 @@ export const useServerStore = create<ServerStore>((set, get) => ({
               }
             : t
         ),
-        reconnectingServers: new Set(
-          [...state.reconnectingServers].filter((id) => id !== serverId)
+        reconnectingTabs: new Set(
+          [...state.reconnectingTabs].filter((id) => id !== tabId)
         ),
       }));
     }
@@ -751,16 +892,16 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   initPtyClosedListener: () => {
     listen<{ session_id: string }>("pty-closed", (event) => {
       const { session_id } = event.payload;
-      const { tabs, settings, reconnectingServers } = get();
+      const { tabs, settings, reconnectingTabs } = get();
 
-      // Find the tab/pane that has this session_id
+      // 找到拥有该 session_id 的 tab 和 pane
       for (const tab of tabs) {
         for (const pane of tab.panes) {
           if (pane.sessionId === session_id) {
-            // Mark pane as disconnected
+            // 标记该 tab 为断开
             set((state) => ({
               tabs: state.tabs.map((t) =>
-                t.serverId === tab.serverId
+                t.id === tab.id
                   ? {
                       ...t,
                       state: "error" as const,
@@ -775,9 +916,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
               ),
             }));
 
-            // Auto-reconnect if enabled
-            if (settings.auto_reconnect && !reconnectingServers.has(tab.serverId)) {
-              get().reconnectServer(tab.serverId);
+            // 自动重连(每个 tab 独立)
+            if (settings.auto_reconnect && !reconnectingTabs.has(tab.id)) {
+              get().reconnectTab(tab.id);
             }
             return;
           }
@@ -789,7 +930,6 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   fetchServerInfo: async (sessionId, force = false) => {
     const { serverInfos, fetchingServerInfo } = get();
 
-    // 已有缓存且未过期(60秒)且非强制刷新,直接返回
     if (!force) {
       const cached = serverInfos[sessionId];
       if (cached && Date.now() / 1000 - cached.collected_at < 60) {
@@ -798,7 +938,6 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     }
 
     if (fetchingServerInfo.has(sessionId)) {
-      // 已有请求在飞,等一下返回缓存(可能很快就有)
       return null;
     }
 

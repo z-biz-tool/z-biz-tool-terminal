@@ -34,7 +34,7 @@ export default function DiagnosticModal({ open, onClose }: Props) {
 
   const getSessionId = useCallback(() => {
     const { tabs, activeTabId, activePaneId } = useServerStore.getState();
-    const tab = tabs.find((t) => t.serverId === activeTabId);
+    const tab = tabs.find((t) => t.id === activeTabId);
     const activePane = tab?.panes.find((p) => p.id === activePaneId);
     return activePane?.sessionId || tab?.sessionId;
   }, []);

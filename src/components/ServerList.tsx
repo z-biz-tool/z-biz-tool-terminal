@@ -64,6 +64,7 @@ export default function ServerList() {
     updateServer,
     removeServer,
     connectServer,
+    openNewTab,
     loadConfig,
     exportConfig,
     importConfig,
@@ -136,74 +137,80 @@ export default function ServerList() {
 
     // 渲染服务器条目(支持右键菜单)
     const renderServerTitle = (s: ServerConfig) => {
-      const items = [
-        {
-          key: "connect",
-          icon: <PoweroffOutlined />,
-          label: "连接",
-          onClick: () => connectServer(s),
-        },
-        {
-          key: "edit",
-          icon: <EditOutlined />,
-          label: "编辑...",
-          onClick: () => handleEdit(s),
-        },
-        {
-          key: "rename",
-          icon: <EditTwoTone />,
-          label: "重命名",
-          onClick: () => openRename("server", s.id, s.name),
-        },
-        { type: "divider" as const },
-        {
-          key: "clone",
-          icon: <CopyOutlined />,
-          label: "克隆",
-          onClick: () => handleClone(s),
-        },
-        {
-          key: "copyInfo",
-          icon: <CopyOutlined />,
-          label: "复制连接信息",
-          onClick: () => {
-            const info = `${s.username}@${s.host}:${s.port}`;
-            navigator.clipboard.writeText(info).then(() => {
-              message.success(`已复制: ${info}`);
-            });
-          },
-        },
-        {
-          key: "pin",
-          icon: s.pinned ? <StarFilled style={{ color: "#faad14" }} /> : <StarOutlined />,
-          label: s.pinned ? "取消收藏" : "收藏",
-          onClick: () => updateServer(s.id, { pinned: !s.pinned }),
-        },
-        { type: "divider" as const },
-        {
-          key: "delete",
-          icon: <DeleteOutlined />,
-          label: "删除",
-          danger: true,
-          onClick: () => {
-            Modal.confirm({
-              title: `删除服务器「${s.name}」?`,
-              content: "该操作不可撤销, 已有的连接会自动关闭。",
-              okText: "删除",
-              okButtonProps: { danger: true },
-              cancelText: "取消",
-              onOk: () => {
-                removeServer(s.id);
-                message.success("已删除");
-              },
-            });
-          },
-        },
-      ];
-
       return (
         <Dropdown
-          menu={{ items }}
+          menu={{
+            items: [
+              {
+                key: "connect",
+                icon: <PoweroffOutlined />,
+                label: "连接",
+                onClick: () => connectServer(s),
+              },
+              {
+                key: "newTab",
+                icon: <PlusOutlined />,
+                label: "新建终端",
+                onClick: () => openNewTab(s),
+              },
+              {
+                key: "edit",
+                icon: <EditOutlined />,
+                label: "编辑...",
+                onClick: () => handleEdit(s),
+              },
+              {
+                key: "rename",
+                icon: <EditTwoTone />,
+                label: "重命名",
+                onClick: () => openRename("server", s.id, s.name),
+              },
+              { type: "divider" as const },
+              {
+                key: "clone",
+                icon: <CopyOutlined />,
+                label: "克隆",
+                onClick: () => handleClone(s),
+              },
+              {
+                key: "copyInfo",
+                icon: <CopyOutlined />,
+                label: "复制连接信息",
+                onClick: () => {
+                  const info = `${s.username}@${s.host}:${s.port}`;
+                  navigator.clipboard.writeText(info).then(() => {
+                    message.success(`已复制: ${info}`);
+                  });
+                },
+              },
+              {
+                key: "pin",
+                icon: s.pinned ? <StarFilled style={{ color: "#faad14" }} /> : <StarOutlined />,
+                label: s.pinned ? "取消收藏" : "收藏",
+                onClick: () => updateServer(s.id, { pinned: !s.pinned }),
+              },
+              { type: "divider" as const },
+              {
+                key: "delete",
+                icon: <DeleteOutlined />,
+                label: "删除",
+                danger: true,
+                onClick: () => {
+                  Modal.confirm({
+                    title: `删除服务器「${s.name}」?`,
+                    content: "该操作不可撤销, 已有的连接会自动关闭。",
+                    okText: "删除",
+                    okButtonProps: { danger: true },
+                    cancelText: "取消",
+                    onOk: () => {
+                      removeServer(s.id);
+                      message.success("已删除");
+                    },
+                  });
+                },
+              },
+            ],
+          }}
           trigger={["contextMenu"]}
         >
           <div
@@ -211,7 +218,7 @@ export default function ServerList() {
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
-              padding: "2px 0",
+              minHeight: 22,
             }}
             onDoubleClick={() => connectServer(s)}
           >
@@ -703,7 +710,15 @@ export default function ServerList() {
             }
           />
         ) : (
-          <Tree treeData={treeData} defaultExpandAll showLine={false} blockNode draggable={{ icon: false }} onDrop={handleDrop} />
+          <Tree
+            className="tree-compact"
+            treeData={treeData}
+            defaultExpandAll
+            showLine={false}
+            blockNode
+            draggable={{ icon: false }}
+            onDrop={handleDrop}
+          />
         )}
       </div>
 

@@ -111,11 +111,11 @@ const THEMES: Record<string, {
 };
 
 interface TerminalViewProps {
-  serverId: string;
+  tabId: string;
   paneId?: string;
 }
 
-export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
+export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -133,11 +133,11 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
   const zmodemActiveRef = useRef(false);
 
   const { tabs, servers, connectServer, settings, setActivePane } = useServerStore();
-  const tab = tabs.find((t) => t.serverId === serverId);
-  const server = servers.find((s) => s.id === serverId);
-
-  // Look up the pane if paneId is provided, otherwise use the tab's primary pane
+  const tab = tabs.find((t) => t.id === tabId);
+  // 优先按 paneId 找到对应 pane (split 时 pane 可能连的是其他 server),
+  // 找不到时回落到 tab 的主面板(panes[0])
   const pane = paneId ? tab?.panes.find((p) => p.id === paneId) : tab?.panes[0];
+  const server = pane ? servers.find((s) => s.id === pane.serverId) : undefined;
   const paneState = pane?.state;
   const paneSessionId = pane?.sessionId;
   const paneError = pane?.error;
@@ -532,7 +532,7 @@ export default function TerminalView({ serverId, paneId }: TerminalViewProps) {
 
   const handleFocus = () => {
     if (paneId && tab) {
-      setActivePane(tab.serverId, paneId);
+      setActivePane(tab.id, paneId);
     }
   };
 

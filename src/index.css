@@ -25,3 +25,48 @@ body {
 .terminal-container .xterm {
   height: 100%;
 }
+
+/* 紧凑型 Tree: 父子间距收窄, 让分组和子项视觉上贴近 */
+.tree-compact.ant-tree {
+  /* 关闭 list-style 等附加空白 */
+}
+
+.tree-compact .ant-tree-treenode {
+  /* 移除 node 之间的默认间距, blockNode 模式下的视觉断点 */
+  padding: 0;
+}
+
+.tree-compact .ant-tree-treenode.ant-tree-treenode-selected {
+  background: transparent;
+}
+
+.tree-compact .ant-tree-node-content-wrapper {
+  /* 核心: 收紧 row 内边距, 让分组/子项更紧贴 */
+  padding: 2px 6px;
+  min-height: 26px;
+  border-radius: 4px;
+  line-height: 1.4;
+}
+
+.tree-compact .ant-tree-node-content-wrapper:hover {
+  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.04));
+}
+
+.tree-compact .ant-tree-node-content-wrapper.ant-tree-node-selected {
+  background: var(--ant-color-primary-bg, #e6f4ff);
+}
+
+.tree-compact .ant-tree-switcher {
+  width: 18px;
+  height: 26px;
+  line-height: 26px;
+}
+
+.tree-compact .ant-tree-indent-unit {
+  width: 16px;
+}
+
+.tree-compact .ant-tree-title {
+  /* 允许 title 节点自适应高度, 不留多余空白 */
+  display: block;
+}

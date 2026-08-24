@@ -41,6 +41,7 @@ pub fn run() {
             config::save_settings,
             config::save_snippets,
             config::save_custom_groups,
+            config::save_tabs,
             config::export_config,
             config::import_config,
             config::get_session_logs,

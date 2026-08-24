@@ -47,9 +47,11 @@ export interface SplitPane {
   error?: string;
 }
 
-/** 终端Tab - 支持分屏 */
+/** 终端Tab - 支持分屏 + 同服务多开 */
 export interface TerminalTab {
-  /** 服务器ID(主面板) */
+  /** 唯一 Tab ID (与 serverId 解耦, 同一服务器可开多个 Tab) */
+  id: string;
+  /** 引用的服务器 ID */
   serverId: string;
   /** 会话ID(SSH连接后返回,主面板) */
   sessionId?: string;

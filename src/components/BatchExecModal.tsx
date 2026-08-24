@@ -19,24 +19,28 @@ interface ServerOutput {
 
 export default function BatchExecModal({ open, onClose }: Props) {
   const { token } = theme.useToken();
-  const { tabs, servers } = useServerStore();
+  const { tabs, servers, activeTabId } = useServerStore();
   const [command, setCommand] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [outputs, setOutputs] = useState<Map<string, ServerOutput>>(new Map());
   const [executing, setExecuting] = useState(false);
   const outputRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
-  // 已连接的标签页
-  const connectedTabs = tabs.filter((t) => t.state === "connected");
-  const connectedServers = connectedTabs.map((tab) => {
-    const server = servers.find((s) => s.id === tab.serverId);
-    return {
-      serverId: tab.serverId,
-      name: server?.name || tab.serverId,
-      sessionId: tab.sessionId,
-      host: server?.host || "",
-    };
-  });
+  // 已连接的服务器(同服务器多开时, 只取代表 tab 一次)
+  const connectedServers = (() => {
+    const seen = new Map<string, { serverId: string; name: string; sessionId?: string; host: string }>();
+    for (const tab of tabs.filter((t) => t.state === "connected")) {
+      if (seen.has(tab.serverId)) continue;
+      const server = servers.find((s) => s.id === tab.serverId);
+      seen.set(tab.serverId, {
+        serverId: tab.serverId,
+        name: server?.name || tab.serverId,
+        sessionId: tab.sessionId,
+        host: server?.host || "",
+      });
+    }
+    return Array.from(seen.values());
+  })();
 
   // 打开时初始化选中状态
   useEffect(() => {
@@ -139,7 +143,10 @@ export default function BatchExecModal({ open, onClose }: Props) {
 
     // 向每个选中的服务器发送命令
     for (const serverId of selectedIds) {
-      const tab = tabs.find((t) => t.serverId === serverId);
+      // 优先取活动 tab, 否则取第一个连接的 tab
+      const tab =
+        tabs.find((t) => t.serverId === serverId && t.id === activeTabId) ||
+        tabs.find((t) => t.serverId === serverId && t.state === "connected");
       const sessionId = tab?.sessionId;
       if (sessionId) {
         try {
@@ -160,13 +167,15 @@ export default function BatchExecModal({ open, onClose }: Props) {
         }
       }
     }
-  }, [command, selectedIds, connectedServers, tabs]);
+  }, [command, selectedIds, connectedServers, tabs, activeTabId]);
 
   const handleStop = useCallback(() => {
     // 向每个运行中的服务器发送 Ctrl+C
     for (const [serverId, output] of outputs) {
       if (output.running) {
-        const tab = tabs.find((t) => t.serverId === serverId);
+        const tab =
+          tabs.find((t) => t.serverId === serverId && t.id === activeTabId) ||
+          tabs.find((t) => t.serverId === serverId && t.state === "connected");
         const sessionId = tab?.sessionId;
         if (sessionId) {
           invoke("ssh_pty_write", { sessionId, data: "\x03" }).catch(() => {});
@@ -179,7 +188,7 @@ export default function BatchExecModal({ open, onClose }: Props) {
       }
     }
     setExecuting(false);
-  }, [outputs, tabs]);
+  }, [outputs, tabs, activeTabId]);
 
   const handleCopyResults = useCallback(() => {
     const parts: string[] = [];

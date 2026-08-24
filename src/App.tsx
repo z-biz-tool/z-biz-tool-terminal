@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message } from "antd";
 import type { MenuProps } from "antd";
-import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined } from "@ant-design/icons";
+import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined } from "@ant-design/icons";
 import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
@@ -16,7 +16,7 @@ import PortForwardModal from "./components/PortForwardModal";
 import KeyGenModal from "./components/KeyGenModal";
 import BatchExecModal from "./components/BatchExecModal";
 import DiagnosticModal from "./components/DiagnosticModal";
-import ServerStatsHeader from "./components/ServerStatsHeader";
+import ServerStatsPanel from "./components/ServerStatsPanel";
 import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 
@@ -39,9 +39,9 @@ function AppInner() {
     splitTab,
     closePane,
     setActivePane,
-    reconnectingServers,
-    connectServer,
-    reconnectServer,
+    reconnectingTabs,
+    openNewTab,
+    reconnectTab,
   } = useServerStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -132,7 +132,7 @@ function AppInner() {
         e.preventDefault();
         const { tabs: t, setActiveTab: sat } = useServerStore.getState();
         const idx = parseInt(e.key) - 1;
-        if (idx < t.length) sat(t[idx].serverId);
+        if (idx < t.length) sat(t[idx].id);
         return;
       }
 
@@ -141,9 +141,9 @@ function AppInner() {
         e.preventDefault();
         const { tabs: t, activeTabId: aId, setActiveTab: sat } = useServerStore.getState();
         if (t.length > 1) {
-          const curIdx = t.findIndex((tab) => tab.serverId === aId);
+          const curIdx = t.findIndex((tab) => tab.id === aId);
           const nextIdx = (curIdx + 1) % t.length;
-          sat(t[nextIdx].serverId);
+          sat(t[nextIdx].id);
         }
         return;
       }
@@ -239,21 +239,21 @@ function AppInner() {
 
   // 拖拽调整分屏面板大小
   const startPaneDrag = useCallback(
-    (e: React.MouseEvent, tabServerId: string, direction: "horizontal" | "vertical") => {
+    (e: React.MouseEvent, tabId: string, direction: "horizontal" | "vertical") => {
       e.preventDefault();
       draggingRef.current = true;
       const container = (e.target as HTMLElement).parentElement;
       if (!container) return;
       const startPos = direction === "horizontal" ? e.clientX : e.clientY;
       const containerSize = direction === "horizontal" ? container.offsetWidth : container.offsetHeight;
-      const startRatio = paneRatios[tabServerId] ?? 0.5;
+      const startRatio = paneRatios[tabId] ?? 0.5;
       const onMove = (ev: MouseEvent) => {
         if (!draggingRef.current) return;
         const currentPos = direction === "horizontal" ? ev.clientX : ev.clientY;
         const delta = currentPos - startPos;
         const newRatio = startRatio + delta / containerSize;
         const clamped = Math.min(Math.max(0.15, newRatio), 0.85);
-        setPaneRatios((prev) => ({ ...prev, [tabServerId]: clamped }));
+        setPaneRatios((prev) => ({ ...prev, [tabId]: clamped }));
       };
       const onUp = () => {
         draggingRef.current = false;
@@ -270,10 +270,10 @@ function AppInner() {
     [paneRatios]
   );
 
-  const activeTab = tabs.find((t) => t.serverId === activeTabId);
-  const activeServer = servers.find((s) => s.id === activeTabId);
+  const activeTab = tabs.find((t) => t.id === activeTabId);
+  const activeServer = activeTab ? servers.find((s) => s.id === activeTab.serverId) : undefined;
 
-  const isReconnecting = activeTabId ? reconnectingServers.has(activeTabId) : false;
+  const isReconnecting = activeTabId ? reconnectingTabs.has(activeTabId) : false;
   const stateColor =
     activeTab?.state === "connected" ? "green" : activeTab?.state === "error" ? "red" : "orange";
   const stateText =
@@ -294,7 +294,7 @@ function AppInner() {
     }
   };
 
-  const getTabContextMenu = (serverId: string, tabState: string): MenuProps["items"] => {
+  const getTabContextMenu = (tabId: string, serverId: string, tabState: string): MenuProps["items"] => {
     const server = servers.find((s) => s.id === serverId);
     const items: MenuProps["items"] = [];
 
@@ -303,17 +303,17 @@ function AppInner() {
         key: "reconnect",
         icon: <ReloadOutlined />,
         label: "重连",
-        onClick: () => reconnectServer(serverId),
+        onClick: () => reconnectTab(tabId),
       });
     }
 
     items.push(
       {
-        key: "clone",
-        icon: <CopyOutlined />,
-        label: "克隆会话",
+        key: "newTab",
+        icon: <PlusOutlined />,
+        label: "新建终端",
         onClick: () => {
-          if (server) connectServer(server);
+          if (server) openNewTab(server);
         },
       },
       {
@@ -323,7 +323,7 @@ function AppInner() {
         onClick: () => {
           if (!sftpVisible) toggleSftp(true);
           listSftp(serverId, "/").catch(() => {});
-          setActiveTab(serverId);
+          setActiveTab(tabId);
         },
       },
       {
@@ -332,7 +332,7 @@ function AppInner() {
         label: "快捷命令",
         onClick: () => {
           if (!snippetsVisible) toggleSnippets(true);
-          setActiveTab(serverId);
+          setActiveTab(tabId);
         },
       },
       {
@@ -340,7 +340,7 @@ function AppInner() {
         icon: <ApiOutlined />,
         label: "端口转发",
         onClick: () => {
-          setActiveTab(serverId);
+          setActiveTab(tabId);
           setPortForwardOpen(true);
         },
       },
@@ -362,22 +362,22 @@ function AppInner() {
         key: "close",
         icon: <CloseOutlined />,
         label: "关闭",
-        onClick: () => closeTab(serverId),
+        onClick: () => closeTab(tabId),
       },
       {
         key: "closeOthers",
         label: "关闭其他",
         onClick: () => {
-          tabs.filter((t) => t.serverId !== serverId).forEach((t) => closeTab(t.serverId));
+          tabs.filter((t) => t.id !== tabId).forEach((t) => closeTab(t.id));
         },
       },
       {
         key: "closeRight",
         label: "关闭右侧",
         onClick: () => {
-          const idx = tabs.findIndex((t) => t.serverId === serverId);
+          const idx = tabs.findIndex((t) => t.id === tabId);
           if (idx >= 0) {
-            tabs.slice(idx + 1).forEach((t) => closeTab(t.serverId));
+            tabs.slice(idx + 1).forEach((t) => closeTab(t.id));
           }
         },
       }
@@ -388,6 +388,11 @@ function AppInner() {
 
   const tabItems = tabs.map((tab) => {
     const server = servers.find((s) => s.id === tab.serverId);
+    // 同服务器多开时, 给后开的 tab 加 (N) 后缀以便区分
+    const sameServerTabs = tabs.filter((t) => t.serverId === tab.serverId);
+    const sameServerIndex = sameServerTabs.findIndex((t) => t.id === tab.id);
+    const nameBase = server?.name || tab.serverId;
+    const tabName = sameServerTabs.length > 1 ? `${nameBase} (${sameServerIndex + 1})` : nameBase;
     const tabLabel = (
       <Space size={4}>
         <Tag
@@ -410,15 +415,15 @@ function AppInner() {
             whiteSpace: "nowrap",
           }}
         >
-          {server?.name || tab.serverId}
+          {tabName}
         </span>
       </Space>
     );
     return {
-      key: tab.serverId,
+      key: tab.id,
       label: (
         <Dropdown
-          menu={{ items: getTabContextMenu(tab.serverId, tab.state) }}
+          menu={{ items: getTabContextMenu(tab.id, tab.serverId, tab.state) }}
           trigger={["contextMenu"]}
         >
           {tabLabel}
@@ -564,17 +569,25 @@ function AppInner() {
       title=""
       sidebar={<ServerList />}
       headerExtra={headerExtra}
-      headerStats={<ServerStatsHeader />}
       siderWidth={260}
     >
       <div
         style={{
           display: "flex",
-          flexDirection: "column",
+          flexDirection: "row",
           height: "100%",
           overflow: "hidden",
         }}
       >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+          }}
+        >
         {tabs.length > 0 && (
           <div
             style={{
@@ -599,6 +612,17 @@ function AppInner() {
               hideAdd
               style={{ flex: 1, minWidth: 0 }}
             />
+            {activeServer && (
+              <Tooltip title="为当前服务器新建一个终端 (同服务器多开)">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<PlusOutlined />}
+                  onClick={() => openNewTab(activeServer)}
+                  style={{ flexShrink: 0, marginLeft: 4 }}
+                />
+              </Tooltip>
+            )}
           </div>
         )}
 
@@ -617,9 +641,9 @@ function AppInner() {
             <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
               {tabs.map((tab) => (
                 <div
-                  key={tab.serverId}
+                  key={tab.id}
                   style={{
-                    display: tab.serverId === activeTabId ? "flex" : "none",
+                    display: tab.id === activeTabId ? "flex" : "none",
                     height: "100%",
                     flexDirection: tab.panes.length > 1
                       ? tab.splitDirection === "vertical" ? "column" : "row"
@@ -627,17 +651,17 @@ function AppInner() {
                   }}
                 >
                   {tab.panes.length <= 1 ? (
-                    <TerminalView serverId={tab.serverId} paneId={tab.panes[0]?.id} />
+                    <TerminalView tabId={tab.id} paneId={tab.panes[0]?.id} />
                   ) : (
                     tab.panes.map((pane, i) => {
                       const direction = tab.splitDirection || "horizontal";
-                      const ratio = paneRatios[tab.serverId] ?? 0.5;
+                      const ratio = paneRatios[tab.id] ?? 0.5;
                       const isActive = pane.id === activePaneId;
                       return (
                         <React.Fragment key={pane.id}>
                           {i > 0 && (
                             <div
-                              onMouseDown={(e) => startPaneDrag(e, tab.serverId, direction)}
+                              onMouseDown={(e) => startPaneDrag(e, tab.id, direction)}
                               style={{
                                 width: direction === "horizontal" ? 4 : "auto",
                                 height: direction === "horizontal" ? "auto" : 4,
@@ -662,9 +686,9 @@ function AppInner() {
                               outline: isActive ? `2px solid ${token.colorPrimary}` : "none",
                               outlineOffset: -2,
                             }}
-                            onMouseDown={() => setActivePane(tab.serverId, pane.id)}
+                            onMouseDown={() => setActivePane(tab.id, pane.id)}
                           >
-                            <TerminalView serverId={pane.serverId} paneId={pane.id} />
+                            <TerminalView tabId={tab.id} paneId={pane.id} />
                             {tab.panes.length > 1 && (
                               <div
                                 style={{
@@ -691,7 +715,7 @@ function AppInner() {
                                   }}
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    closePane(tab.serverId, pane.id);
+                                    closePane(tab.id, pane.id);
                                   }}
                                 />
                               </div>
@@ -780,6 +804,8 @@ function AppInner() {
             <span>~/.z-terminal</span>
           </Space>
         </div>
+        </div>
+        {activeTabId && <ServerStatsPanel />}
       </div>
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />

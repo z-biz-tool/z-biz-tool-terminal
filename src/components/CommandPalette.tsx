@@ -75,20 +75,25 @@ export default function CommandPalette({
   const items: CommandItem[] = useMemo(() => {
     const list: CommandItem[] = [];
 
-    // 已连接的服务器（快速切换）
+    // 已打开的终端(支持多开, 每个 tab 独立)
     for (const tab of tabs) {
       const server = servers.find((s) => s.id === tab.serverId);
+      // 同服务器多开时, 给后开的 tab 加 (N) 后缀以便区分
+      const sameServerCount = tabs.filter((t) => t.serverId === tab.serverId).length;
+      const sameServerIndex = tabs.filter((t) => t.serverId === tab.serverId).findIndex((t) => t.id === tab.id);
+      const labelBase = server ? server.name : tab.serverId;
+      const label = sameServerCount > 1 ? `${labelBase} (${sameServerIndex + 1})` : labelBase;
       list.push({
-        id: `tab-${tab.serverId}`,
+        id: `tab-${tab.id}`,
         type: "server",
-        label: server ? server.name : tab.serverId,
+        label,
         description: "切换到此会话",
         icon: <DesktopOutlined style={{ color: "#1677ff" }} />,
         keywords: ["switch", "tab", "切换", "会话", server?.host ?? "", server?.username ?? ""].filter(
           Boolean,
         ),
         weight: 0,
-        action: () => setActiveTab(tab.serverId),
+        action: () => setActiveTab(tab.id),
       });
     }
 

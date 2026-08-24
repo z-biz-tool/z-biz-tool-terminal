@@ -39,6 +39,23 @@ pub struct SnippetConfig {
     pub description: Option<String>,
 }
 
+/// 持久化的分屏面板(只保存结构, sessionId 是运行时不保存)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneConfig {
+    pub id: String,
+    pub server_id: String,
+}
+
+/// 持久化的终端 Tab(只保存结构, sessionId/state 是运行时不保存)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TabConfig {
+    pub id: String,
+    pub server_id: String,
+    pub panes: Vec<PaneConfig>,
+    #[serde(default)]
+    pub split_direction: Option<String>,
+}
+
 /// 全局配置（持久化到 ~/.z-terminal/config.json）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -49,6 +66,13 @@ pub struct AppConfig {
     /// 用户手动创建的分组(允许为空, 即尚未添加服务器)
     #[serde(default)]
     pub custom_groups: Vec<String>,
+    /// 上次打开的 Tab/Pane 状态(用于重启后恢复)
+    #[serde(default)]
+    pub tabs: Vec<TabConfig>,
+    #[serde(default)]
+    pub active_tab_id: Option<String>,
+    #[serde(default)]
+    pub active_pane_id: Option<String>,
 }
 
 /// 终端设置
@@ -252,6 +276,20 @@ pub async fn save_snippets(snippets: Vec<SnippetConfig>) -> Result<(), String> {
 pub async fn save_custom_groups(groups: Vec<String>) -> Result<(), String> {
     let mut config = load_config();
     config.custom_groups = groups;
+    save_config(&config)
+}
+
+/// 保存终端 Tab 状态(用于重启后恢复)
+#[tauri::command]
+pub async fn save_tabs(
+    tabs: Vec<TabConfig>,
+    active_tab_id: Option<String>,
+    active_pane_id: Option<String>,
+) -> Result<(), String> {
+    let mut config = load_config();
+    config.tabs = tabs;
+    config.active_tab_id = active_tab_id;
+    config.active_pane_id = active_pane_id;
     save_config(&config)
 }
 
