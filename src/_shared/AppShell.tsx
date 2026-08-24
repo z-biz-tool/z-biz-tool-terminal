@@ -10,6 +10,8 @@ interface AppShellProps {
   icon?: ReactNode;
   sidebar: ReactNode;
   headerExtra?: ReactNode;
+  /** 灯泡按钮左侧展示的内容(如服务器状态统计) */
+  headerStats?: ReactNode;
   children: ReactNode;
   siderWidth?: number;
 }
@@ -19,6 +21,7 @@ export function AppShell({
   icon,
   sidebar,
   headerExtra,
+  headerStats,
   children,
   siderWidth = 220,
 }: AppShellProps) {
@@ -37,13 +40,18 @@ export function AppShell({
           borderBottom: `1px solid ${token.colorBorderSecondary}`,
         }}
       >
-        <Space size={8}>
-          {icon}
-          <Typography.Text strong style={{ fontSize: 15 }}>
-            {title}
-          </Typography.Text>
-        </Space>
+        {(icon || title) && (
+          <Space size={8}>
+            {icon}
+            {title && (
+              <Typography.Text strong style={{ fontSize: 15 }}>
+                {title}
+              </Typography.Text>
+            )}
+          </Space>
+        )}
         <Space>
+          {headerStats}
           {headerExtra}
           <Button
             type="text"

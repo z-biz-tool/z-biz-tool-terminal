@@ -8,13 +8,14 @@ import {
   Select,
   Tree,
   Space,
-  Popconfirm,
   message,
   Dropdown,
   Tooltip,
   Input as AntInput,
+  ColorPicker,
 } from "antd";
 import type { TreeProps } from "antd";
+import type { Color } from "antd/es/color-picker";
 import {
   PlusOutlined,
   EditOutlined,
@@ -29,6 +30,11 @@ import {
   StarOutlined,
   StarFilled,
   CloudUploadOutlined,
+  FolderAddOutlined,
+  EditTwoTone,
+  TagsOutlined,
+  CopyOutlined,
+  PoweroffOutlined,
 } from "@ant-design/icons";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { useServerStore } from "../stores/serverStore";
@@ -36,9 +42,24 @@ import type { ServerConfig } from "../types";
 import { EmptyState } from "@/_shared";
 import ImportModal from "./ImportModal";
 
+const DEFAULT_GROUP = "默认分组";
+const PINNED_GROUP = "⭐ 收藏";
+
+const PRESET_COLORS = [
+  "#1677ff",
+  "#52c41a",
+  "#faad14",
+  "#f5222d",
+  "#722ed1",
+  "#13c2c2",
+  "#eb2f96",
+  "#666666",
+];
+
 export default function ServerList() {
   const {
     servers,
+    customGroups,
     addServer,
     updateServer,
     removeServer,
@@ -47,13 +68,28 @@ export default function ServerList() {
     exportConfig,
     importConfig,
     loaded,
+    addGroup,
+    renameGroup,
+    removeGroup,
   } = useServerStore();
 
   const [modalVisible, setModalVisible] = useState(false);
   const [importModalVisible, setImportModalVisible] = useState(false);
+  const [groupModalVisible, setGroupModalVisible] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [initialGroup, setInitialGroup] = useState<string>("");
   const [searchText, setSearchText] = useState("");
   const [form] = Form.useForm();
+  const [groupForm] = Form.useForm();
+  const [renameForm] = Form.useForm();
+
+  // 通用重命名 Modal 的状态
+  const [renameModal, setRenameModal] = useState<{
+    visible: boolean;
+    kind: "server" | "group";
+    id?: string;
+    oldName: string;
+  }>({ visible: false, kind: "server", oldName: "" });
 
   useEffect(() => {
     if (!loaded) loadConfig();
@@ -74,16 +110,17 @@ export default function ServerList() {
       (s) =>
         s.name.toLowerCase().includes(lower) ||
         s.host.toLowerCase().includes(lower) ||
-        s.group.toLowerCase().includes(lower)
+        (s.group || "").toLowerCase().includes(lower) ||
+        (s.tags || "").toLowerCase().includes(lower)
     );
   }, [servers, searchText]);
 
-  // 按分组组织（含收藏分组）
+  // 按分组组织（含收藏分组 + 自定义空分组）
   const treeData = useMemo(() => {
     const pinnedServers = filteredServers.filter((s) => s.pinned);
     const groups: Record<string, ServerConfig[]> = {};
     filteredServers.forEach((s) => {
-      const g = s.group || "默认分组";
+      const g = s.group || DEFAULT_GROUP;
       if (!groups[g]) groups[g] = [];
       groups[g].push(s);
     });
@@ -97,108 +134,242 @@ export default function ServerList() {
         return a.name.localeCompare(b.name);
       });
 
-    const renderServerTitle = (s: ServerConfig) => (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "2px 0",
-        }}
-        onDoubleClick={() => connectServer(s)}
-      >
-        <Space size={6} style={{ minWidth: 0, flex: 1 }}>
-          <DesktopOutlined style={{ color: "#1677ff", flexShrink: 0 }} />
-          <span
+    // 渲染服务器条目(支持右键菜单)
+    const renderServerTitle = (s: ServerConfig) => {
+      const items = [
+        {
+          key: "connect",
+          icon: <PoweroffOutlined />,
+          label: "连接",
+          onClick: () => connectServer(s),
+        },
+        {
+          key: "edit",
+          icon: <EditOutlined />,
+          label: "编辑...",
+          onClick: () => handleEdit(s),
+        },
+        {
+          key: "rename",
+          icon: <EditTwoTone />,
+          label: "重命名",
+          onClick: () => openRename("server", s.id, s.name),
+        },
+        { type: "divider" as const },
+        {
+          key: "clone",
+          icon: <CopyOutlined />,
+          label: "克隆",
+          onClick: () => handleClone(s),
+        },
+        {
+          key: "copyInfo",
+          icon: <CopyOutlined />,
+          label: "复制连接信息",
+          onClick: () => {
+            const info = `${s.username}@${s.host}:${s.port}`;
+            navigator.clipboard.writeText(info).then(() => {
+              message.success(`已复制: ${info}`);
+            });
+          },
+        },
+        {
+          key: "pin",
+          icon: s.pinned ? <StarFilled style={{ color: "#faad14" }} /> : <StarOutlined />,
+          label: s.pinned ? "取消收藏" : "收藏",
+          onClick: () => updateServer(s.id, { pinned: !s.pinned }),
+        },
+        { type: "divider" as const },
+        {
+          key: "delete",
+          icon: <DeleteOutlined />,
+          label: "删除",
+          danger: true,
+          onClick: () => {
+            Modal.confirm({
+              title: `删除服务器「${s.name}」?`,
+              content: "该操作不可撤销, 已有的连接会自动关闭。",
+              okText: "删除",
+              okButtonProps: { danger: true },
+              cancelText: "取消",
+              onOk: () => {
+                removeServer(s.id);
+                message.success("已删除");
+              },
+            });
+          },
+        },
+      ];
+
+      return (
+        <Dropdown
+          menu={{ items }}
+          trigger={["contextMenu"]}
+        >
+          <div
             style={{
-              fontWeight: 500,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "2px 0",
             }}
+            onDoubleClick={() => connectServer(s)}
           >
-            {s.name}
-          </span>
-          <span style={{ color: "#bbb", fontSize: 11, flexShrink: 0 }}>
-            {s.host}:{s.port}
-          </span>
-        </Space>
-        <Space size={0} style={{ flexShrink: 0, opacity: 0.6 }}>
-          <Tooltip title={s.pinned ? "取消收藏" : "收藏"}>
-            <Button
-              type="text"
-              size="small"
-              icon={s.pinned ? <StarFilled style={{ color: "#faad14" }} /> : <StarOutlined />}
-              onClick={(e) => {
-                e.stopPropagation();
-                updateServer(s.id, { pinned: !s.pinned });
-              }}
-            />
-          </Tooltip>
-          <Tooltip title="连接">
-            <Button
-              type="text"
-              size="small"
-              icon={<LinkOutlined />}
-              onClick={(e) => {
-                e.stopPropagation();
-                connectServer(s);
-              }}
-            />
-          </Tooltip>
-          <Tooltip title="编辑">
-            <Button
-              type="text"
-              size="small"
-              icon={<EditOutlined />}
-              onClick={(e) => {
-                e.stopPropagation();
-                handleEdit(s);
-              }}
-            />
-          </Tooltip>
-          <Popconfirm
-            title="删除该服务器？"
-            okText="删除"
-            cancelText="取消"
-            onConfirm={(e) => {
-              e?.stopPropagation();
-              removeServer(s.id);
-              message.success("已删除");
-            }}
-            onCancel={(e) => e?.stopPropagation()}
-          >
-            <Button
-              type="text"
-              size="small"
-              danger
-              icon={<DeleteOutlined />}
-              onClick={(e) => e.stopPropagation()}
-            />
-          </Popconfirm>
-        </Space>
-      </div>
-    );
+            <Space size={6} style={{ minWidth: 0, flex: 1 }}>
+              {s.color ? (
+                <span
+                  style={{
+                    display: "inline-block",
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    background: s.color,
+                    flexShrink: 0,
+                  }}
+                />
+              ) : (
+                <DesktopOutlined style={{ color: "#1677ff", flexShrink: 0 }} />
+              )}
+              <span
+                style={{
+                  fontWeight: 500,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {s.name}
+              </span>
+              <span style={{ color: "#bbb", fontSize: 11, flexShrink: 0 }}>
+                {s.host}:{s.port}
+              </span>
+              {s.tags && (
+                <Tooltip title={`标签: ${s.tags}`}>
+                  <TagsOutlined style={{ color: "#bbb", fontSize: 11, flexShrink: 0 }} />
+                </Tooltip>
+              )}
+            </Space>
+            <Space size={0} style={{ flexShrink: 0, opacity: 0.6 }}>
+              <Tooltip title={s.pinned ? "取消收藏" : "收藏"}>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={s.pinned ? <StarFilled style={{ color: "#faad14" }} /> : <StarOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    updateServer(s.id, { pinned: !s.pinned });
+                  }}
+                />
+              </Tooltip>
+              <Tooltip title="连接">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<LinkOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    connectServer(s);
+                  }}
+                />
+              </Tooltip>
+              <Tooltip title="编辑">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleEdit(s);
+                  }}
+                />
+              </Tooltip>
+            </Space>
+          </div>
+        </Dropdown>
+      );
+    };
+
+    // 渲染分组标题(支持右键菜单)
+    const renderGroupTitle = (groupName: string, count: number) => {
+      const isPinned = groupName === PINNED_GROUP;
+      const isDefault = groupName === DEFAULT_GROUP;
+      const menuItems = isPinned
+        ? null
+        : [
+            {
+              key: "add-server",
+              icon: <PlusOutlined />,
+              label: "在此分组添加服务器",
+              onClick: () => handleAddToGroup(groupName),
+            },
+            ...(isDefault
+              ? []
+              : [
+                  { type: "divider" as const },
+                  {
+                    key: "rename",
+                    icon: <EditTwoTone />,
+                    label: "重命名分组",
+                    onClick: () => openRename("group", undefined, groupName),
+                  },
+                  {
+                    key: "delete",
+                    icon: <DeleteOutlined />,
+                    label: "删除分组",
+                    danger: true,
+                    onClick: () => {
+                      const usedBy = servers.filter(
+                        (s) => (s.group || DEFAULT_GROUP) === groupName
+                      ).length;
+                      Modal.confirm({
+                        title: `删除分组「${groupName}」?`,
+                        content:
+                          usedBy > 0
+                            ? `该分组下还有 ${usedBy} 台服务器, 不会被删除, 仅移除空分组标记。`
+                            : "该分组为空, 将被移除。",
+                        okText: "删除",
+                        okButtonProps: { danger: true },
+                        cancelText: "取消",
+                        onOk: () => {
+                          removeGroup(groupName);
+                          message.success("已删除分组");
+                        },
+                      });
+                    },
+                  },
+                ]),
+          ];
+
+      const titleNode = (
+        <span
+          style={{
+            fontWeight: 600,
+            fontSize: 12,
+            color: isPinned ? "#faad14" : "#888",
+            textTransform: "uppercase",
+            letterSpacing: 0.5,
+          }}
+        >
+          {groupName} · {count}
+        </span>
+      );
+
+      if (!menuItems) return titleNode;
+
+      return (
+        <Dropdown menu={{ items: menuItems }} trigger={["contextMenu"]}>
+          {titleNode}
+        </Dropdown>
+      );
+    };
 
     const result: any[] = [];
 
     // 收藏分组置顶
     if (pinnedServers.length > 0) {
       result.push({
-        key: "group-⭐ 收藏",
-        title: (
-          <span
-            style={{
-              fontWeight: 600,
-              fontSize: 12,
-              color: "#faad14",
-              textTransform: "uppercase",
-              letterSpacing: 0.5,
-            }}
-          >
-            ⭐ 收藏 · {pinnedServers.length}
-          </span>
-        ),
+        key: `group-${PINNED_GROUP}`,
+        title: renderGroupTitle(PINNED_GROUP, pinnedServers.length),
         selectable: false,
         children: sortServers(pinnedServers).map((s) => ({
           key: `pinned-${s.id}`,
@@ -208,23 +379,11 @@ export default function ServerList() {
       });
     }
 
-    // 原始分组
+    // 已使用的分组(从 server.group 派生)
     Object.entries(groups).forEach(([groupName, items]) => {
       result.push({
         key: `group-${groupName}`,
-        title: (
-          <span
-            style={{
-              fontWeight: 600,
-              fontSize: 12,
-              color: "#888",
-              textTransform: "uppercase",
-              letterSpacing: 0.5,
-            }}
-          >
-            {groupName} · {items.length}
-          </span>
-        ),
+        title: renderGroupTitle(groupName, items.length),
         selectable: false,
         children: sortServers(items).map((s) => ({
           key: s.id,
@@ -234,33 +393,122 @@ export default function ServerList() {
       });
     });
 
+    // 追加自定义空分组(尚未添加服务器的)
+    customGroups
+      .filter((g) => !groups[g] && g !== DEFAULT_GROUP && g !== PINNED_GROUP)
+      .forEach((g) => {
+        result.push({
+          key: `group-${g}`,
+          title: renderGroupTitle(g, 0),
+          selectable: false,
+          children: [],
+        });
+      });
+
     return result;
-  }, [filteredServers]);
+  }, [filteredServers, customGroups, servers]);
 
   const handleAdd = () => {
     setEditingId(null);
+    setInitialGroup("");
     form.resetFields();
-    form.setFieldsValue({ port: 22, authType: "password", group: "默认分组" });
+    form.setFieldsValue({ port: 22, authType: "password", group: DEFAULT_GROUP, color: "#1677ff" });
+    setModalVisible(true);
+  };
+
+  const handleAddToGroup = (groupName: string) => {
+    setEditingId(null);
+    setInitialGroup(groupName);
+    form.resetFields();
+    form.setFieldsValue({
+      port: 22,
+      authType: "password",
+      group: groupName === DEFAULT_GROUP ? "" : groupName,
+      color: "#1677ff",
+    });
     setModalVisible(true);
   };
 
   const handleEdit = (server: ServerConfig) => {
     setEditingId(server.id);
-    form.setFieldsValue(server);
+    setInitialGroup(server.group || "");
+    form.setFieldsValue({
+      ...server,
+      group: server.group || "",
+      color: server.color || "#1677ff",
+    });
+    setModalVisible(true);
+  };
+
+  const handleClone = (source: ServerConfig) => {
+    setEditingId(null);
+    setInitialGroup(source.group || "");
+    form.resetFields();
+    const { id: _id, ...rest } = source;
+    form.setFieldsValue({
+      ...rest,
+      name: `${source.name} (副本)`,
+      group: source.group || "",
+      color: source.color || "#1677ff",
+    });
     setModalVisible(true);
   };
 
   const handleSave = async () => {
     try {
       const values = await form.validateFields();
+      const payload = {
+        ...values,
+        group: values.group || "",
+        color:
+          typeof values.color === "string"
+            ? values.color
+            : values.color && (values.color as Color).toHexString
+              ? (values.color as Color).toHexString()
+              : undefined,
+      };
       if (editingId) {
-        updateServer(editingId, values);
+        updateServer(editingId, payload);
         message.success("已更新");
       } else {
-        addServer(values);
+        addServer(payload);
         message.success("已添加");
       }
       setModalVisible(false);
+    } catch {}
+  };
+
+  const handleAddGroup = async () => {
+    try {
+      const { name } = await groupForm.validateFields();
+      addGroup(name);
+      groupForm.resetFields();
+      setGroupModalVisible(false);
+      message.success(`分组「${name}」已创建`);
+    } catch {}
+  };
+
+  const openRename = (kind: "server" | "group", id: string | undefined, oldName: string) => {
+    setRenameModal({ visible: true, kind, id, oldName });
+    renameForm.setFieldsValue({ name: oldName });
+  };
+
+  const handleRenameOk = async () => {
+    try {
+      const { name } = await renameForm.validateFields();
+      const trimmed = name.trim();
+      if (!trimmed || trimmed === renameModal.oldName) {
+        setRenameModal((s) => ({ ...s, visible: false }));
+        return;
+      }
+      if (renameModal.kind === "server" && renameModal.id) {
+        updateServer(renameModal.id, { name: trimmed });
+        message.success("已重命名");
+      } else if (renameModal.kind === "group") {
+        renameGroup(renameModal.oldName, trimmed);
+        message.success("分组已重命名");
+      }
+      setRenameModal((s) => ({ ...s, visible: false }));
     } catch {}
   };
 
@@ -302,16 +550,11 @@ export default function ServerList() {
       const dropKey = info.node.key as string;
       const dropToGap = info.dropToGap;
 
-      // 判断拖拽的是否是服务器节点（非分组节点）
       const isDragServer = !String(dragKey).startsWith("group-");
       const isDropGroup = String(dropKey).startsWith("group-");
 
-      if (!isDragServer) {
-        // 拖拽分组节点：暂不支持分组间排序
-        return;
-      }
+      if (!isDragServer) return;
 
-      // 获取拖拽的服务器 ID（pinned- 前缀需要去掉）
       const serverId = String(dragKey).startsWith("pinned-")
         ? String(dragKey).replace("pinned-", "")
         : String(dragKey);
@@ -320,37 +563,31 @@ export default function ServerList() {
       if (!dragServer) return;
 
       if (isDropGroup && !dropToGap) {
-        // 拖拽服务器到分组节点上：移动到该分组
         const groupName = String(dropKey).replace("group-", "");
-        if (groupName === "⭐ 收藏") {
-          // 拖入收藏分组 = 设置 pinned
+        if (groupName === PINNED_GROUP) {
           updateServer(serverId, { pinned: true });
         } else {
-          updateServer(serverId, { group: groupName === "默认分组" ? "" : groupName });
+          updateServer(serverId, { group: groupName === DEFAULT_GROUP ? "" : groupName });
         }
         return;
       }
 
-      // 拖拽到其他服务器节点之间：重新排序
-      // 确定目标分组
-      let targetGroup = dragServer.group || "默认分组";
+      let targetGroup = dragServer.group || DEFAULT_GROUP;
       let targetServerId: string | null = null;
 
       if (!isDropGroup) {
-        // drop 到服务器节点
         const dropServerId = String(dropKey).startsWith("pinned-")
           ? String(dropKey).replace("pinned-", "")
           : String(dropKey);
         const dropServer = servers.find((s) => s.id === dropServerId);
         if (dropServer) {
-          targetGroup = dropServer.group || "默认分组";
+          targetGroup = dropServer.group || DEFAULT_GROUP;
           targetServerId = dropServerId;
         }
       }
 
-      // 获取目标分组中的所有服务器，按 order 排序
       const groupServers = servers
-        .filter((s) => (s.group || "默认分组") === targetGroup)
+        .filter((s) => (s.group || DEFAULT_GROUP) === targetGroup)
         .sort((a, b) => {
           if (a.order != null && b.order == null) return -1;
           if (a.order == null && b.order != null) return 1;
@@ -358,10 +595,7 @@ export default function ServerList() {
           return a.name.localeCompare(b.name);
         });
 
-      // 移除拖拽的服务器（如果它在同一分组）
       const withoutDrag = groupServers.filter((s) => s.id !== serverId);
-
-      // 计算插入位置
       let insertIndex: number;
       if (targetServerId) {
         const targetIdx = withoutDrag.findIndex((s) => s.id === targetServerId);
@@ -370,17 +604,12 @@ export default function ServerList() {
         insertIndex = withoutDrag.length;
       }
 
-      // 插入拖拽的服务器
       withoutDrag.splice(insertIndex, 0, dragServer);
-
-      // 重新分配 order 值
       withoutDrag.forEach((s, idx) => {
         if (s.id === serverId) {
-          // 拖拽的服务器：更新 group 和 order
-          const newGroup = targetGroup === "默认分组" ? "" : targetGroup;
+          const newGroup = targetGroup === DEFAULT_GROUP ? "" : targetGroup;
           updateServer(serverId, { order: idx, group: newGroup });
         } else if (s.order !== idx) {
-          // 其他服务器：只更新 order（如果变化了）
           updateServer(s.id, { order: idx });
         }
       });
@@ -401,39 +630,53 @@ export default function ServerList() {
           }}
         >
           <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: 0.5 }}>z-Terminal</span>
-          <Dropdown
-            menu={{
-              items: [
-                {
-                  key: "import-servers",
-                  label: "导入服务器",
-                  icon: <CloudUploadOutlined />,
-                  onClick: () => setImportModalVisible(true),
-                },
-                {
-                  key: "import",
-                  label: "导入配置",
-                  icon: <ImportOutlined />,
-                  onClick: handleImport,
-                },
-                {
-                  key: "export",
-                  label: "导出配置",
-                  icon: <ExportOutlined />,
-                  onClick: handleExport,
-                },
-                { type: "divider" },
-                {
-                  key: "add",
-                  label: "添加服务器",
-                  icon: <PlusOutlined />,
-                  onClick: handleAdd,
-                },
-              ],
-            }}
-          >
-            <Button type="text" size="small" icon={<MoreOutlined />} />
-          </Dropdown>
+          <Space size={4}>
+            <Tooltip title="新建分组">
+              <Button
+                type="text"
+                size="small"
+                icon={<FolderAddOutlined />}
+                onClick={() => {
+                  groupForm.resetFields();
+                  setGroupModalVisible(true);
+                }}
+              />
+            </Tooltip>
+            <Tooltip title="添加服务器">
+              <Button
+                type="text"
+                size="small"
+                icon={<PlusOutlined />}
+                onClick={handleAdd}
+              />
+            </Tooltip>
+            <Dropdown
+              menu={{
+                items: [
+                  {
+                    key: "import-servers",
+                    label: "导入服务器",
+                    icon: <CloudUploadOutlined />,
+                    onClick: () => setImportModalVisible(true),
+                  },
+                  {
+                    key: "import",
+                    label: "导入配置",
+                    icon: <ImportOutlined />,
+                    onClick: handleImport,
+                  },
+                  {
+                    key: "export",
+                    label: "导出配置",
+                    icon: <ExportOutlined />,
+                    onClick: handleExport,
+                  },
+                ],
+              }}
+            >
+              <Button type="text" size="small" icon={<MoreOutlined />} />
+            </Dropdown>
+          </Space>
         </div>
         {/* 搜索框 */}
         <AntInput
@@ -449,7 +692,7 @@ export default function ServerList() {
 
       {/* 服务器列表 */}
       <div style={{ flex: 1, overflow: "auto", padding: "4px 8px" }}>
-        {servers.length === 0 ? (
+        {servers.length === 0 && customGroups.length === 0 ? (
           <EmptyState
             title="暂无服务器"
             description="点击右上角 + 添加"
@@ -475,17 +718,19 @@ export default function ServerList() {
           justifyContent: "space-between",
         }}
       >
-        <span>{servers.length} 台服务器</span>
+        <span>
+          {servers.length} 台服务器 · {customGroups.length} 个自定义分组
+        </span>
         <span>~/.z-terminal</span>
       </div>
 
-      {/* 添加/编辑 Modal */}
+      {/* 添加 / 编辑 Modal */}
       <Modal
-        title={editingId ? "编辑服务器" : "添加服务器"}
+        title={editingId ? "编辑服务器" : initialGroup ? `添加到「${initialGroup}」` : "添加服务器"}
         open={modalVisible}
         onOk={handleSave}
         onCancel={() => setModalVisible(false)}
-        width={520}
+        width={560}
         okText="保存"
         cancelText="取消"
         destroyOnClose
@@ -494,8 +739,47 @@ export default function ServerList() {
           <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
             <Input placeholder="例如: 生产环境Web服务器" />
           </Form.Item>
-          <Form.Item name="group" label="分组">
-            <Input placeholder="例如: 生产环境" />
+          <Space.Compact style={{ width: "100%" }}>
+            <Form.Item
+              name="group"
+              label="分组"
+              style={{ flex: 1, marginRight: 8 }}
+            >
+              <Select
+                allowClear
+                showSearch
+                placeholder="选择或输入新分组"
+                mode="tags"
+                maxCount={1}
+                options={Array.from(
+                  new Set([
+                    DEFAULT_GROUP,
+                    ...customGroups,
+                    ...servers.map((s) => s.group).filter(Boolean),
+                  ])
+                ).map((g) => ({ value: g, label: g }))}
+              />
+            </Form.Item>
+            <Form.Item
+              name="color"
+              label="颜色"
+              style={{ width: 110 }}
+            >
+              <ColorPicker
+                presets={[
+                  {
+                    label: "预设",
+                    colors: PRESET_COLORS,
+                  },
+                ]}
+                allowClear
+                format="hex"
+                defaultValue="#1677ff"
+              />
+            </Form.Item>
+          </Space.Compact>
+          <Form.Item name="tags" label="标签" extra="多个标签用逗号或空格分隔">
+            <Input placeholder="例如: 生产, 阿里云, MySQL" />
           </Form.Item>
           <Space.Compact style={{ width: "100%" }}>
             <Form.Item
@@ -531,8 +815,12 @@ export default function ServerList() {
           <Form.Item noStyle shouldUpdate={(prev, cur) => prev.authType !== cur.authType}>
             {({ getFieldValue }) =>
               getFieldValue("authType") === "password" ? (
-                <Form.Item name="password" label="密码">
-                  <Input.Password placeholder="输入密码" />
+                <Form.Item
+                  name="password"
+                  label="密码 / 私钥密码"
+                  extra="可填入服务器登录密码, 或私钥的 passphrase(若私钥有加密)"
+                >
+                  <Input.Password placeholder="输入密码(留空则不修改已保存的)" />
                 </Form.Item>
               ) : (
                 <Form.Item name="privateKey" label="私钥内容 (PEM)">
@@ -558,6 +846,54 @@ export default function ServerList() {
                   value: s.id,
                   label: `${s.name} (${s.host}:${s.port})`,
                 }))}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 新建分组 Modal */}
+      <Modal
+        title="新建分组"
+        open={groupModalVisible}
+        onOk={handleAddGroup}
+        onCancel={() => setGroupModalVisible(false)}
+        okText="创建"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Form form={groupForm} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item
+            name="name"
+            label="分组名称"
+            rules={[
+              { required: true, message: "请输入分组名称" },
+              { max: 30, message: "名称最长 30 字符" },
+            ]}
+          >
+            <Input placeholder="例如: 生产环境" autoFocus />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 重命名 Modal(服务器/分组通用) */}
+      <Modal
+        title={renameModal.kind === "server" ? "重命名服务器" : "重命名分组"}
+        open={renameModal.visible}
+        onOk={handleRenameOk}
+        onCancel={() => setRenameModal((s) => ({ ...s, visible: false }))}
+        okText="确定"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Form form={renameForm} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item
+            name="name"
+            label="新名称"
+            rules={[{ required: true, message: "请输入新名称" }]}
+          >
+            <Input
+              placeholder={renameModal.kind === "server" ? "服务器名称" : "分组名称"}
+              autoFocus
             />
           </Form.Item>
         </Form>

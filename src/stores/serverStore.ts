@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ServerConfig, TerminalTab, SplitDirection, SplitPane, ConnectResult, SftpEntry, Snippet } from "../types";
+import type { ServerConfig, TerminalTab, SplitDirection, SplitPane, ConnectResult, SftpEntry, Snippet, ServerSystemInfo } from "../types";
 
 /** 终端设置 */
 export interface TerminalSettings {
@@ -30,6 +30,7 @@ export interface PersistConfig {
   servers: ServerConfig[];
   settings: TerminalSettings;
   snippets: Snippet[];
+  custom_groups?: string[];
 }
 
 interface ServerStore {
@@ -46,6 +47,12 @@ interface ServerStore {
   loaded: boolean;
   /** 正在重连的 serverId 集合 */
   reconnectingServers: Set<string>;
+  /** 已连接会话的服务器系统信息: sessionId -> info */
+  serverInfos: Record<string, ServerSystemInfo>;
+  /** 正在采集信息的 sessionId 集合,避免重复请求 */
+  fetchingServerInfo: Set<string>;
+  /** 用户手动创建的分组(允许空) */
+  customGroups: string[];
 
   /** 从 ~/.z-terminal/config.json 加载 */
   loadConfig: () => Promise<void>;
@@ -59,6 +66,8 @@ interface ServerStore {
   exportConfig: (path: string) => Promise<string>;
   /** 导入配置 */
   importConfig: (path: string) => Promise<void>;
+  /** 持久化自定义分组 */
+  persistCustomGroups: () => Promise<void>;
 
   addServer: (server: Omit<ServerConfig, "id">) => void;
   updateServer: (id: string, server: Partial<ServerConfig>) => void;
@@ -86,6 +95,16 @@ interface ServerStore {
   reconnectServer: (serverId: string) => Promise<void>;
   /** 初始化 pty-closed 事件监听 */
   initPtyClosedListener: () => void;
+  /** 采集并缓存某个 sessionId 的服务器系统信息 */
+  fetchServerInfo: (sessionId: string, force?: boolean) => Promise<ServerSystemInfo | null>;
+  /** 清除某个 sessionId 的系统信息缓存(用于断开连接时) */
+  clearServerInfo: (sessionId: string) => void;
+  /** 添加自定义分组 */
+  addGroup: (name: string) => void;
+  /** 重命名分组(同时更新属于该分组的所有服务器) */
+  renameGroup: (oldName: string, newName: string) => void;
+  /** 删除自定义分组(其下服务器移入「默认分组」) */
+  removeGroup: (name: string) => void;
 }
 
 function genId(): string {
@@ -180,6 +199,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   settings: defaultSettings,
   loaded: false,
   reconnectingServers: new Set(),
+  serverInfos: {},
+  fetchingServerInfo: new Set(),
+  customGroups: [],
 
   loadConfig: async () => {
     try {
@@ -188,6 +210,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         servers: config.servers || [],
         settings: config.settings || defaultSettings,
         snippets: config.snippets || [],
+        customGroups: config.custom_groups || [],
         loaded: true,
       });
     } catch {
@@ -221,6 +244,14 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     }
   },
 
+  persistCustomGroups: async () => {
+    try {
+      await invoke("save_custom_groups", { groups: get().customGroups });
+    } catch (e) {
+      console.error("持久化自定义分组失败:", e);
+    }
+  },
+
   exportConfig: async (path) => {
     return await invoke<string>("export_config", { path });
   },
@@ -231,6 +262,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       servers: config.servers || [],
       settings: config.settings || defaultSettings,
       snippets: config.snippets || [],
+      customGroups: config.custom_groups || [],
     });
   },
 
@@ -257,6 +289,42 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       activeTabId: state.activeTabId === id ? null : state.activeTabId,
     }));
     get().persistServers();
+  },
+
+  addGroup: (name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const { customGroups, servers } = get();
+    // 已存在同名分组(无论是 customGroup 还是 server.group)则跳过
+    if (customGroups.includes(trimmed)) return;
+    if (servers.some((s) => (s.group || "") === trimmed)) return;
+    set({ customGroups: [...customGroups, trimmed] });
+    get().persistCustomGroups();
+  },
+
+  renameGroup: (oldName, newName) => {
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === oldName) return;
+    const { customGroups, servers } = get();
+    // 改名后不能与已有的其他分组冲突
+    if (customGroups.includes(trimmed) && trimmed !== oldName) return;
+    if (servers.some((s) => (s.group || "") === trimmed) && trimmed !== oldName) return;
+    set({
+      customGroups: customGroups.map((g) => (g === oldName ? trimmed : g)),
+      servers: servers.map((s) =>
+        (s.group || "") === oldName ? { ...s, group: trimmed } : s
+      ),
+    });
+    get().persistCustomGroups();
+    get().persistServers();
+  },
+
+  removeGroup: (name) => {
+    // 仅从 customGroups 列表中移除。若该分组下还有服务器, 树依然会展示(因为 server.group 字段仍存在)。
+    set((state) => ({
+      customGroups: state.customGroups.filter((g) => g !== name),
+    }));
+    get().persistCustomGroups();
   },
 
   connectServer: async (server) => {
@@ -349,12 +417,21 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         }
       }
     }
-    set((state) => ({
-      tabs: state.tabs.filter((t) => t.serverId !== serverId),
-      activeTabId: state.activeTabId === serverId ? null : state.activeTabId,
-      activePaneId:
-        state.activeTabId === serverId ? null : state.activePaneId,
-    }));
+    // 清理该 serverId 相关所有 session 的采集信息
+    set((state) => {
+      if (!tab) return {};
+      const remaining = { ...state.serverInfos };
+      for (const pane of tab.panes) {
+        if (pane.sessionId) delete remaining[pane.sessionId];
+      }
+      return {
+        tabs: state.tabs.filter((t) => t.serverId !== serverId),
+        activeTabId: state.activeTabId === serverId ? null : state.activeTabId,
+        activePaneId:
+          state.activeTabId === serverId ? null : state.activePaneId,
+        serverInfos: remaining,
+      };
+    });
   },
 
   executeCommand: async (serverId, command) => {
@@ -706,6 +783,53 @@ export const useServerStore = create<ServerStore>((set, get) => ({
           }
         }
       }
+    });
+  },
+
+  fetchServerInfo: async (sessionId, force = false) => {
+    const { serverInfos, fetchingServerInfo } = get();
+
+    // 已有缓存且未过期(60秒)且非强制刷新,直接返回
+    if (!force) {
+      const cached = serverInfos[sessionId];
+      if (cached && Date.now() / 1000 - cached.collected_at < 60) {
+        return cached;
+      }
+    }
+
+    if (fetchingServerInfo.has(sessionId)) {
+      // 已有请求在飞,等一下返回缓存(可能很快就有)
+      return null;
+    }
+
+    set({ fetchingServerInfo: new Set([...fetchingServerInfo, sessionId]) });
+
+    try {
+      const info = await invoke<ServerSystemInfo>("ssh_get_server_info", { sessionId });
+      set((state) => ({
+        serverInfos: { ...state.serverInfos, [sessionId]: info },
+        fetchingServerInfo: new Set(
+          [...state.fetchingServerInfo].filter((id) => id !== sessionId)
+        ),
+      }));
+      return info;
+    } catch (e) {
+      console.error("采集服务器信息失败:", e);
+      set((state) => ({
+        fetchingServerInfo: new Set(
+          [...state.fetchingServerInfo].filter((id) => id !== sessionId)
+        ),
+      }));
+      return null;
+    }
+  },
+
+  clearServerInfo: (sessionId) => {
+    set((state) => {
+      if (!state.serverInfos[sessionId]) return {};
+      const next = { ...state.serverInfos };
+      delete next[sessionId];
+      return { serverInfos: next };
     });
   },
 }));

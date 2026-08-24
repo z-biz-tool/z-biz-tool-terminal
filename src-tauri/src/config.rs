@@ -21,6 +21,12 @@ pub struct ServerConfig {
     pub proxy_jump: Option<String>,
     #[serde(default)]
     pub order: Option<u32>,
+    /// 标签列表(逗号或空格分隔的字符串)
+    #[serde(default)]
+    pub tags: Option<String>,
+    /// 颜色标签(hex 字符串, 如 #1677ff), 用于在侧边栏高亮该服务器
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// 快捷命令片段配置
@@ -40,6 +46,9 @@ pub struct AppConfig {
     pub settings: TerminalSettings,
     #[serde(default)]
     pub snippets: Vec<SnippetConfig>,
+    /// 用户手动创建的分组(允许为空, 即尚未添加服务器)
+    #[serde(default)]
+    pub custom_groups: Vec<String>,
 }
 
 /// 终端设置
@@ -235,6 +244,14 @@ pub async fn save_settings(settings: TerminalSettings) -> Result<(), String> {
 pub async fn save_snippets(snippets: Vec<SnippetConfig>) -> Result<(), String> {
     let mut config = load_config();
     config.snippets = snippets;
+    save_config(&config)
+}
+
+/// 保存自定义分组列表
+#[tauri::command]
+pub async fn save_custom_groups(groups: Vec<String>) -> Result<(), String> {
+    let mut config = load_config();
+    config.custom_groups = groups;
     save_config(&config)
 }
 

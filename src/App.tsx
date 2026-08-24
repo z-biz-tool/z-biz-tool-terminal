@@ -16,6 +16,7 @@ import PortForwardModal from "./components/PortForwardModal";
 import KeyGenModal from "./components/KeyGenModal";
 import BatchExecModal from "./components/BatchExecModal";
 import DiagnosticModal from "./components/DiagnosticModal";
+import ServerStatsHeader from "./components/ServerStatsHeader";
 import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 
@@ -560,9 +561,10 @@ function AppInner() {
 
   return (
     <AppShell
-      title="z-biz-tool-terminal"
+      title=""
       sidebar={<ServerList />}
       headerExtra={headerExtra}
+      headerStats={<ServerStatsHeader />}
       siderWidth={260}
     >
       <div

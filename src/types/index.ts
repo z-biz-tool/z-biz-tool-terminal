@@ -26,6 +26,10 @@ export interface ServerConfig {
   proxyJump?: string;
   /** 排序权重(升序, null排最后) */
   order?: number;
+  /** 标签(逗号/空格分隔) */
+  tags?: string;
+  /** 颜色标签(hex, 如 #1677ff) */
+  color?: string;
 }
 
 /** 连接状态 */
@@ -96,4 +100,31 @@ export interface Snippet {
   command: string;
   group?: string;
   description?: string;
+}
+
+/** 远程服务器系统信息(通过 SSH 采集) */
+export interface ServerSystemInfo {
+  hostname: string;
+  os: string;
+  kernel: string;
+  arch: string;
+  cpu_model: string;
+  cpu_cores: number;
+  /** CPU 使用率 0-100 */
+  cpu_usage: number;
+  /** 1/5/15 分钟平均负载(空格分隔) */
+  load_avg: string;
+  /** 内存总大小(字节) */
+  mem_total: number;
+  /** 内存已用(字节) */
+  mem_used: number;
+  /** 根分区总大小(字节) */
+  disk_total: number;
+  /** 根分区已用(字节) */
+  disk_used: number;
+  uptime: string;
+  /** 数据采集时间(秒, UNIX 纪元) */
+  collected_at: number;
+  /** 部分字段采集失败时的错误信息 */
+  error?: string;
 }
