@@ -1,6 +1,14 @@
 # z-Terminal
 
-> 专业级 SSH/SFTP 终端管理器 — 对标 Tabby / Termius / Xshell / Royal TSX
+> 专业级 SSH / SFTP 终端管理器 — 对标 Tabby / Termius / Xshell / Royal TSX
+
+![tech](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri)
+![tech](https://img.shields.io/badge/React-19-61DAFB?logo=react)
+![tech](https://img.shields.io/badge/AntD-6-0170FE?logo=antdesign)
+![tech](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)
+![tech](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust)
+![tech](https://img.shields.io/badge/russh-0.45-orange?logo=rust)
+![tech](https://img.shields.io/badge/xterm.js-5-blue?logo=javascript)
 
 基于 Tauri 2 + React 19 + Rust 构建的跨平台 SSH 终端应用，原生性能，极致体验。
 
@@ -18,7 +26,7 @@
 | 跳板机 (ProxyJump) | 通过中间主机级联连接目标服务器 |
 | 自动重连 | 会话意外断开时自动尝试重新连接 |
 | Keep-Alive 保活 | 可配置 SSH keepalive 间隔，防止连接超时断开 |
-| 连接超时控制 | 可设置连接超时时间（5-300秒） |
+| 连接超时控制 | 可设置连接超时时间（5-300 秒） |
 | SSH Agent 转发 | 可选开启 Agent Forwarding |
 | Quick Connect Bar | 快速输入 host/user 连接，无需添加服务器配置 (Cmd/Ctrl+L) |
 | 连接历史 | 记录最近 20 条连接，一键重连 |
@@ -30,7 +38,7 @@
 | 10 种主题 | Dark、Light、Dracula、Solarized、TokyoNight、Nord、One Dark、Monokai、Ayu、Gruvbox |
 | 终端分屏 | 水平/垂直分屏，可拖拽调整比例 (Cmd+Shift+H/V) |
 | 终端内搜索 | 基于 buffer 扫描的全文搜索，大小写切换 (Cmd/Ctrl+F) |
-| URL/路径自动检测 | 终端输出中的 URL 可点击打开浏览器，IP:Port 和文件路径可点击复制 |
+| URL / 路径自动检测 | 终端输出中的 URL 可点击打开浏览器，IP:Port 和文件路径可点击复制 |
 | 光标样式 | Block / Underline / Bar 三种光标样式可选 |
 | 字体连字 | 可选开启编程字体连字 (Ligatures) |
 | 背景透明度 | 0.5-1.0 可调终端背景透明度 |
@@ -60,7 +68,7 @@
 | 路径输入 | 手动输入路径直接跳转 |
 | 列排序 | 按名称/大小/权限/修改时间排序 |
 | 键盘导航 | 方向键/Enter/Delete/Backspace 键盘操作 |
-| 远程文件编辑 | 双击文件下载到临时目录→系统编辑器打开→自动检测修改→上传回服务器 |
+| 远程文件编辑 | 双击文件下载到临时目录 → 系统编辑器打开 → 自动检测修改 → 上传回服务器 |
 | ZMODEM 传输 | 检测 rz/sz 握手，支持终端内文件传输 |
 
 ### ⚡ 效率工具
@@ -186,16 +194,16 @@ z-biz-tool-terminal/
 │   ├── Cargo.toml
 │   └── tauri.conf.json
 ├── src/                          # React 前端
-│   ├── App.tsx                   # 主应用 (布局/快捷键/标签管理)
+│   ├── App.tsx                   # 主应用（布局/快捷键/标签管理）
 │   ├── stores/
 │   │   └── serverStore.ts        # Zustand 全局状态
 │   ├── types/
 │   │   └── index.ts              # TypeScript 类型定义
 │   ├── components/
-│   │   ├── ServerList.tsx        # 服务器列表 (分组/搜索/拖拽排序/导入)
-│   │   ├── TerminalView.tsx      # 终端视图 (xterm.js/主题/链接检测)
+│   │   ├── ServerList.tsx        # 服务器列表（分组/搜索/拖拽排序/导入）
+│   │   ├── TerminalView.tsx      # 终端视图（xterm.js/主题/链接检测）
 │   │   ├── TerminalSearch.tsx    # 终端内搜索
-│   │   ├── SftpPanel.tsx         # SFTP 文件管理 (多选/批量/编辑)
+│   │   ├── SftpPanel.tsx         # SFTP 文件管理（多选/批量/编辑）
 │   │   ├── SnippetsPanel.tsx     # 快捷命令面板
 │   │   ├── CommandPalette.tsx    # 命令面板 (Cmd+K)
 │   │   ├── QuickConnectBar.tsx   # 快速连接栏
@@ -222,13 +230,13 @@ z-biz-tool-terminal/
 # 安装依赖
 npm install
 
-# 启动开发模式 (前端 + Rust 后端热重载)
+# 启动开发模式（前端 + Rust 后端热重载）
 npm run tauri dev
 
 # 类型检查
 npm run typecheck
 
-# 构建生产版本
+# 构建生产版本（出 .app + .dmg / .msi / .AppImage）
 npm run tauri build
 ```
 
@@ -239,7 +247,7 @@ npm run tauri build
 | 路径 | 说明 |
 |------|------|
 | `~/.z-terminal/config.json` | 服务器列表、设置、快捷命令 |
-| `~/.z-terminal/logs/` | SSH 会话日志 (带时间戳) |
+| `~/.z-terminal/logs/` | SSH 会话日志（带时间戳） |
 
 ---
 
