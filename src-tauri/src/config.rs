@@ -214,12 +214,128 @@ pub fn load_config() -> AppConfig {
 }
 
 /// 保存配置
+/// 关键改进:
+/// 1. **原子写入**: 先写 .tmp 再 rename, 写过程中崩溃不会损坏现有 config
+/// 2. **自动备份**: 写之前先把当前 config 备份到 backups/, 保留最近 10 份
+///    防止意外丢数据(误删、磁盘问题、外部程序覆盖等)
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
     let path = get_config_path();
+
+    // 1. 写之前备份现有 config (如果存在)
+    if path.exists() {
+        backup_existing_config();
+    }
+
+    // 2. 原子写入: 先写临时文件, 再 rename 覆盖
     let content = serde_json::to_string_pretty(config)
         .map_err(|e| format!("序列化失败: {}", e))?;
-    fs::write(&path, content).map_err(|e| format!("写入失败: {}", e))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("原子替换失败: {}", e))?;
     Ok(())
+}
+
+/// 把当前 config 备份到 backups/ 目录
+fn backup_existing_config() {
+    let path = get_config_path();
+    let backup_dir = get_config_dir().join("backups");
+    if let Err(e) = fs::create_dir_all(&backup_dir) {
+        eprintln!("创建备份目录失败: {}", e);
+        return;
+    }
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+    let backup_path = backup_dir.join(format!("config_{}.json", ts));
+    if let Err(e) = fs::copy(&path, &backup_path) {
+        eprintln!("备份 config 失败: {}", e);
+        return;
+    }
+    // 只保留最近 10 份, 防止无限增长
+    if let Ok(mut entries) = fs::read_dir(&backup_dir) {
+        let mut backups: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("config_")
+            })
+            .collect();
+        backups.sort_by_key(|e| e.file_name());
+        if backups.len() > 10 {
+            for old in &backups[..backups.len() - 10] {
+                let _ = fs::remove_file(old.path());
+            }
+        }
+    }
+}
+
+/// 列出可用的配置备份
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigBackup {
+    pub filename: String,
+    pub path: String,
+    pub modified: String,
+    pub size: u64,
+}
+
+#[tauri::command]
+pub async fn list_config_backups() -> Result<Vec<ConfigBackup>, String> {
+    let backup_dir = get_config_dir().join("backups");
+    if !backup_dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut entries: Vec<ConfigBackup> = Vec::new();
+    let read_dir = fs::read_dir(&backup_dir).map_err(|e| format!("读取备份目录失败: {}", e))?;
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if !filename.starts_with("config_") {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|t| {
+                let dt: chrono::DateTime<chrono::Local> = t.into();
+                Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            })
+            .unwrap_or_default();
+        entries.push(ConfigBackup {
+            filename,
+            path: path.to_string_lossy().to_string(),
+            modified,
+            size: metadata.len(),
+        });
+    }
+    // 按修改时间倒序
+    entries.sort_by(|a, b| b.modified.cmp(&a.modified));
+    Ok(entries)
+}
+
+/// 从备份恢复配置
+#[tauri::command]
+pub async fn restore_config_from_backup(backup_path: String) -> Result<String, String> {
+    let backup = PathBuf::from(&backup_path);
+    if !backup.exists() {
+        return Err("备份文件不存在".into());
+    }
+    // 验证备份文件可解析
+    let content = fs::read_to_string(&backup).map_err(|e| format!("读取备份失败: {}", e))?;
+    let _parsed: AppConfig = serde_json::from_str(&content)
+        .map_err(|e| format!("备份格式损坏, 无法恢复: {}", e))?;
+    // 原子替换当前 config
+    let target = get_config_path();
+    let tmp = target.with_extension("json.tmp");
+    fs::write(&tmp, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
+    fs::rename(&tmp, &target).map_err(|e| format!("替换失败: {}", e))?;
+    Ok("恢复成功, 请重启应用".into())
 }
 
 /// 导出配置到指定路径

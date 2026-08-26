@@ -1,11 +1,26 @@
-import { Modal, Form, InputNumber, Select, Switch, Input, Slider, message, Button, Space, Tabs } from "antd";
+import { Modal, Form, InputNumber, Select, Switch, Input, Slider, message, Button, Space, Tabs, Empty, Spin, Popconfirm, Typography } from "antd";
 import { useServerStore } from "../stores/serverStore";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useState, useEffect } from "react";
+import { ReloadOutlined, UndoOutlined, FolderOpenOutlined } from "@ant-design/icons";
 
 interface Props {
   open: boolean;
   onClose: () => void;
+}
+
+interface ConfigBackup {
+  filename: string;
+  path: string;
+  modified: string;
+  size: number;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
 export default function SettingsModal({ open, onClose }: Props) {
@@ -255,8 +270,142 @@ export default function SettingsModal({ open, onClose }: Props) {
               </Form>
             ),
           },
+          {
+            key: "backup",
+            label: "备份与恢复",
+            children: <BackupTab />,
+          },
         ]}
       />
     </Modal>
+  );
+}
+
+function BackupTab() {
+  const [backups, setBackups] = useState<ConfigBackup[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [restoring, setRestoring] = useState<string | null>(null);
+
+  const loadBackups = async () => {
+    setLoading(true);
+    try {
+      const list = await invoke<ConfigBackup[]>("list_config_backups");
+      setBackups(list);
+    } catch (e) {
+      message.error("加载备份列表失败: " + e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadBackups();
+  }, []);
+
+  const handleRestore = async (path: string) => {
+    setRestoring(path);
+    try {
+      const msg = await invoke<string>("restore_config_from_backup", { backupPath: path });
+      message.success(msg);
+      // 恢复后需要刷新, 提示用户重启
+      setTimeout(() => {
+        Modal.confirm({
+          title: "配置已恢复",
+          content: "请关闭并重新打开应用以使新配置生效。",
+          okText: "我知道了",
+          cancelText: "取消",
+        });
+      }, 100);
+    } catch (e) {
+      message.error("恢复失败: " + e);
+    } finally {
+      setRestoring(null);
+    }
+  };
+
+  const openConfigDir = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-shell");
+      await open("~/.z-terminal");
+    } catch (e) {
+      message.error("打开目录失败: " + e);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div style={{ marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          每次保存配置时自动备份, 保留最近 10 份
+        </Typography.Text>
+        <Space>
+          <Button size="small" icon={<FolderOpenOutlined />} onClick={openConfigDir}>
+            打开配置目录
+          </Button>
+          <Button size="small" icon={<ReloadOutlined />} onClick={loadBackups}>
+            刷新
+          </Button>
+        </Space>
+      </div>
+      {loading ? (
+        <div style={{ textAlign: "center", padding: 24 }}>
+          <Spin />
+        </div>
+      ) : backups.length === 0 ? (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="暂无备份"
+          style={{ padding: 24 }}
+        />
+      ) : (
+        <div
+          style={{
+            border: "1px solid #f0f0f0",
+            borderRadius: 6,
+            maxHeight: 320,
+            overflowY: "auto",
+          }}
+        >
+          {backups.map((b) => (
+            <div
+              key={b.path}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "8px 12px",
+                borderBottom: "1px solid #f0f0f0",
+                fontSize: 12,
+              }}
+            >
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {b.filename}
+                </div>
+                <div style={{ color: "#999", fontSize: 11, marginTop: 2 }}>
+                  {b.modified} · {formatBytes(b.size)}
+                </div>
+              </div>
+              <Popconfirm
+                title="确定恢复此备份?"
+                description="当前配置会被覆盖, 需要重启应用生效"
+                okText="恢复"
+                cancelText="取消"
+                onConfirm={() => handleRestore(b.path)}
+              >
+                <Button
+                  size="small"
+                  type="link"
+                  icon={<UndoOutlined />}
+                  loading={restoring === b.path}
+                >
+                  恢复
+                </Button>
+              </Popconfirm>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
