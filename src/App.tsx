@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message } from "antd";
 import type { MenuProps } from "antd";
-import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined } from "@ant-design/icons";
+import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined, CloudOutlined } from "@ant-design/icons";
 import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
@@ -18,6 +18,13 @@ import BatchExecModal from "./components/BatchExecModal";
 import DiagnosticModal from "./components/DiagnosticModal";
 import ServerStatsPanel from "./components/ServerStatsPanel";
 import AIChatModal from "./components/AIChatModal";
+import AICommandExplanation from "./components/AICommandExplanation";
+import AIErrorAnalysis from "./components/AIErrorAnalysis";
+import AINaturalLanguageCommand from "./components/AINaturalLanguageCommand";
+import AICodeEditor from "./components/AICodeEditor";
+import AIGitCommit from "./components/AIGitCommit";
+import AIMultiAgents from "./components/AIMultiAgents";
+import CloudAgent from "./components/CloudAgent";
 import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 
@@ -55,6 +62,13 @@ function AppInner() {
   const [batchExecOpen, setBatchExecOpen] = useState(false);
   const [diagnosticOpen, setDiagnosticOpen] = useState(false);
   const [aiChatOpen, setAiChatOpen] = useState(false);
+  const [aiCommandExpOpen, setAiCommandExpOpen] = useState(false);
+  const [aiErrorAnalysisOpen, setAiErrorAnalysisOpen] = useState(false);
+  const [aiNaturalLanguageOpen, setAiNaturalLanguageOpen] = useState(false);
+  const [aiCodeEditorOpen, setAiCodeEditorOpen] = useState(false);
+  const [aiGitCommitOpen, setAiGitCommitOpen] = useState(false);
+  const [aiMultiAgentsOpen, setAiMultiAgentsOpen] = useState(false);
+  const [cloudAgentOpen, setCloudAgentOpen] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   // SFTP 面板高度(px)
   const [sftpHeight, setSftpHeight] = useState(260);
@@ -161,6 +175,55 @@ function AppInner() {
       if (modKey && e.shiftKey && (e.key === "I" || e.key === "i")) {
         e.preventDefault();
         setAiChatOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + Shift + E - AI 命令解释
+      if (modKey && e.shiftKey && (e.key === "E" || e.key === "e")) {
+        e.preventDefault();
+        setAiCommandExpOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + Shift + A - AI 错误分析
+      if (modKey && e.shiftKey && (e.key === "A" || e.key === "a")) {
+        e.preventDefault();
+        setAiErrorAnalysisOpen(true);
+        return;
+      }
+
+      // Shift + 3 - 自然语言转命令
+      if (e.shiftKey && (e.key === "3" || e.key === "#")) {
+        e.preventDefault();
+        setAiNaturalLanguageOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + Shift + R - AI 代码编辑
+      if (modKey && e.shiftKey && (e.key === "R" || e.key === "r")) {
+        e.preventDefault();
+        setAiCodeEditorOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + Shift + G - AI Git 提交
+      if (modKey && e.shiftKey && (e.key === "G" || e.key === "g")) {
+        e.preventDefault();
+        setAiGitCommitOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + Shift + C - 多智能体协作
+      if (modKey && e.shiftKey && (e.key === "C" || e.key === "c")) {
+        e.preventDefault();
+        setAiMultiAgentsOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + Shift + D - Cloud Agent
+      if (modKey && e.shiftKey && (e.key === "D" || e.key === "d")) {
+        e.preventDefault();
+        setCloudAgentOpen(true);
         return;
       }
 
@@ -543,12 +606,68 @@ function AppInner() {
           </Button>
         </Tooltip>
       )}
-      <Tooltip title="SSH密钥">
+      <Tooltip title="AI 聊天助手 (Ctrl+Shift+I)">
         <Button
           size="small"
           type="text"
-          icon={<KeyOutlined />}
-          onClick={() => setKeyGenOpen(true)}
+          icon={<RobotOutlined />}
+          onClick={() => setAiChatOpen(true)}
+        />
+      </Tooltip>
+      <Tooltip title="AI 命令解释 (Ctrl+Shift+E)">
+        <Button
+          size="small"
+          type="text"
+          icon={<CodeOutlined />}
+          onClick={() => setAiCommandExpOpen(true)}
+        />
+      </Tooltip>
+      <Tooltip title="AI 错误分析 (Ctrl+Shift+A)">
+        <Button
+          size="small"
+          type="text"
+          icon={<BugOutlined />}
+          onClick={() => setAiErrorAnalysisOpen(true)}
+        />
+      </Tooltip>
+      <Tooltip title="自然语言转命令 (Shift+3)">
+        <Button
+          size="small"
+          type="text"
+          icon={<ThunderboltOutlined />}
+          onClick={() => setAiNaturalLanguageOpen(true)}
+        />
+      </Tooltip>
+      <Tooltip title="AI 代码编辑 (Ctrl+Shift+R)">
+        <Button
+          size="small"
+          type="text"
+          icon={<ColumnWidthOutlined />}
+          onClick={() => setAiCodeEditorOpen(true)}
+        />
+      </Tooltip>
+      <Tooltip title="AI Git 提交 (Ctrl+Shift+G)">
+        <Button
+          size="small"
+          type="text"
+          icon={<FolderOpenOutlined />}
+          onClick={() => setAiGitCommitOpen(true)}
+        />
+      </Tooltip>
+      <Tooltip title="多智能体协作 (Ctrl+Shift+C)">
+        <Button
+          size="small"
+          type="text"
+          icon={<TeamOutlined />}
+          onClick={() => setAiMultiAgentsOpen(true)}
+        />
+      </Tooltip>
+      <Tooltip title="Cloud Agent (Ctrl+Shift+D)">
+        <Button
+          size="small"
+          type="text"
+          icon={<CloudOutlined />}
+          onClick={() => setCloudAgentOpen(true)}
         />
       </Tooltip>
       <Button
@@ -839,6 +958,13 @@ function AppInner() {
         onOpenLogs={() => setLogsOpen(true)}
       />
       <AIChatModal open={aiChatOpen} onClose={() => setAiChatOpen(false)} />
+      <AICommandExplanation open={aiCommandExpOpen} onClose={() => setAiCommandExpOpen(false)} command="" />
+      <AIErrorAnalysis open={aiErrorAnalysisOpen} onClose={() => setAiErrorAnalysisOpen(false)} error="" />
+      <AINaturalLanguageCommand open={aiNaturalLanguageOpen} onClose={() => setAiNaturalLanguageOpen(false)} onCommandGenerated={() => {}} />
+      <AICodeEditor open={aiCodeEditorOpen} onClose={() => setAiCodeEditorOpen(false)} code="" language="bash" onCodeUpdated={() => {}} />
+      <AIGitCommit open={aiGitCommitOpen} onClose={() => setAiGitCommitOpen(false)} diff="" onCommitMessageGenerated={() => {}} />
+      <AIMultiAgents open={aiMultiAgentsOpen} onClose={() => setAiMultiAgentsOpen(false)} task="" />
+      <CloudAgent open={cloudAgentOpen} onClose={() => setCloudAgentOpen(false)} />
     </AppShell>
   );
 }

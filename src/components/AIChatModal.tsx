@@ -18,8 +18,14 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
   const [messages, setMessages] = useState<AIMessage[]>([]);
   const [input, setInput] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  
+  // 切换到设置页面
+  const handleShowSettings = () => setShowSettings(true);
+  // 切换回聊天页面
+  const handleChatClose = () => setShowSettings(false);
 
   // 加载历史消息
   useEffect(() => {
@@ -286,9 +292,9 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
           </div>
           <h2 style={{ margin: 0 }}>AI 聊天助手</h2>
         </div>
-        <Button type="text" icon={<SettingOutlined />} onClick={() => setShowSettings(true)} />
+        <Button type="text" icon={<SettingOutlined />} onClick={handleShowSettings} />
       </div>
-      <Tabs defaultActiveKey="chat" items={items} />
+      <Tabs activeKey={showSettings ? "settings" : "chat"} onChange={showSettings ? handleChatClose : undefined} items={items} />
     </Modal>
   );
 }
