@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message } from "antd";
 import type { MenuProps } from "antd";
-import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined } from "@ant-design/icons";
+import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, KeyOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined } from "@ant-design/icons";
 import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
@@ -17,6 +17,7 @@ import KeyGenModal from "./components/KeyGenModal";
 import BatchExecModal from "./components/BatchExecModal";
 import DiagnosticModal from "./components/DiagnosticModal";
 import ServerStatsPanel from "./components/ServerStatsPanel";
+import AIChatModal from "./components/AIChatModal";
 import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 
@@ -53,6 +54,7 @@ function AppInner() {
   const [keyGenOpen, setKeyGenOpen] = useState(false);
   const [batchExecOpen, setBatchExecOpen] = useState(false);
   const [diagnosticOpen, setDiagnosticOpen] = useState(false);
+  const [aiChatOpen, setAiChatOpen] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   // SFTP 面板高度(px)
   const [sftpHeight, setSftpHeight] = useState(260);
@@ -152,6 +154,13 @@ function AppInner() {
       if (modKey && e.key === "/") {
         e.preventDefault();
         setShortcutsOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + Shift + I - AI 聊天助手
+      if (modKey && e.shiftKey && (e.key === "I" || e.key === "i")) {
+        e.preventDefault();
+        setAiChatOpen(true);
         return;
       }
 
@@ -558,6 +567,13 @@ function AppInner() {
       <Button
         size="small"
         type="text"
+        icon={<RobotOutlined />}
+        onClick={() => setAiChatOpen(true)}
+        title="AI 聊天助手 (Ctrl+Shift+I / Cmd+Shift+I)"
+      />
+      <Button
+        size="small"
+        type="text"
         icon={<SettingOutlined />}
         onClick={() => setSettingsOpen(true)}
       />
@@ -822,6 +838,7 @@ function AppInner() {
         onOpenShortcuts={() => setShortcutsOpen(true)}
         onOpenLogs={() => setLogsOpen(true)}
       />
+      <AIChatModal open={aiChatOpen} onClose={() => setAiChatOpen(false)} />
     </AppShell>
   );
 }
