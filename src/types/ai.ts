@@ -1,29 +1,21 @@
-/** AI 提供商类型 */
-export type AIProvider = "openai" | "claude" | "gemini" | "ollama" | "custom";
+/**
+ * AI 类型定义 - 兼容旧版和新版
+ */
 
-/** AI 模型配置 */
-export interface AIModel {
-  id: string;
-  name: string;
-  provider: AIProvider;
-  apiKey?: string;
-  baseUrl?: string;
-  default: boolean;
-}
+import type { 
+  AIProvider as CoreAIProvider, 
+  AIFunctionType as CoreAIFunctionType,
+  AIConfig as CoreAIConfig
+} from 'z-biz-tool-core/ai/types';
 
-/** AI 服务配置 */
-export interface AIConfig {
-  provider: AIProvider;
-  apiKey: string;
-  baseUrl?: string;
-  model: string;
-  temperature: number;
-  maxTokens: number;
-}
+// 保持向后兼容的类型定义
+export type AIProvider = CoreAIProvider;
+export type AIFunctionType = CoreAIFunctionType;
+export type AIConfig = CoreAIConfig;
 
 /** AI 消息类型 */
 export interface AIMessage {
-  role: "user" | "assistant" | "system";
+  role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
 }
@@ -50,7 +42,7 @@ export interface ErrorAnalysis {
   errorMessage: string;
   rootCause: string;
   solutions: string[];
- 预防措施?: string[];
+  预防措施?: string[];
 }
 
 /** AI 服务接口 */

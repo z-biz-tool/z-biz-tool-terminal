@@ -132,12 +132,11 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   const zmodemBufferRef = useRef<string>("");
   const zmodemActiveRef = useRef(false);
 
-  const { tabs, servers, connectServer, settings, setActivePane } = useServerStore();
+  const { tabs, settings, setActivePane, reconnectPane } = useServerStore();
   const tab = tabs.find((t) => t.id === tabId);
   // 优先按 paneId 找到对应 pane (split 时 pane 可能连的是其他 server),
   // 找不到时回落到 tab 的主面板(panes[0])
   const pane = paneId ? tab?.panes.find((p) => p.id === paneId) : tab?.panes[0];
-  const server = pane ? servers.find((s) => s.id === pane.serverId) : undefined;
   const paneState = pane?.state;
   const paneSessionId = pane?.sessionId;
   const paneError = pane?.error;
@@ -201,12 +200,7 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
     const sessionId = paneSessionId!;
     const { cols, rows } = term;
 
-    // Start PTY
-    invoke("ssh_start_pty", { sessionId, cols, rows }).catch((e) => {
-      term.write(`\r\n\x1b[31mPTY启动失败: ${String(e)}\x1b[0m\r\n`);
-    });
-
-    // Listen for PTY output
+    // Listen before starting PTY so the initial shell prompt is not lost.
     const ptyOutputHandler = (event: any) => {
       const payload = event.payload;
       if (payload.session_id === sessionId) {
@@ -254,9 +248,29 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
       }
     };
 
-    listen("pty-output", ptyOutputHandler).then((unlisten) => {
-      unlistenRef.current = unlisten;
-    });
+    let disposed = false;
+    listen("pty-output", ptyOutputHandler)
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        unlistenRef.current = unlisten;
+        return invoke<{ success: boolean; error?: string }>("ssh_start_pty", {
+          sessionId,
+          cols,
+          rows,
+        }).then((result) => {
+          if (!result.success && !disposed) {
+            term.write(`\r\n\x1b[31mPTY启动失败: ${result.error || "未知错误"}\x1b[0m\r\n`);
+          }
+        });
+      })
+      .catch((e) => {
+        if (!disposed) {
+          term.write(`\r\n\x1b[31mPTY启动失败: ${String(e)}\x1b[0m\r\n`);
+        }
+      });
 
     // Send user input to PTY
     term.onData((data) => {
@@ -278,6 +292,7 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
     resizeObserverRef.current = ro;
 
     return () => {
+      disposed = true;
       ro.disconnect();
       resizeObserverRef.current = null;
       if (unlistenRef.current) {
@@ -527,7 +542,7 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   }, [paneState, paneSessionId]);
 
   const handleRetry = () => {
-    if (server) connectServer(server);
+    if (pane) reconnectPane(tabId, pane.id);
   };
 
   const handleFocus = () => {

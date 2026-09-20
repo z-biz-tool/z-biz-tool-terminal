@@ -89,28 +89,41 @@ export default function DiagnosticModal({ open, onClose }: Props) {
       message.warning("请输入主机地址和端口");
       return;
     }
-    const sessionId = getSessionId();
-    if (!sessionId) {
-      message.error("没有活动的SSH会话");
-      return;
-    }
+    // 优先用本地 TCP 探测(无需已有 SSH 会话), 更可靠且无副作用
     setPortLoading(true);
     setPortOutput("");
     try {
-      const result = await invoke<{ success: boolean; output: string; error?: string }>(
-        "ssh_diagnose_port",
-        { sessionId, host: portHost.trim(), port: portPort }
+      const probe = await invoke<{ reachable: boolean; message: string; elapsed_ms: number }>(
+        "tcp_probe",
+        { host: portHost.trim(), port: portPort, timeoutMs: 5000 }
       );
-      if (result.success) {
-        const isOpen = result.output.trim().includes("OPEN");
-        setPortOutput(
-          `${portHost.trim()}:${portPort} — ${isOpen ? "✅ 端口开放" : "❌ 端口关闭"}\n\n${result.output}`
-        );
+      const header = probe.reachable
+        ? `${portHost.trim()}:${portPort} — ✅ 端口开放 (${probe.elapsed_ms}ms)`
+        : `${portHost.trim()}:${portPort} — ❌ 端口未开放 (${probe.elapsed_ms}ms)`;
+      setPortOutput(`${header}\n\n${probe.message}`);
+    } catch (e: any) {
+      // 兜底: 如果本地探测失败, 尝试走远端 nc (需要已有会话)
+      const sessionId = getSessionId();
+      if (!sessionId) {
+        setPortOutput(`本地探测异常: ${String(e)}\n\n(无 SSH 会话, 无法继续远端探测)`);
       } else {
-        setPortOutput(result.error || "检测失败");
+        try {
+          const result = await invoke<{ success: boolean; output: string; error?: string }>(
+            "ssh_diagnose_port",
+            { sessionId, host: portHost.trim(), port: portPort }
+          );
+          if (result.success) {
+            const isOpen = result.output.trim().includes("OPEN");
+            setPortOutput(
+              `${portHost.trim()}:${portPort} — ${isOpen ? "✅ 端口开放" : "❌ 端口关闭"}\n\n${result.output}`
+            );
+          } else {
+            setPortOutput(result.error || "检测失败");
+          }
+        } catch (e2) {
+          setPortOutput(`远端探测失败: ${String(e2)}`);
+        }
       }
-    } catch (e) {
-      setPortOutput(`检测失败: ${e}`);
     } finally {
       setPortLoading(false);
     }

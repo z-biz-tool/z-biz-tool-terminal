@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 /// 服务器配置（持久化）
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerConfig {
     pub id: String,
     pub name: String,
@@ -11,13 +12,15 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
+    #[serde(default = "default_auth_type", alias = "auth_type")]
     pub auth_type: String,
     pub password: Option<String>,
+    #[serde(alias = "private_key")]
     pub private_key: Option<String>,
     pub remark: Option<String>,
     #[serde(default)]
     pub pinned: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "proxy_jump")]
     pub proxy_jump: Option<String>,
     #[serde(default)]
     pub order: Option<u32>,
@@ -27,6 +30,10 @@ pub struct ServerConfig {
     /// 颜色标签(hex 字符串, 如 #1677ff), 用于在侧边栏高亮该服务器
     #[serde(default)]
     pub color: Option<String>,
+}
+
+fn default_auth_type() -> String {
+    "password".into()
 }
 
 /// 快捷命令片段配置
@@ -41,18 +48,22 @@ pub struct SnippetConfig {
 
 /// 持久化的分屏面板(只保存结构, sessionId 是运行时不保存)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PaneConfig {
     pub id: String,
+    #[serde(alias = "server_id")]
     pub server_id: String,
 }
 
 /// 持久化的终端 Tab(只保存结构, sessionId/state 是运行时不保存)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TabConfig {
     pub id: String,
+    #[serde(alias = "server_id")]
     pub server_id: String,
     pub panes: Vec<PaneConfig>,
-    #[serde(default)]
+    #[serde(default, alias = "split_direction")]
     pub split_direction: Option<String>,
 }
 
@@ -469,4 +480,56 @@ pub async fn delete_session_log(path: String) -> Result<(), String> {
         return Err("路径不在日志目录内".into());
     }
     fs::remove_file(&path).map_err(|e| format!("删除日志失败: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn server_config_serializes_with_frontend_field_names() {
+        let server = ServerConfig {
+            id: "server-1".into(),
+            name: "测试服务器".into(),
+            group: String::new(),
+            host: "127.0.0.1".into(),
+            port: 22,
+            username: "tester".into(),
+            auth_type: "password".into(),
+            password: Some("test-password".into()),
+            private_key: None,
+            remark: None,
+            pinned: None,
+            proxy_jump: None,
+            order: None,
+            tags: None,
+            color: None,
+        };
+
+        let value = serde_json::to_value(server).expect("服务器配置应能序列化");
+        assert_eq!(value["authType"], "password");
+        assert!(value.get("auth_type").is_none());
+    }
+
+    #[test]
+    fn server_config_reads_legacy_field_names() {
+        let server: ServerConfig = serde_json::from_value(json!({
+            "id": "server-1",
+            "name": "测试服务器",
+            "group": "",
+            "host": "127.0.0.1",
+            "port": 22,
+            "username": "tester",
+            "auth_type": "password",
+            "password": "test-password",
+            "private_key": null,
+            "remark": null,
+            "proxy_jump": null
+        }))
+        .expect("旧 snake_case 配置应能读取");
+
+        assert_eq!(server.auth_type, "password");
+        assert_eq!(server.password.as_deref(), Some("test-password"));
+    }
 }

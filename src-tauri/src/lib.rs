@@ -26,6 +26,7 @@ pub fn run() {
             commands::sftp_remove,
             commands::sftp_rename,
             commands::ssh_generate_keypair,
+            commands::tcp_probe,
             commands::ssh_diagnose_ping,
             commands::ssh_diagnose_port,
             commands::ssh_diagnose_traceroute,

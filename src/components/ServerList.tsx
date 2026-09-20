@@ -42,6 +42,10 @@ import type { ServerConfig } from "../types";
 import { EmptyState } from "@/_shared";
 import ImportModal from "./ImportModal";
 
+// 渐变色主题常量
+const brandGradient = "linear-gradient(135deg, #667eea 0%, #764ba2 100%)";
+const cardBgGradient = "linear-gradient(135deg, rgba(102,126,234,0.04) 0%, rgba(118,75,162,0.04) 100%)";
+
 const DEFAULT_GROUP = "默认分组";
 const PINNED_GROUP = "⭐ 收藏";
 
@@ -627,7 +631,15 @@ export default function ServerList() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {/* 顶部标题 + 操作 */}
-      <div style={{ padding: "12px 12px 8px", borderBottom: "1px solid #f0f0f0" }}>
+      <div 
+        style={{ 
+          padding: "12px 16px 8px", 
+          borderBottom: `1px solid var(--ant-color-border-secondary)`,
+          background: cardBgGradient,
+          borderRadius: 16,
+          marginBottom: 12,
+        }}
+      >
         <div
           style={{
             display: "flex",
@@ -636,7 +648,17 @@ export default function ServerList() {
             marginBottom: 8,
           }}
         >
-          <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: 0.5 }}>z-Terminal</span>
+          <span 
+            style={{ 
+              fontWeight: 700, 
+              fontSize: 15, 
+              letterSpacing: 0.5,
+              background: brandGradient,
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+              backgroundImage: brandGradient,
+            }}
+          >z-Terminal</span>
           <Space size={4}>
             <Tooltip title="新建分组">
               <Button
@@ -647,14 +669,20 @@ export default function ServerList() {
                   groupForm.resetFields();
                   setGroupModalVisible(true);
                 }}
+                style={{ borderRadius: 8 }}
               />
             </Tooltip>
             <Tooltip title="添加服务器">
               <Button
-                type="text"
+                type="primary"
                 size="small"
                 icon={<PlusOutlined />}
                 onClick={handleAdd}
+                style={{ 
+                  borderRadius: 8,
+                  background: brandGradient,
+                  boxShadow: "0 4px 12px rgba(102,126,234,0.3)",
+                }}
               />
             </Tooltip>
             <Dropdown
@@ -681,19 +709,30 @@ export default function ServerList() {
                 ],
               }}
             >
-              <Button type="text" size="small" icon={<MoreOutlined />} />
+              <Button type="text" size="small" icon={<MoreOutlined />} style={{ borderRadius: 8 }} />
             </Dropdown>
           </Space>
         </div>
         {/* 搜索框 */}
         <AntInput
           size="small"
-          prefix={<SearchOutlined style={{ color: "#bbb" }} />}
+          prefix={<SearchOutlined style={{ color: "var(--ant-color-text-tertiary)" }} />}
           placeholder="搜索服务器..."
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
           allowClear
-          style={{ borderRadius: 6 }}
+          style={{ 
+            borderRadius: 10,
+            transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+          }}
+          onFocus={(e) => {
+            e.currentTarget.style.boxShadow = '0 2px 8px rgba(102,126,234,0.15)';
+            e.currentTarget.style.border = '1px solid rgba(102,126,234,0.3)';
+          }}
+          onBlur={(e) => {
+            e.currentTarget.style.boxShadow = 'none';
+            e.currentTarget.style.border = '';
+          }}
         />
       </div>
 
@@ -726,11 +765,14 @@ export default function ServerList() {
       <div
         style={{
           padding: "6px 12px",
-          borderTop: "1px solid #f0f0f0",
+          borderTop: `1px solid var(--ant-color-border-secondary)`,
           fontSize: 11,
-          color: "#bbb",
+          color: "var(--ant-color-text-secondary)",
           display: "flex",
           justifyContent: "space-between",
+          background: cardBgGradient,
+          borderRadius: 16,
+          marginTop: 12,
         }}
       >
         <span>

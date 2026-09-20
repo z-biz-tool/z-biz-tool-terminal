@@ -102,11 +102,11 @@ interface ServerStore {
   removeServer: (id: string) => void;
 
   /** 连接到服务器: 若已存在同服务器 tab 则聚焦第一个, 否则新建一个 tab */
-  connectServer: (server: ServerConfig) => Promise<void>;
+  connectServer: (server: ServerConfig) => Promise<ConnectResult>;
   /** 始终为该服务器新建一个 tab(支持同服务器多开) */
   openNewTab: (server: ServerConfig) => Promise<void>;
   /** 内部辅助: 创建一个新 tab 并发起 SSH 连接 */
-  _createTabForServer: (server: ServerConfig, targetTabId?: string) => Promise<string>;
+  _createTabForServer: (server: ServerConfig, targetTabId?: string) => Promise<ConnectResult>;
   /** 关闭指定 tab(断开该 tab 全部面板的 SSH 会话) */
   closeTab: (tabId: string) => Promise<void>;
   /** 激活指定 tab */
@@ -130,6 +130,8 @@ interface ServerStore {
   closePane: (tabId: string, paneId: string) => Promise<void>;
   /** 设置活动面板 */
   setActivePane: (tabId: string, paneId: string) => void;
+  /** 按面板重连指定服务器 */
+  reconnectPane: (tabId: string, paneId: string) => Promise<void>;
   /** 自动重连某个 tab */
   reconnectTab: (tabId: string) => Promise<void>;
   /** 初始化 pty-closed 事件监听 */
@@ -156,55 +158,42 @@ async function connectToServer(
   settings: TerminalSettings,
   allServers: ServerConfig[]
 ): Promise<ConnectResult> {
-  const timeoutMs = (settings.connection_timeout || 30) * 1000;
-
-  const timeoutPromise = new Promise<ConnectResult>((_, reject) => {
-    setTimeout(
-      () => reject(new Error(`连接超时（${settings.connection_timeout || 30}秒）`)),
-      timeoutMs
-    );
-  });
-
   if (server.proxyJump) {
     const jumpServer = allServers.find((s) => s.id === server.proxyJump);
     if (!jumpServer) {
       return { success: false, error: `跳板机 ${server.proxyJump} 不存在` };
     }
-    return await Promise.race([
-      invoke<ConnectResult>("ssh_connect_via_jump", {
-        params: {
-          jumpHost: jumpServer.host,
-          jumpPort: jumpServer.port,
-          jumpUsername: jumpServer.username,
-          jumpAuthType: jumpServer.authType,
-          jumpPassword: jumpServer.password,
-          jumpPrivateKey: jumpServer.privateKey,
-          targetHost: server.host,
-          targetPort: server.port,
-          targetUsername: server.username,
-          targetAuthType: server.authType,
-          targetPassword: server.password,
-          targetPrivateKey: server.privateKey,
-          keepaliveInterval: settings.keepalive_interval,
-        },
-      }),
-      timeoutPromise,
-    ]);
-  }
-  return await Promise.race([
-    invoke<ConnectResult>("ssh_connect", {
+    return await invoke<ConnectResult>("ssh_connect_via_jump", {
       params: {
-        host: server.host,
-        port: server.port,
-        username: server.username,
-        authType: server.authType,
-        password: server.password,
-        privateKey: server.privateKey,
+        jumpHost: jumpServer.host,
+        jumpPort: jumpServer.port,
+        jumpUsername: jumpServer.username,
+        jumpAuthType: jumpServer.authType,
+        jumpPassword: jumpServer.password,
+        jumpPrivateKey: jumpServer.privateKey,
+        targetHost: server.host,
+        targetPort: server.port,
+        targetUsername: server.username,
+        targetAuthType: server.authType,
+        targetPassword: server.password,
+        targetPrivateKey: server.privateKey,
         keepaliveInterval: settings.keepalive_interval,
+        connectionTimeout: settings.connection_timeout,
       },
-    }),
-    timeoutPromise,
-  ]);
+    });
+  }
+  return await invoke<ConnectResult>("ssh_connect", {
+    params: {
+      host: server.host,
+      port: server.port,
+      username: server.username,
+      authType: server.authType,
+      password: server.password,
+      privateKey: server.privateKey,
+      keepaliveInterval: settings.keepalive_interval,
+      connectionTimeout: settings.connection_timeout,
+    },
+  });
 }
 
 const defaultSettings: TerminalSettings = {
@@ -434,7 +423,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   },
 
   // 内部辅助: 为指定 server 创建一个新 tab (含 pane + SSH 连接)
-  _createTabForServer: async (server: ServerConfig, targetTabId?: string): Promise<string> => {
+  _createTabForServer: async (server: ServerConfig, targetTabId?: string): Promise<ConnectResult> => {
     const tabId = targetTabId || genId();
     const paneId = genId();
     const newPane: SplitPane = { id: paneId, serverId: server.id, state: "connecting" };
@@ -466,6 +455,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
               : t
           ),
         }));
+        return result;
       } else {
         set((state) => ({
           tabs: state.tabs.map((t) =>
@@ -483,26 +473,137 @@ export const useServerStore = create<ServerStore>((set, get) => ({
               : t
           ),
         }));
+        return result;
       }
     } catch (e: any) {
+      const errorMessage = String(e);
+      const synthetic: ConnectResult = { success: false, session_id: undefined, error: errorMessage };
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === tabId
             ? {
                 ...t,
                 state: "error",
-                error: String(e),
+                error: errorMessage,
                 panes: t.panes.map((p) =>
                   p.id === paneId
-                    ? { ...p, state: "error" as const, error: String(e) }
+                    ? { ...p, state: "error" as const, error: errorMessage }
                     : p
                 ),
               }
             : t
         ),
       }));
+      return synthetic;
     }
-    return tabId;
+  },
+
+  reconnectPane: async (tabId, paneId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    const pane = tab?.panes.find((p) => p.id === paneId);
+    if (!tab || !pane || pane.state === "connecting") return;
+
+    const server = get().servers.find((s) => s.id === pane.serverId);
+    const isPrimary = tab.panes[0]?.id === paneId;
+    if (!server) {
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId
+            ? {
+                ...t,
+                state: isPrimary ? ("error" as const) : t.state,
+                error: isPrimary ? "服务器配置不存在" : t.error,
+                panes: t.panes.map((p) =>
+                  p.id === paneId
+                    ? { ...p, state: "error" as const, error: "服务器配置不存在" }
+                    : p
+                ),
+              }
+            : t
+        ),
+      }));
+      get().persistTabs();
+      return;
+    }
+
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === tabId
+          ? {
+              ...t,
+              state: isPrimary ? ("connecting" as const) : t.state,
+              sessionId: isPrimary ? undefined : t.sessionId,
+              error: isPrimary ? undefined : t.error,
+              panes: t.panes.map((p) =>
+                p.id === paneId
+                  ? { ...p, state: "connecting" as const, sessionId: undefined, error: undefined }
+                  : p
+              ),
+            }
+          : t
+      ),
+    }));
+
+    try {
+      const result = await connectToServer(server, get().settings, get().servers);
+      if (result.success && result.session_id) {
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.id === tabId
+              ? {
+                  ...t,
+                  state: isPrimary ? ("connected" as const) : t.state,
+                  sessionId: isPrimary ? result.session_id : t.sessionId,
+                  error: isPrimary ? undefined : t.error,
+                  panes: t.panes.map((p) =>
+                    p.id === paneId
+                      ? { ...p, state: "connected" as const, sessionId: result.session_id, error: undefined }
+                      : p
+                  ),
+                }
+              : t
+          ),
+        }));
+      } else {
+        const error = result.error || "连接失败";
+        set((state) => ({
+          tabs: state.tabs.map((t) =>
+            t.id === tabId
+              ? {
+                  ...t,
+                  state: isPrimary ? ("error" as const) : t.state,
+                  error: isPrimary ? error : t.error,
+                  panes: t.panes.map((p) =>
+                    p.id === paneId
+                      ? { ...p, state: "error" as const, sessionId: undefined, error }
+                      : p
+                  ),
+                }
+              : t
+          ),
+        }));
+      }
+    } catch (e) {
+      const error = String(e);
+      set((state) => ({
+        tabs: state.tabs.map((t) =>
+          t.id === tabId
+            ? {
+                ...t,
+                state: isPrimary ? ("error" as const) : t.state,
+                error: isPrimary ? error : t.error,
+                panes: t.panes.map((p) =>
+                  p.id === paneId
+                    ? { ...p, state: "error" as const, sessionId: undefined, error }
+                    : p
+                ),
+              }
+            : t
+        ),
+      }));
+    } finally {
+      get().persistTabs();
+    }
   },
 
   connectServer: async (server) => {
@@ -514,11 +615,33 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         activeTabId: existing.id,
         activePaneId: firstPane?.id || null,
       });
+      if (existing.state === "error" || existing.state === "disconnected") {
+        const retryPane =
+          existing.panes.find((p) => p.state === "error" || p.state === "disconnected") ||
+          firstPane;
+        if (retryPane) await get().reconnectPane(existing.id, retryPane.id);
+        // 重连后从 tab 状态推断结果
+        const refreshed = get().tabs.find((t) => t.id === existing.id);
+        const refreshedPane = refreshed?.panes.find((p) => p.id === retryPane?.id);
+        get().persistTabs();
+        if (refreshedPane?.state === "connected") {
+          return {
+            success: true,
+            session_id: refreshedPane.sessionId,
+          } as ConnectResult;
+        }
+        return {
+          success: false,
+          session_id: undefined,
+          error: refreshedPane?.error || refreshed?.error || "重连失败",
+        } as ConnectResult;
+      }
       get().persistTabs();
-      return;
+      return { success: true, session_id: existing.sessionId } as ConnectResult;
     }
-    await get()._createTabForServer(server);
+    const result = await get()._createTabForServer(server);
     get().persistTabs();
+    return result;
   },
 
   openNewTab: async (server) => {
@@ -904,8 +1027,8 @@ export const useServerStore = create<ServerStore>((set, get) => ({
                 t.id === tab.id
                   ? {
                       ...t,
-                      state: "error" as const,
-                      error: "连接已断开",
+                      state: t.panes[0]?.id === pane.id ? ("error" as const) : t.state,
+                      error: t.panes[0]?.id === pane.id ? "连接已断开" : t.error,
                       panes: t.panes.map((p) =>
                         p.id === pane.id
                           ? { ...p, state: "error" as const, error: "连接已断开", sessionId: undefined }
@@ -916,9 +1039,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
               ),
             }));
 
-            // 自动重连(每个 tab 独立)
+            // 自动重连(每个面板独立)
             if (settings.auto_reconnect && !reconnectingTabs.has(tab.id)) {
-              get().reconnectTab(tab.id);
+              get().reconnectPane(tab.id, pane.id);
             }
             return;
           }

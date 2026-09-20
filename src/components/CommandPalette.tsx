@@ -117,7 +117,9 @@ export default function CommandPalette({
           "ssh",
         ].filter(Boolean),
         weight: 10,
-        action: () => connectServer(server),
+        action: () => {
+          connectServer(server).catch(() => {});
+        },
       });
     }
 

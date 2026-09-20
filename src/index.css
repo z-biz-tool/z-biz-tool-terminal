@@ -1,3 +1,9 @@
+/* ============================================
+   z-biz-tool-terminal 统一样式导入
+   ============================================ */
+
+@import './shared-style.css';
+
 * {
   margin: 0;
   padding: 0;
@@ -14,9 +20,13 @@ body {
   height: 100vh;
 }
 
+/* ============================================
+   z-biz-tool-terminal 特有样式
+   ============================================ */
+
 /* xterm.js 终端样式 */
 .terminal-container {
-  padding: 8px;
+  padding: var(--tool-padding-xs);
   background: #1e1e1e;
   height: 100%;
   overflow: hidden;
@@ -26,13 +36,11 @@ body {
   height: 100%;
 }
 
-/* 紧凑型 Tree: 父子间距收窄, 让分组和子项视觉上贴近 */
+/* 紧凑型 Tree - 使用统一的选中样式 */
 .tree-compact.ant-tree {
-  /* 关闭 list-style 等附加空白 */
 }
 
 .tree-compact .ant-tree-treenode {
-  /* 移除 node 之间的默认间距, blockNode 模式下的视觉断点 */
   padding: 0;
 }
 
@@ -41,19 +49,18 @@ body {
 }
 
 .tree-compact .ant-tree-node-content-wrapper {
-  /* 核心: 收紧 row 内边距, 让分组/子项更紧贴 */
-  padding: 2px 6px;
+  padding: var(--tool-padding-xs) 6px;
   min-height: 26px;
-  border-radius: 4px;
+  border-radius: var(--tool-radius-sm);
   line-height: 1.4;
 }
 
 .tree-compact .ant-tree-node-content-wrapper:hover {
-  background: var(--ant-color-fill-tertiary, rgba(0, 0, 0, 0.04));
+  background: var(--tool-bg-hover);
 }
 
 .tree-compact .ant-tree-node-content-wrapper.ant-tree-node-selected {
-  background: var(--ant-color-primary-bg, #e6f4ff);
+  background: var(--tool-bg-selected);
 }
 
 .tree-compact .ant-tree-switcher {
@@ -67,6 +74,5 @@ body {
 }
 
 .tree-compact .ant-tree-title {
-  /* 允许 title 节点自适应高度, 不留多余空白 */
   display: block;
 }

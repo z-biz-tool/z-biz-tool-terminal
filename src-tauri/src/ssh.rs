@@ -95,6 +95,183 @@ impl client::Handler for ClientHandler {
     }
 }
 
+/// 构建 SSH 客户端配置。
+///
+/// 默认只使用现代算法。只有现代算法协商失败时，调用方才会传入
+/// `legacy_algorithms = true`，以兼容旧版 SSH 服务端。
+fn build_client_config(
+    keepalive_interval: Option<u64>,
+    legacy_algorithms: bool,
+) -> Arc<client::Config> {
+    let mut config = client::Config::default();
+    if let Some(interval) = keepalive_interval {
+        config.keepalive_interval = Some(std::time::Duration::from_secs(interval));
+    }
+
+    // russh 0.45 默认列表遗漏了 P-384，但它是现代安全算法。
+    config.preferred.key.to_mut().push(keys::key::ECDSA_SHA2_NISTP384);
+
+    if legacy_algorithms {
+        // 兼容算法只在现代协商失败后启用，避免普通连接主动降级。
+        config.preferred.key.to_mut().push(keys::key::SSH_RSA);
+        config.preferred.kex.to_mut().push(kex::DH_G14_SHA1);
+        config.preferred.cipher.to_mut().extend([
+            cipher::AES_128_CBC,
+            cipher::AES_192_CBC,
+            cipher::AES_256_CBC,
+        ]);
+    }
+
+    Arc::new(config)
+}
+
+fn should_retry_with_legacy(error: &russh::Error) -> bool {
+    matches!(
+        error,
+        russh::Error::NoCommonKexAlgo
+            | russh::Error::NoCommonKeyAlgo
+            | russh::Error::NoCommonCipher
+            | russh::Error::NoCommonMac
+            | russh::Error::NoCommonCompression
+    )
+}
+
+/// 连接 SSH 服务端，现代算法协商失败时自动尝试兼容算法。
+async fn connect_with_fallback(
+    host: &str,
+    port: u16,
+    keepalive_interval: Option<u64>,
+) -> Result<
+    (
+        client::Handle<ClientHandler>,
+        tokio::sync::mpsc::UnboundedReceiver<ForwardedChannel>,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let (forward_tx, forward_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handler = ClientHandler {
+        forward_tx: Some(forward_tx),
+    };
+
+    match client::connect(
+        build_client_config(keepalive_interval, false),
+        (host.trim(), port),
+        handler,
+    )
+    .await
+    {
+        Ok(session) => Ok((session, forward_rx)),
+        Err(error) if should_retry_with_legacy(&error) => {
+            eprintln!("[ssh] 现代算法协商失败，尝试兼容算法: {}", error);
+            let (legacy_forward_tx, legacy_forward_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let legacy_handler = ClientHandler {
+                forward_tx: Some(legacy_forward_tx),
+            };
+            let session = client::connect(
+                build_client_config(keepalive_interval, true),
+                (host.trim(), port),
+                legacy_handler,
+            )
+            .await
+            .map_err(|legacy_error| {
+                format!(
+                    "SSH 算法协商失败（现代算法: {}; 兼容算法: {}）",
+                    error, legacy_error
+                )
+            })?;
+            Ok((session, legacy_forward_rx))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 通过已认证的跳板机建立目标 SSH 会话，并支持算法兼容回退。
+async fn connect_stream_with_fallback(
+    jump_session: &mut client::Handle<ClientHandler>,
+    target_host: &str,
+    target_port: u16,
+    keepalive_interval: Option<u64>,
+) -> Result<
+    (
+        client::Handle<ClientHandler>,
+        tokio::sync::mpsc::UnboundedReceiver<ForwardedChannel>,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let open_channel = || async {
+        jump_session
+            .channel_open_direct_tcpip(target_host, target_port as u32, "127.0.0.1", 0)
+            .await
+            .map_err(|e| format!("通过跳板机打开通道失败: {}", e))
+    };
+
+    let channel = open_channel().await?;
+    let (forward_tx, forward_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handler = ClientHandler {
+        forward_tx: Some(forward_tx),
+    };
+
+    match client::connect_stream(
+        build_client_config(keepalive_interval, false),
+        channel.into_stream(),
+        handler,
+    )
+    .await
+    {
+        Ok(session) => Ok((session, forward_rx)),
+        Err(error) if should_retry_with_legacy(&error) => {
+            eprintln!("[ssh] 目标主机现代算法协商失败，尝试兼容算法: {}", error);
+            let channel = open_channel().await?;
+            let (legacy_forward_tx, legacy_forward_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let legacy_handler = ClientHandler {
+                forward_tx: Some(legacy_forward_tx),
+            };
+            let session = client::connect_stream(
+                build_client_config(keepalive_interval, true),
+                channel.into_stream(),
+                legacy_handler,
+            )
+            .await
+            .map_err(|legacy_error| {
+                format!(
+                    "目标 SSH 算法协商失败（现代算法: {}; 兼容算法: {}）",
+                    error, legacy_error
+                )
+            })?;
+            Ok((session, legacy_forward_rx))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 使用服务器配置完成 SSH 认证。
+async fn authenticate_session(
+    session: &mut client::Handle<ClientHandler>,
+    username: &str,
+    auth_type: Option<&str>,
+    password: Option<&str>,
+    private_key: Option<&str>,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    match auth_type.unwrap_or("password") {
+        "key" => {
+            let key_content = private_key.ok_or("未提供私钥内容")?;
+            // 密码字段在密钥认证模式下作为私钥 passphrase 使用。
+            let passphrase = password.filter(|value| !value.is_empty());
+            let key_pair = keys::decode_secret_key(key_content, passphrase)
+                .map_err(|e| format!("解析私钥失败: {}", e))?;
+            Ok(session
+                .authenticate_publickey(username, Arc::new(key_pair))
+                .await?)
+        }
+        "password" => Ok(session
+            .authenticate_password(username, password.unwrap_or(""))
+            .await?),
+        other => Err(format!("不支持的认证方式: {}", other).into()),
+    }
+}
+
 impl SshSession {
     /// 连接SSH服务器
     pub async fn connect(
@@ -106,40 +283,40 @@ impl SshSession {
         private_key: Option<&str>,
         keepalive_interval: Option<u64>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let mut config = client::Config::default();
-        if let Some(interval) = keepalive_interval {
-            config.keepalive_interval = Some(std::time::Duration::from_secs(interval));
-        }
-        let config = Arc::new(config);
-
-        let (forward_tx, forward_rx) = tokio::sync::mpsc::unbounded_channel();
-        let handler = ClientHandler {
-            forward_tx: Some(forward_tx),
-        };
-        let mut session = client::connect(config, (host, port), handler).await?;
+        let (mut session, forward_rx) =
+            connect_with_fallback(host, port, keepalive_interval).await?;
 
         // 认证
-        let auth_ok = match auth_type.unwrap_or("password") {
-            "key" => {
-                let key_content = private_key.ok_or("未提供私钥内容")?;
-                let key_pair = keys::decode_secret_key(key_content, None)
-                    .map_err(|e| format!("解析私钥失败: {}", e))?;
-                session
-                    .authenticate_publickey(username, Arc::new(key_pair))
-                    .await?
-            }
-            _ => {
-                let pwd = password.unwrap_or("");
-                session.authenticate_password(username, pwd).await?
-            }
-        };
+        let auth_ok = authenticate_session(
+            &mut session,
+            username.trim(),
+            auth_type,
+            password,
+            private_key,
+        )
+        .await?;
 
         if !auth_ok {
-            return Err("认证失败: 用户名或密码错误".into());
+            return Err("服务器拒绝认证，请确认用户名、密码以及服务器是否允许该认证方式".into());
         }
 
-        // 尝试初始化 SFTP 子系统,失败则回退到 ls -la 模拟
-        let sftp = Self::open_sftp(&mut session).await.ok();
+        // SFTP 不应阻塞 SSH 连接；不可用时回退到 ls -la 模拟。
+        let sftp = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Self::open_sftp(&mut session),
+        )
+        .await
+        {
+            Ok(Ok(sftp)) => Some(sftp),
+            Ok(Err(e)) => {
+                eprintln!("[ssh] SFTP 子系统初始化失败，将使用 ls 回退: {}", e);
+                None
+            }
+            Err(_) => {
+                eprintln!("[ssh] SFTP 子系统初始化超时，将使用 ls 回退");
+                None
+            }
+        };
 
         Ok(SshSession {
             id: Uuid::new_v4().to_string(),
@@ -173,81 +350,63 @@ impl SshSession {
         keepalive_interval: Option<u64>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // 1. 先连接到跳板机
-        let mut jump_config = client::Config::default();
-        if let Some(interval) = keepalive_interval {
-            jump_config.keepalive_interval = Some(std::time::Duration::from_secs(interval));
-        }
-        let jump_config = Arc::new(jump_config);
-
-        let (jump_forward_tx, _jump_forward_rx) = tokio::sync::mpsc::unbounded_channel();
-        let jump_handler = ClientHandler {
-            forward_tx: Some(jump_forward_tx),
-        };
-        let mut jump_session = client::connect(jump_config, (jump_host, jump_port), jump_handler).await?;
+        let (mut jump_session, _jump_forward_rx) =
+            connect_with_fallback(jump_host, jump_port, keepalive_interval).await?;
 
         // 认证跳板机
-        let jump_auth_ok = match jump_auth_type.unwrap_or("password") {
-            "key" => {
-                let key_content = jump_private_key.ok_or("未提供跳板机私钥内容")?;
-                let key_pair = keys::decode_secret_key(key_content, None)
-                    .map_err(|e| format!("解析跳板机私钥失败: {}", e))?;
-                jump_session
-                    .authenticate_publickey(jump_username, Arc::new(key_pair))
-                    .await?
-            }
-            _ => {
-                let pwd = jump_password.unwrap_or("");
-                jump_session.authenticate_password(jump_username, pwd).await?
-            }
-        };
+        let jump_auth_ok = authenticate_session(
+            &mut jump_session,
+            jump_username.trim(),
+            jump_auth_type,
+            jump_password,
+            jump_private_key,
+        )
+        .await?;
 
         if !jump_auth_ok {
-            return Err("跳板机认证失败: 用户名或密码错误".into());
+            return Err("跳板机拒绝认证，请确认用户名、密码以及服务器是否允许该认证方式".into());
         }
 
-        // 2. 通过跳板机打开 direct-tcpip 通道到目标主机
-        let channel = jump_session
-            .channel_open_direct_tcpip(target_host, target_port as u32, "127.0.0.1", 0)
-            .await
-            .map_err(|e| format!("通过跳板机打开通道失败: {}", e))?;
-
-        // 3. 将通道转为流，在上面建立新的SSH会话
-        let channel_stream = channel.into_stream();
-
-        let mut target_config = client::Config::default();
-        if let Some(interval) = keepalive_interval {
-            target_config.keepalive_interval = Some(std::time::Duration::from_secs(interval));
-        }
-        let target_config = Arc::new(target_config);
-
-        let (target_forward_tx, target_forward_rx) = tokio::sync::mpsc::unbounded_channel();
-        let target_handler = ClientHandler {
-            forward_tx: Some(target_forward_tx),
-        };
-        let mut target_session = client::connect_stream(target_config, channel_stream, target_handler).await?;
+        // 2-3. 通过跳板机打开通道并建立目标 SSH 会话
+        let (mut target_session, target_forward_rx) = connect_stream_with_fallback(
+            &mut jump_session,
+            target_host,
+            target_port,
+            keepalive_interval,
+        )
+        .await?;
 
         // 4. 认证目标主机
-        let target_auth_ok = match target_auth_type.unwrap_or("password") {
-            "key" => {
-                let key_content = target_private_key.ok_or("未提供目标主机私钥内容")?;
-                let key_pair = keys::decode_secret_key(key_content, None)
-                    .map_err(|e| format!("解析目标主机私钥失败: {}", e))?;
-                target_session
-                    .authenticate_publickey(target_username, Arc::new(key_pair))
-                    .await?
-            }
-            _ => {
-                let pwd = target_password.unwrap_or("");
-                target_session.authenticate_password(target_username, pwd).await?
-            }
-        };
+        let target_auth_ok = authenticate_session(
+            &mut target_session,
+            target_username.trim(),
+            target_auth_type,
+            target_password,
+            target_private_key,
+        )
+        .await?;
 
         if !target_auth_ok {
-            return Err("目标主机认证失败: 用户名或密码错误".into());
+            return Err("目标主机拒绝认证，请确认用户名、密码以及服务器是否允许该认证方式".into());
         }
 
         // 5. 尝试初始化 SFTP 子系统
-        let sftp = Self::open_sftp(&mut target_session).await.ok();
+        let sftp = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Self::open_sftp(&mut target_session),
+        )
+        .await
+        {
+            Ok(Ok(sftp)) => Some(sftp),
+            Ok(Err(e)) => {
+                eprintln!("[ssh] 目标主机 SFTP 子系统初始化失败，将使用 ls 回退: {}", e);
+                None
+            }
+            Err(_) => {
+                eprintln!("[ssh] 目标主机 SFTP 子系统初始化超时，将使用 ls 回退");
+                None
+            }
+        };
 
         // 注意: jump_session 需要保持存活，不能断开
         // 我们将 jump_session 的 handle 也存储在 SshSession 中

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 use crate::ssh::{SshSession, SftpEntry};
@@ -17,39 +18,64 @@ async fn sessions() -> &'static Arc<Mutex<HashMap<String, SshSession>>> {
 
 /// SSH连接参数
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectParams {
     pub host: String,
     pub port: u16,
     pub username: String,
     /// 认证方式: password / key
+    #[serde(alias = "auth_type")]
     pub auth_type: Option<String>,
     pub password: Option<String>,
     /// 私钥内容(PEM格式)
+    #[serde(alias = "private_key")]
     pub private_key: Option<String>,
     /// SSH keepalive 间隔(秒), None 表示禁用
+    #[serde(alias = "keepalive_interval")]
     pub keepalive_interval: Option<u64>,
+    /// 连接超时(秒)
+    #[serde(alias = "connection_timeout")]
+    pub connection_timeout: Option<u64>,
 }
 
 /// 通过跳板机连接SSH的参数
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectViaJumpParams {
     /// 跳板机参数
+    #[serde(alias = "jump_host")]
     pub jump_host: String,
+    #[serde(alias = "jump_port")]
     pub jump_port: u16,
+    #[serde(alias = "jump_username")]
     pub jump_username: String,
+    #[serde(alias = "jump_auth_type")]
     pub jump_auth_type: Option<String>,
+    #[serde(alias = "jump_password")]
     pub jump_password: Option<String>,
+    #[serde(alias = "jump_private_key")]
     pub jump_private_key: Option<String>,
     /// 目标主机参数
+    #[serde(alias = "target_host")]
     pub target_host: String,
+    #[serde(alias = "target_port")]
     pub target_port: u16,
+    #[serde(alias = "target_username")]
     pub target_username: String,
+    #[serde(alias = "target_auth_type")]
     pub target_auth_type: Option<String>,
+    #[serde(alias = "target_password")]
     pub target_password: Option<String>,
+    #[serde(alias = "target_private_key")]
     pub target_private_key: Option<String>,
     /// SSH keepalive 间隔(秒), None 表示禁用
+    #[serde(alias = "keepalive_interval")]
     pub keepalive_interval: Option<u64>,
+    /// 连接超时(秒)
+    #[serde(alias = "connection_timeout")]
+    pub connection_timeout: Option<u64>,
 }
+
 
 /// SSH连接结果
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,16 +104,28 @@ pub struct SftpListResult {
 /// 连接SSH服务器
 #[tauri::command]
 pub async fn ssh_connect(params: ConnectParams) -> ConnectResult {
-    let session = SshSession::connect(
-        &params.host,
-        params.port,
-        &params.username,
-        params.auth_type.as_deref(),
-        params.password.as_deref(),
-        params.private_key.as_deref(),
-        params.keepalive_interval,
+    let timeout_secs = params.connection_timeout.unwrap_or(30).clamp(5, 300);
+    let host = params.host.clone();
+    let port = params.port;
+    let session = match tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        SshSession::connect(
+            &params.host,
+            params.port,
+            &params.username,
+            params.auth_type.as_deref(),
+            params.password.as_deref(),
+            params.private_key.as_deref(),
+            params.keepalive_interval,
+        ),
     )
-    .await;
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err::<SshSession, Box<dyn std::error::Error + Send + Sync>>(
+            format!("连接 {}:{} 超时（{}秒）", host, port, timeout_secs).into(),
+        ),
+    };
 
     match session {
         Ok(sess) => {
@@ -103,7 +141,7 @@ pub async fn ssh_connect(params: ConnectParams) -> ConnectResult {
         Err(e) => ConnectResult {
             success: false,
             session_id: None,
-            error: Some(e.to_string()),
+            error: Some(format!("连接 {}:{} 失败: {}", host, port, e)),
         },
     }
 }
@@ -111,22 +149,38 @@ pub async fn ssh_connect(params: ConnectParams) -> ConnectResult {
 /// 通过跳板机连接SSH服务器
 #[tauri::command]
 pub async fn ssh_connect_via_jump(params: ConnectViaJumpParams) -> ConnectResult {
-    let session = SshSession::connect_via_jump(
-        &params.jump_host,
-        params.jump_port,
-        &params.jump_username,
-        params.jump_auth_type.as_deref(),
-        params.jump_password.as_deref(),
-        params.jump_private_key.as_deref(),
-        &params.target_host,
-        params.target_port,
-        &params.target_username,
-        params.target_auth_type.as_deref(),
-        params.target_password.as_deref(),
-        params.target_private_key.as_deref(),
-        params.keepalive_interval,
+    let timeout_secs = params.connection_timeout.unwrap_or(30).clamp(5, 300);
+    let jump_host = params.jump_host.clone();
+    let jump_port = params.jump_port;
+    let target_host = params.target_host.clone();
+    let target_port = params.target_port;
+    let session = match tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        SshSession::connect_via_jump(
+            &params.jump_host,
+            params.jump_port,
+            &params.jump_username,
+            params.jump_auth_type.as_deref(),
+            params.jump_password.as_deref(),
+            params.jump_private_key.as_deref(),
+            &params.target_host,
+            params.target_port,
+            &params.target_username,
+            params.target_auth_type.as_deref(),
+            params.target_password.as_deref(),
+            params.target_private_key.as_deref(),
+            params.keepalive_interval,
+        ),
     )
-    .await;
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err::<SshSession, Box<dyn std::error::Error + Send + Sync>>(format!(
+            "跳板连接超时（{}秒）: {}:{} → {}:{}",
+            timeout_secs, jump_host, jump_port, target_host, target_port
+        )
+        .into()),
+    };
 
     match session {
         Ok(sess) => {
@@ -142,7 +196,10 @@ pub async fn ssh_connect_via_jump(params: ConnectViaJumpParams) -> ConnectResult
         Err(e) => ConnectResult {
             success: false,
             session_id: None,
-            error: Some(e.to_string()),
+            error: Some(format!(
+                "跳板连接失败 {}:{} → {}:{}: {}",
+                jump_host, jump_port, target_host, target_port, e
+            )),
         },
     }
 }
@@ -283,13 +340,20 @@ pub async fn ssh_generate_keypair(
 
 /// 端口转发参数
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PortForwardParams {
+    #[serde(alias = "session_id")]
     pub session_id: String,
     /// 转发类型: "local" | "remote" | "dynamic"
+    #[serde(alias = "forward_type")]
     pub forward_type: String,
+    #[serde(alias = "local_addr")]
     pub local_addr: Option<String>,
+    #[serde(alias = "local_port")]
     pub local_port: Option<u16>,
+    #[serde(alias = "remote_host")]
     pub remote_host: Option<String>,
+    #[serde(alias = "remote_port")]
     pub remote_port: Option<u16>,
 }
 
@@ -731,6 +795,91 @@ pub async fn read_file_as_base64(path: String) -> Result<String, String> {
     Ok(base64_encode(&bytes))
 }
 
+/// 本地 TCP 连通性探测结果(无需 SSH 会话)
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TcpProbeResult {
+    pub reachable: bool,
+    pub message: String,
+    pub elapsed_ms: u128,
+}
+
+/// 本地 TCP 连通性探测: 仅建立 TCP 连接, 不进行 SSH 握手。
+///
+/// 用于在快速连接 / 排错场景下, 不消耗 SSH 凭据就能判断端口是否可达。
+/// 常见失败原因会被翻译成人类可读的提示。
+#[tauri::command]
+pub async fn tcp_probe(host: String, port: u16, timeout_ms: Option<u64>) -> TcpProbeResult {
+    use std::net::ToSocketAddrs;
+    use std::time::{Duration, Instant};
+    use tokio::io::AsyncWriteExt;
+
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000).clamp(500, 30000));
+    let trimmed_host = host.trim();
+    let addr = match (trimmed_host, port).to_socket_addrs() {
+        Ok(mut iter) => match iter.next() {
+            Some(a) => a,
+            None => {
+                return TcpProbeResult {
+                    reachable: false,
+                    message: format!("无法解析主机 {}", trimmed_host),
+                    elapsed_ms: 0,
+                }
+            }
+        },
+        Err(e) => {
+            return TcpProbeResult {
+                reachable: false,
+                message: format!("域名解析失败: {}", e),
+                elapsed_ms: 0,
+            }
+        }
+    };
+
+    let started = Instant::now();
+    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
+        Ok(Ok(mut stream)) => {
+            let _ = stream.shutdown().await;
+            TcpProbeResult {
+                reachable: true,
+                message: format!("TCP 连接到 {}:{} 成功", trimmed_host, port),
+                elapsed_ms: started.elapsed().as_millis(),
+            }
+        }
+        Ok(Err(e)) => {
+            // 将常见错误翻译为更直观的提示
+            let message = match e.kind() {
+                std::io::ErrorKind::ConnectionRefused => {
+                    format!("连接被拒绝: {}:{} 没有进程在监听(检查 sshd 是否启动 / 端口是否正确)", trimmed_host, port)
+                }
+                std::io::ErrorKind::TimedOut => {
+                    format!("连接超时: 网络不通或防火墙拦截")
+                }
+                std::io::ErrorKind::NetworkUnreachable => {
+                    format!("网络不可达: 请检查本机网络或路由")
+                }
+                std::io::ErrorKind::HostUnreachable => {
+                    format!("主机不可达: 服务器关机 / 防火墙拦截 / 网关配置错误")
+                }
+                std::io::ErrorKind::PermissionDenied => {
+                    format!("权限不足: 检查本机防火墙或 SELinux/AppArmor 策略")
+                }
+                _ => format!("连接失败: {}", e),
+            };
+            TcpProbeResult {
+                reachable: false,
+                message,
+                elapsed_ms: started.elapsed().as_millis(),
+            }
+        }
+        Err(_) => TcpProbeResult {
+            reachable: false,
+            message: format!("连接超时 ({}ms): 网络不通或防火墙拦截", timeout.as_millis()),
+            elapsed_ms: started.elapsed().as_millis(),
+        },
+    }
+}
+
 /// 诊断: Ping
 #[tauri::command]
 pub async fn ssh_diagnose_ping(session_id: String, host: String, count: Option<u32>) -> ExecResult {
@@ -1023,4 +1172,77 @@ fn base64_encode(data: &[u8]) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn connect_params_accepts_frontend_camel_case() {
+        let params: ConnectParams = serde_json::from_value(json!({
+            "host": "127.0.0.1",
+            "port": 22,
+            "username": "tester",
+            "authType": "password",
+            "password": "test-password",
+            "keepaliveInterval": 60,
+            "connectionTimeout": 30
+        }))
+        .expect("camelCase 参数应能解析");
+
+        assert_eq!(params.auth_type.as_deref(), Some("password"));
+        assert_eq!(params.password.as_deref(), Some("test-password"));
+        assert_eq!(params.keepalive_interval, Some(60));
+        assert_eq!(params.connection_timeout, Some(30));
+    }
+
+    #[test]
+    fn connect_params_accepts_legacy_snake_case() {
+        let params: ConnectParams = serde_json::from_value(json!({
+            "host": "127.0.0.1",
+            "port": 22,
+            "username": "tester",
+            "auth_type": "key",
+            "private_key": "key-content",
+            "keepalive_interval": 60,
+            "connection_timeout": 30
+        }))
+        .expect("snake_case 参数应能解析");
+
+        assert_eq!(params.auth_type.as_deref(), Some("key"));
+        assert_eq!(params.private_key.as_deref(), Some("key-content"));
+        assert_eq!(params.keepalive_interval, Some(60));
+        assert_eq!(params.connection_timeout, Some(30));
+    }
+
+    #[test]
+    fn tcp_probe_result_serializes_camel_case() {
+        let result = TcpProbeResult {
+            reachable: true,
+            message: "ok".into(),
+            elapsed_ms: 42,
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["reachable"], true);
+        assert_eq!(value["elapsedMs"], 42);
+        assert!(value.get("elapsed_ms").is_none());
+    }
+
+    #[tokio::test]
+    async fn tcp_probe_returns_unreachable_for_local_closed_port() {
+        // 找一个大概率未占用的本地端口 (绑定后立即释放)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let result = tcp_probe("127.0.0.1".into(), port, Some(500)).await;
+        assert!(!result.reachable, "刚释放的端口不应可达");
+        assert!(
+            result.message.contains("拒绝") || result.message.contains("失败"),
+            "错误信息应包含中文提示, 实际: {}",
+            result.message
+        );
+    }
 }

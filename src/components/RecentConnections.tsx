@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Popover, List, Button, Empty, theme, Typography } from "antd";
+import { Popover, List, Button, Empty, theme, Typography, message } from "antd";
 import { HistoryOutlined, DeleteOutlined, LinkOutlined } from "@ant-design/icons";
 import { useServerStore } from "../stores/serverStore";
 import type { ServerConfig } from "../types";
@@ -61,6 +61,7 @@ interface RecentConnectionsProps {
 
 const RecentConnections: React.FC<RecentConnectionsProps> = ({ open, onClose, children }) => {
   const { token } = theme.useToken();
+  const { servers } = useServerStore();
   const [entries, setEntries] = useState<RecentEntry[]>([]);
 
   const refresh = useCallback(() => {
@@ -71,21 +72,25 @@ const RecentConnections: React.FC<RecentConnectionsProps> = ({ open, onClose, ch
     if (open) refresh();
   }, [open, refresh]);
 
-  const handleConnect = (entry: RecentEntry) => {
+  const handleConnect = async (entry: RecentEntry) => {
+    // 最近连接记录不保存密码，优先复用服务器列表中的完整配置。
+    const savedServer = servers.find(
+      (server) =>
+        server.host === entry.host &&
+        server.port === entry.port &&
+        server.username === entry.username
+    );
+    if (!savedServer) {
+      message.warning("最近连接不保存密码，请从服务器列表或快速连接栏重新输入密码");
+      return;
+    }
+
     const tempServer: ServerConfig = {
+      ...savedServer,
       id: genId(),
       name: `${entry.username}@${entry.host}`,
-      group: "临时连接",
-      host: entry.host,
-      port: entry.port,
-      username: entry.username,
-      authType: entry.authType as "password" | "key",
-      password: undefined,
-      privateKey: undefined,
-      remark: undefined,
-      pinned: undefined,
     };
-    useServerStore.getState().connectServer(tempServer);
+    await useServerStore.getState().connectServer(tempServer);
     // Update lastConnected
     const arr = loadRecent();
     const key = `${entry.host}:${entry.port}:${entry.username}`;
