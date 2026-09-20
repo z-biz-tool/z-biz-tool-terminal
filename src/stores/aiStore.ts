@@ -3,7 +3,7 @@
  */
 
 import { create } from 'zustand';
-import { useAIManager } from 'z-biz-tool-core/ai';
+import { useAIManager } from 'z-biz-tool-shared/ai';
 
 interface TerminalAIStore {
   // 原有配置保持兼容

@@ -6,7 +6,7 @@ import type {
   AIProvider as CoreAIProvider, 
   AIFunctionType as CoreAIFunctionType,
   AIConfig as CoreAIConfig
-} from 'z-biz-tool-core/ai/types';
+} from 'z-biz-tool-shared/ai/types';
 
 // 保持向后兼容的类型定义
 export type AIProvider = CoreAIProvider;

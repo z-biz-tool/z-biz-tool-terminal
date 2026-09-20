@@ -5,7 +5,7 @@
 
 import { AIClientBase, OpenAIClient, ClaudeClient, GeminiClient, OllamaClient, createAIClient } from './aiClient';
 import type { AIConfig, AIMessage } from './types';
-import { useAIManager } from 'z-biz-tool-core/ai';
+import { useAIManager } from 'z-biz-tool-shared/ai';
 
 /**
  * 封装统一 AI 中台，提供旧版 API
