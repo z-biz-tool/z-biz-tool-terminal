@@ -10,6 +10,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "z-biz-tool-shared": path.resolve(__dirname, "../z-biz-tool-shared/src"),
     },
   },
   clearScreen: false,
