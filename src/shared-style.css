@@ -1,0 +1,552 @@
+/* ============================================
+   z-biz-tool 统一基础样式
+   确保所有工具项目具有相同的交互风格
+   ============================================ */
+
+/* CSS 变量定义 - 统一配色和间距 */
+:root {
+  /* 颜色系统 */
+  --tool-bg-primary: #ffffff;
+  --tool-bg-secondary: #f5f5f5;
+  --tool-bg-tertiary: #e5e5e5;
+  --tool-bg-hover: rgba(0, 0, 0, 0.04);
+  --tool-bg-selected: #e6f4ff;
+  
+  --tool-text-primary: #000000;
+  --tool-text-secondary: #555555;
+  --tool-text-muted: #8c8c8c;
+  
+  --tool-border-color: #d9d9d9;
+  --tool-border-hover: #bfbfbf;
+  
+  --tool-accent-color: #1677ff;
+  --tool-accent-hover: #0958d9;
+  --tool-accent-bg: rgba(22, 119, 255, 0.08);
+  --tool-accent-bg-hover: rgba(22, 119, 255, 0.12);
+  
+  /* 尺寸系统 */
+  --tool-radius-sm: 4px;
+  --tool-radius-md: 6px;
+  --tool-radius-lg: 8px;
+  
+  --tool-padding-xs: 4px;
+  --tool-padding-sm: 8px;
+  --tool-padding-md: 12px;
+  --tool-padding-lg: 16px;
+  
+  /* 交互效果 */
+  --tool-transition-fast: 0.12s ease;
+  --tool-transition-normal: 0.2s ease;
+  
+  /* 阴影 */
+  --tool-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --tool-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* ============================================
+   通用组件样式
+   ============================================ */
+
+/* 按钮样式 */
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: var(--tool-padding-xs) var(--tool-padding-sm);
+  border: 1px solid transparent;
+  border-radius: var(--tool-radius-md);
+  background: transparent;
+  color: var(--tool-text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--tool-transition-fast);
+  user-select: none;
+}
+
+.tool-btn:hover:not(:disabled) {
+  background: var(--tool-bg-hover);
+  color: var(--tool-text-primary);
+}
+
+.tool-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.tool-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tool-btn.primary {
+  background: var(--tool-accent-color);
+  color: #ffffff;
+}
+
+.tool-btn.primary:hover:not(:disabled) {
+  background: var(--tool-accent-hover);
+}
+
+/* 图标按钮 */
+.tool-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--tool-radius-md);
+  background: transparent;
+  color: var(--tool-text-secondary);
+  cursor: pointer;
+  transition: all var(--tool-transition-fast);
+}
+
+.tool-icon-btn:hover:not(:disabled) {
+  background: var(--tool-bg-hover);
+  color: var(--tool-text-primary);
+}
+
+.tool-icon-btn.active {
+  background: var(--tool-accent-bg);
+  color: var(--tool-accent-color);
+}
+
+.tool-icon-btn.active:hover:not(:disabled) {
+  background: var(--tool-accent-bg-hover);
+}
+
+/* 分割线 */
+.tool-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--tool-border-color);
+  margin: 0 4px;
+}
+
+/* 工具栏 */
+.tool-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: var(--tool-padding-xs) var(--tool-padding-sm);
+  background: var(--tool-bg-secondary);
+  border-bottom: 1px solid var(--tool-border-color);
+  flex-shrink: 0;
+}
+
+/* ============================================
+   列表/树形组件样式
+   ============================================ */
+
+.tool-list-item {
+  display: flex;
+  align-items: center;
+  gap: var(--tool-padding-xs);
+  padding: var(--tool-padding-xs) var(--tool-padding-sm);
+  border-radius: var(--tool-radius-sm);
+  cursor: pointer;
+  transition: all var(--tool-transition-fast);
+  user-select: none;
+}
+
+.tool-list-item:hover {
+  background: var(--tool-bg-hover);
+}
+
+.tool-list-item.selected {
+  background: var(--tool-bg-selected);
+}
+
+.tool-list-item.selected::before {
+  content: '';
+  position: absolute;
+  left: var(--tool-padding-xs);
+  width: 2px;
+  height: calc(100% - var(--tool-padding-xs) * 2);
+  background: var(--tool-accent-color);
+  border-radius: var(--tool-radius-sm) 0 0 var(--tool-radius-sm);
+}
+
+/* 侧边栏 */
+.tool-sidebar {
+  width: 260px;
+  min-width: 160px;
+  max-width: 600px;
+  background: var(--tool-bg-secondary);
+  border-right: 1px solid var(--tool-border-color);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  flex-shrink: 0;
+  transition: width var(--tool-transition-normal);
+}
+
+.tool-sidebar.collapsed {
+  width: 44px;
+}
+
+.tool-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--tool-padding-md) var(--tool-padding-sm);
+  border-bottom: 1px solid var(--tool-border-color);
+}
+
+.tool-sidebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tool-text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.tool-sidebar-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--tool-padding-xs) 0;
+}
+
+.tool-sidebar-footer {
+  padding: var(--tool-padding-sm);
+  border-top: 1px solid var(--tool-border-color);
+  background: var(--tool-bg-secondary);
+  display: flex;
+  gap: var(--tool-padding-xs);
+}
+
+/* ============================================
+   滚动条样式
+   ============================================ */
+
+.tool-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.25) transparent;
+}
+
+.tool-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.tool-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tool-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 3px;
+}
+
+.tool-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* ============================================
+   弹窗/模态框
+   ============================================ */
+
+.tool-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+
+.tool-modal {
+  background: var(--tool-bg-primary);
+  border-radius: var(--tool-radius-lg);
+  box-shadow: var(--tool-shadow-md);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-width: 90vw;
+  max-height: 80vh;
+}
+
+.tool-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--tool-padding-md) var(--tool-padding-lg);
+  border-bottom: 1px solid var(--tool-border-color);
+}
+
+.tool-modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--tool-text-primary);
+  margin: 0;
+}
+
+.tool-modal-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--tool-radius-sm);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--tool-text-secondary);
+  cursor: pointer;
+  transition: all var(--tool-transition-fast);
+}
+
+.tool-modal-close:hover {
+  background: var(--tool-bg-hover);
+  color: var(--tool-text-primary);
+  border-color: var(--tool-border-hover);
+}
+
+.tool-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--tool-padding-lg);
+}
+
+.tool-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--tool-padding-xs);
+  padding: var(--tool-padding-sm) var(--tool-padding-lg);
+  border-top: 1px solid var(--tool-border-color);
+}
+
+/* ============================================
+   输入框
+   ============================================ */
+
+.tool-input {
+  width: 100%;
+  padding: var(--tool-padding-xs) var(--tool-padding-sm);
+  border: 1px solid var(--tool-border-color);
+  border-radius: var(--tool-radius-sm);
+  background: var(--tool-bg-primary);
+  color: var(--tool-text-primary);
+  font-size: 13px;
+  transition: all var(--tool-transition-fast);
+}
+
+.tool-input:hover {
+  border-color: var(--tool-border-hover);
+}
+
+.tool-input:focus {
+  outline: none;
+  border-color: var(--tool-accent-color);
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.1);
+}
+
+/* ============================================
+   卡片
+   ============================================ */
+
+.tool-card {
+  background: var(--tool-bg-primary);
+  border: 1px solid var(--tool-border-color);
+  border-radius: var(--tool-radius-md);
+  padding: var(--tool-padding-md);
+  transition: all var(--tool-transition-fast);
+}
+
+.tool-card:hover {
+  border-color: var(--tool-border-hover);
+  box-shadow: var(--tool-shadow-sm);
+}
+
+.tool-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--tool-text-primary);
+  margin-bottom: var(--tool-padding-md);
+}
+
+/* ============================================
+   标签
+   ============================================ */
+
+.tool-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--tool-bg-tertiary);
+  color: var(--tool-text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--tool-transition-fast);
+}
+
+.tool-tag:hover {
+  background: var(--tool-border-color);
+}
+
+.tool-tag.accent {
+  background: var(--tool-accent-bg);
+  color: var(--tool-accent-color);
+}
+
+.tool-tag.accent:hover {
+  background: var(--tool-accent-bg-hover);
+}
+
+/* ============================================
+   分页器
+   ============================================ */
+
+.tool-pagination {
+  display: flex;
+  align-items: center;
+  gap: var(--tool-padding-xs);
+  padding: var(--tool-padding-sm);
+  border-top: 1px solid var(--tool-border-color);
+  background: var(--tool-bg-primary);
+}
+
+.tool-pagination-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 var(--tool-padding-xs);
+  border-radius: var(--tool-radius-sm);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--tool-text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--tool-transition-fast);
+}
+
+.tool-pagination-item:hover:not(.disabled) {
+  background: var(--tool-bg-hover);
+}
+
+.tool-pagination-item.active {
+  background: var(--tool-accent-color);
+  color: #ffffff;
+}
+
+.tool-pagination-item.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ============================================
+   状态栏
+   ============================================ */
+
+.tool-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--tool-padding-md);
+  padding: var(--tool-padding-xs) var(--tool-padding-md);
+  background: var(--tool-bg-secondary);
+  border-top: 1px solid var(--tool-border-color);
+  font-size: 12px;
+  color: var(--tool-text-secondary);
+  flex-shrink: 0;
+}
+
+.tool-status-section {
+  display: flex;
+  align-items: center;
+  gap: var(--tool-padding-md);
+}
+
+.tool-status-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--tool-radius-sm);
+  transition: all var(--tool-transition-fast);
+}
+
+.tool-status-item:hover {
+  background: var(--tool-bg-hover);
+  color: var(--tool-text-primary);
+}
+
+/* ============================================
+   空状态
+   ============================================ */
+
+.tool-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: var(--tool-padding-lg) 0;
+  color: var(--tool-text-secondary);
+  text-align: center;
+}
+
+.tool-empty-icon {
+  font-size: 48px;
+  margin-bottom: var(--tool-padding-md);
+  opacity: 0.3;
+}
+
+.tool-empty-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--tool-text-primary);
+  margin-bottom: var(--tool-padding-xs);
+}
+
+.tool-empty-description {
+  font-size: 13px;
+  color: var(--tool-text-secondary);
+}
+
+/* ============================================
+   动画
+   ============================================ */
+
+@keyframes toolFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes toolFadeInDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes toolFadeInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes toolScaleIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.tool-animate-fade-in {
+  animation: toolFadeIn var(--tool-transition-normal) ease;
+}
+
+.tool-animate-fade-in-down {
+  animation: toolFadeInDown var(--tool-transition-normal) ease;
+}
+
+.tool-animate-fade-in-up {
+  animation: toolFadeInUp var(--tool-transition-normal) ease;
+}
+
+.tool-animate-scale-in {
+  animation: toolScaleIn var(--tool-transition-normal) ease;
+}

@@ -1,5 +1,8 @@
 mod commands;
 mod config;
+mod hostkeys;
+mod redact;
+mod secret;
 mod ssh;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -26,6 +29,9 @@ pub fn run() {
             commands::sftp_remove,
             commands::sftp_rename,
             commands::ssh_generate_keypair,
+            commands::ssh_resolve_host_key,
+            config::list_host_keys,
+            config::remove_host_key,
             commands::tcp_probe,
             commands::ssh_diagnose_ping,
             commands::ssh_diagnose_port,
@@ -47,11 +53,18 @@ pub fn run() {
             config::restore_config_from_backup,
             config::export_config,
             config::import_config,
+            config::get_ai_config,
+            config::save_ai_config,
             config::get_session_logs,
             config::read_session_log,
             config::delete_session_log,
         ])
         .setup(|_app| {
+            // 启动加固: 收紧目录权限 + 把历史明文凭证升级为密文(§5.7 兼容读取一版 + 迁移)。
+            // 失败不阻断启动: 明文仍可照常读取使用。
+            if let Err(e) = config::harden_storage() {
+                eprintln!("存储加固未完成, 本次按现状继续运行: {}", e);
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

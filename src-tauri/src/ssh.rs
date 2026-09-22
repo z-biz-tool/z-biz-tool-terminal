@@ -12,6 +12,25 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::config::get_log_dir;
+use crate::hostkeys::{self, HostKeyPolicy};
+
+/// `execute()` 单次命令允许累积的最大输出字节数，超出即截断，避免远端刷屏打满内存
+const EXECUTE_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
+/// `execute()` 的整体超时（秒）
+const EXECUTE_TIMEOUT_SECS: u64 = 60;
+/// 首连主机密钥确认的最长等待（秒）
+const HOST_KEY_CONFIRM_TIMEOUT_SECS: u64 = 120;
+
+/// 会话日志落盘目标。
+///
+/// 终端输出按任意边界分块到达，脱敏必须跨块保持状态（PEM 块 / 未完成的行），
+/// 因此把 `LogRedactor` 与文件句柄绑在一起，而不是每块独立处理。
+pub struct SessionLogSink {
+    file: tokio::fs::File,
+    redactor: crate::redact::LogRedactor,
+    /// false 表示不做脱敏（仅在用户显式关闭该开关时）
+    redact: bool,
+}
 
 /// SFTP文件条目
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,8 +55,8 @@ pub struct SshSession {
     pty_writer: Arc<Mutex<Option<tokio::sync::mpsc::Sender<String>>>>,
     /// PTY 窗口大小调整通道
     pty_resize_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<(u32, u32)>>>>,
-    /// 会话日志文件
-    log_file: Arc<Mutex<Option<tokio::fs::File>>>,
+    /// 会话日志（含脱敏状态）
+    log_file: Arc<Mutex<Option<SessionLogSink>>>,
     /// 活跃的端口转发任务: forward_id -> JoinHandle
     forwards: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// 远程转发通道接收器
@@ -50,6 +69,8 @@ pub struct SshSession {
 struct ClientHandler {
     /// 远程转发通道: 当服务器推送 forwarded-tcpip 通道时, 通过此发送器传递
     forward_tx: Option<tokio::sync::mpsc::UnboundedSender<ForwardedChannel>>,
+    /// 主机密钥校验策略
+    host_key_policy: HostKeyPolicy,
 }
 
 /// 转发的通道信息
@@ -65,12 +86,15 @@ pub struct ForwardedChannel {
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
+    /// known_hosts 三态校验：已信任放行 / 首次出现需用户确认 / 密钥变更直接拒绝。
+    ///
+    /// 返回 `Ok(false)` 会让 russh 中止握手，不会降级继续通信。
     async fn check_server_key(
         &mut self,
-        _server_public_key: &keys::key::PublicKey,
+        server_public_key: &keys::key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // 自动接受服务器公钥(生产环境应验证known_hosts)
-        Ok(true)
+        let policy = self.host_key_policy.clone();
+        Ok(verify_server_key(&policy, server_public_key).await)
     }
 
     async fn server_channel_open_forwarded_tcpip(
@@ -92,6 +116,134 @@ impl client::Handler for ClientHandler {
             });
         }
         Ok(())
+    }
+}
+
+/// 读取 exec 通道的 stdout/stderr，超过上限即停止累积并提前退出。
+async fn collect_channel_output(
+    mut channel: Channel<client::Msg>,
+) -> Result<(String, bool), Box<dyn std::error::Error + Send + Sync>> {
+    let mut output = String::new();
+    let mut truncated = false;
+
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::Data { ref data } | ChannelMsg::ExtendedData { ref data, .. } => {
+                if output.len() >= EXECUTE_OUTPUT_LIMIT {
+                    truncated = true;
+                    break;
+                }
+                let remaining = EXECUTE_OUTPUT_LIMIT - output.len();
+                let chunk = String::from_utf8_lossy(data);
+                if chunk.len() > remaining {
+                    output.push_str(&chunk[..remaining]);
+                    truncated = true;
+                } else {
+                    output.push_str(&chunk);
+                }
+            }
+            ChannelMsg::ExitStatus { .. } => break,
+            _ => {}
+        }
+    }
+
+    Ok((output, truncated))
+}
+
+/// 按 known_hosts 判定服务端主机密钥是否可信。
+async fn verify_server_key(
+    policy: &HostKeyPolicy,
+    server_public_key: &keys::key::PublicKey,
+) -> bool {
+    let entries = hostkeys::load();
+    match hostkeys::verify(&entries, &policy.host_spec, server_public_key) {
+        hostkeys::Verdict::Trusted => true,
+        hostkeys::Verdict::Changed {
+            expected_fingerprint,
+            actual_fingerprint,
+        } => {
+            // 密钥被替换：只告知，不提供任何"仍然连接"的旁路
+            emit_to(
+                &policy.app,
+                "host-key-changed",
+                serde_json::json!({
+                    "host_spec": policy.host_spec,
+                    "algo": server_public_key.name(),
+                    "expected_fingerprint": expected_fingerprint,
+                    "actual_fingerprint": actual_fingerprint,
+                }),
+            );
+            eprintln!(
+                "[ssh] 主机 {} 密钥与已记录不一致，已拒绝连接（疑似中间人攻击）",
+                policy.host_spec
+            );
+            false
+        }
+        hostkeys::Verdict::Unknown { fingerprint } => {
+            if !policy.strict {
+                // 回退开关：沿用旧的自动接受，但仍落盘记录，便于后续收紧
+                let _ = hostkeys::trust(&policy.host_spec, server_public_key);
+                return true;
+            }
+            confirm_host_key(policy, server_public_key, &fingerprint).await
+        }
+    }
+}
+
+/// 向前端发起首连确认并等待应答。超时 / 前端不应答 / 明确拒绝都返回 false。
+async fn confirm_host_key(
+    policy: &HostKeyPolicy,
+    server_public_key: &keys::key::PublicKey,
+    fingerprint: &str,
+) -> bool {
+    let Some(app) = policy.app.clone() else {
+        // 无 UI 时不放行，避免静默信任
+        eprintln!(
+            "[ssh] 主机 {} 首次出现，但没有可用于确认的界面，已拒绝连接",
+            policy.host_spec
+        );
+        return false;
+    };
+
+    let request_id = Uuid::new_v4().to_string();
+    let mut rx = hostkeys::register_request(&request_id);
+    let _ = app.emit(
+        "host-key-verify",
+        serde_json::json!({
+            "request_id": request_id,
+            "host_spec": policy.host_spec,
+            "algo": server_public_key.name(),
+            "fingerprint": fingerprint,
+        }),
+    );
+
+    let trusted = match tokio::time::timeout(
+        std::time::Duration::from_secs(HOST_KEY_CONFIRM_TIMEOUT_SECS),
+        &mut rx,
+    )
+    .await
+    {
+        Ok(Ok(trusted)) => trusted,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            hostkeys::drop_request(&request_id);
+            false
+        }
+    };
+
+    if trusted {
+        if let Err(e) = hostkeys::trust(&policy.host_spec, server_public_key) {
+            eprintln!("[ssh] 写入 known_hosts 失败: {}", e);
+            return false;
+        }
+    }
+    trusted
+}
+
+/// 没有 AppHandle 时静默跳过事件投递
+fn emit_to(app: &Option<tauri::AppHandle>, event: &str, payload: serde_json::Value) {
+    if let Some(app) = app {
+        let _ = app.emit(event, payload);
     }
 }
 
@@ -141,6 +293,7 @@ async fn connect_with_fallback(
     host: &str,
     port: u16,
     keepalive_interval: Option<u64>,
+    policy: &HostKeyPolicy,
 ) -> Result<
     (
         client::Handle<ClientHandler>,
@@ -151,6 +304,7 @@ async fn connect_with_fallback(
     let (forward_tx, forward_rx) = tokio::sync::mpsc::unbounded_channel();
     let handler = ClientHandler {
         forward_tx: Some(forward_tx),
+        host_key_policy: policy.clone(),
     };
 
     match client::connect(
@@ -167,6 +321,7 @@ async fn connect_with_fallback(
                 tokio::sync::mpsc::unbounded_channel();
             let legacy_handler = ClientHandler {
                 forward_tx: Some(legacy_forward_tx),
+                host_key_policy: policy.clone(),
             };
             let session = client::connect(
                 build_client_config(keepalive_interval, true),
@@ -192,6 +347,7 @@ async fn connect_stream_with_fallback(
     target_host: &str,
     target_port: u16,
     keepalive_interval: Option<u64>,
+    policy: &HostKeyPolicy,
 ) -> Result<
     (
         client::Handle<ClientHandler>,
@@ -210,6 +366,7 @@ async fn connect_stream_with_fallback(
     let (forward_tx, forward_rx) = tokio::sync::mpsc::unbounded_channel();
     let handler = ClientHandler {
         forward_tx: Some(forward_tx),
+        host_key_policy: policy.clone(),
     };
 
     match client::connect_stream(
@@ -227,6 +384,7 @@ async fn connect_stream_with_fallback(
                 tokio::sync::mpsc::unbounded_channel();
             let legacy_handler = ClientHandler {
                 forward_tx: Some(legacy_forward_tx),
+                host_key_policy: policy.clone(),
             };
             let session = client::connect_stream(
                 build_client_config(keepalive_interval, true),
@@ -282,9 +440,10 @@ impl SshSession {
         password: Option<&str>,
         private_key: Option<&str>,
         keepalive_interval: Option<u64>,
+        host_key_policy: HostKeyPolicy,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let (mut session, forward_rx) =
-            connect_with_fallback(host, port, keepalive_interval).await?;
+            connect_with_fallback(host, port, keepalive_interval, &host_key_policy).await?;
 
         // 认证
         let auth_ok = authenticate_session(
@@ -348,10 +507,17 @@ impl SshSession {
         target_password: Option<&str>,
         target_private_key: Option<&str>,
         keepalive_interval: Option<u64>,
+        jump_host_key_policy: HostKeyPolicy,
+        target_host_key_policy: HostKeyPolicy,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // 1. 先连接到跳板机
-        let (mut jump_session, _jump_forward_rx) =
-            connect_with_fallback(jump_host, jump_port, keepalive_interval).await?;
+        let (mut jump_session, _jump_forward_rx) = connect_with_fallback(
+            jump_host,
+            jump_port,
+            keepalive_interval,
+            &jump_host_key_policy,
+        )
+        .await?;
 
         // 认证跳板机
         let jump_auth_ok = authenticate_session(
@@ -373,6 +539,7 @@ impl SshSession {
             target_host,
             target_port,
             keepalive_interval,
+            &target_host_key_policy,
         )
         .await?;
 
@@ -440,31 +607,32 @@ impl SshSession {
     }
 
     /// 执行命令并返回输出
+    ///
+    /// 打开通道后立即释放会话锁（读输出不再需要 handle），并对输出量与耗时设上限，
+    /// 避免 `cat /dev/urandom` 这类命令把内存打满或让调用方永久挂起。
     pub async fn execute(&self, command: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let mut handle = self.handle.lock().await;
-        let session = handle.as_mut().ok_or("会话已关闭")?;
+        let channel = {
+            let mut handle = self.handle.lock().await;
+            let session = handle.as_mut().ok_or("会话已关闭")?;
+            let channel = session.channel_open_session().await?;
+            channel.exec(true, command).await?;
+            channel
+        };
 
-        let mut channel = session.channel_open_session().await?;
-        channel.exec(true, command).await?;
+        let collected = tokio::time::timeout(
+            std::time::Duration::from_secs(EXECUTE_TIMEOUT_SECS),
+            collect_channel_output(channel),
+        )
+        .await
+        .map_err(|_| format!("命令执行超时（{}秒）", EXECUTE_TIMEOUT_SECS))?;
 
-        let mut output = String::new();
-
-        // 读取stdout和stderr
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                ChannelMsg::Data { ref data } => {
-                    output.push_str(&String::from_utf8_lossy(data));
-                }
-                ChannelMsg::ExtendedData { ref data, .. } => {
-                    output.push_str(&String::from_utf8_lossy(data));
-                }
-                ChannelMsg::ExitStatus { .. } => {
-                    break;
-                }
-                _ => {}
-            }
+        let (mut output, truncated) = collected?;
+        if truncated {
+            output.push_str(&format!(
+                "\n[输出超过 {} 字节上限，已截断]\n",
+                EXECUTE_OUTPUT_LIMIT
+            ));
         }
-
         Ok(output)
     }
 
@@ -673,21 +841,33 @@ impl SshSession {
         *self.pty_writer.lock().await = Some(data_tx);
         *self.pty_resize_tx.lock().await = Some(resize_tx);
 
-        // 创建日志文件
-        let log_dir = get_log_dir();
-        let log_filename = format!(
-            "{}_{}.log",
-            session_id,
-            chrono::Local::now().format("%Y%m%d_%H%M%S")
-        );
-        let log_path = log_dir.join(&log_filename);
-        let log_file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .await
-            .ok();
-        *self.log_file.lock().await = log_file;
+        // 创建日志文件（受 session_logging / log_redaction 开关控制）
+        let settings = crate::config::load_config().settings;
+        if settings.session_logging {
+            let log_dir = get_log_dir();
+            let log_filename = format!(
+                "{}_{}.log",
+                session_id,
+                chrono::Local::now().format("%Y%m%d_%H%M%S")
+            );
+            let log_path = log_dir.join(&log_filename);
+            let log_file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .await
+                .ok()
+                .map(|file| SessionLogSink {
+                    file,
+                    redactor: crate::redact::LogRedactor::default(),
+                    redact: settings.log_redaction,
+                });
+            // 日志记录的是终端原文, 即便已脱敏也只允许属主读（04 4.5）
+            if log_file.is_some() {
+                crate::config::restrict_private(&log_path);
+            }
+            *self.log_file.lock().await = log_file;
+        }
 
         // 启动PTY事件循环：读取输出、写入数据、处理resize、写日志
         let read_app = app.clone();
@@ -737,9 +917,16 @@ impl SshSession {
                                         "session_id": read_session_id,
                                     }),
                                 );
-                                // 关闭日志文件
+                                // 关闭日志文件（先冲刷未换行的尾部）
                                 let mut lf = log_file_arc.lock().await;
-                                lf.take();
+                                if let Some(mut sink) = lf.take() {
+                                    if sink.redact {
+                                        let tail = sink.redactor.flush();
+                                        if !tail.is_empty() {
+                                            let _ = sink.file.write_all(tail.as_bytes()).await;
+                                        }
+                                    }
+                                }
                                 break;
                             }
                             _ => {}
@@ -770,17 +957,26 @@ impl SshSession {
         Ok(())
     }
 
-    /// 写入日志(带时间戳)
+    /// 写入日志(带时间戳, 默认经脱敏)
     async fn write_log(
-        log_file: &Arc<Mutex<Option<tokio::fs::File>>>,
+        log_file: &Arc<Mutex<Option<SessionLogSink>>>,
         data: &str,
     ) {
         let mut lf = log_file.lock().await;
-        if let Some(file) = lf.as_mut() {
-            let timestamp = chrono::Local::now().format("[%Y-%m-%d %H:%M:%S] ");
-            let log_line = format!("{}{}", timestamp, data);
-            let _ = file.write_all(log_line.as_bytes()).await;
+        let Some(sink) = lf.as_mut() else {
+            return;
+        };
+        let text = if sink.redact {
+            sink.redactor.push(data)
+        } else {
+            data.to_string()
+        };
+        if text.is_empty() {
+            return;
         }
+        let timestamp = chrono::Local::now().format("[%Y-%m-%d %H:%M:%S] ");
+        let log_line = format!("{}{}", timestamp, text);
+        let _ = sink.file.write_all(log_line.as_bytes()).await;
     }
 
     /// 向PTY写入数据
@@ -1047,6 +1243,13 @@ impl SshSession {
 
     /// 断开连接
     pub async fn disconnect(&self) {
+        // 先终止端口转发任务，否则 JoinHandle 要等底层 accept 出错才退出
+        {
+            let mut map = self.forwards.lock().await;
+            for (_, join) in map.drain() {
+                join.abort();
+            }
+        }
         // 关闭PTY通道
         {
             let mut writer = self.pty_writer.lock().await;
@@ -1077,7 +1280,7 @@ impl SshSession {
 }
 
 /// 简单的shell转义
-fn shell_escape(s: &str) -> String {
+pub(crate) fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 

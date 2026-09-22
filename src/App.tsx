@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
+import { useAIStore } from "./stores/aiStore";
 import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message } from "antd";
 import type { MenuProps } from "antd";
 import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined, CloudOutlined } from "@ant-design/icons";
@@ -80,6 +81,8 @@ function AppInner() {
 
   useEffect(() => {
     if (!loaded) loadConfig();
+    // AI 配置不属于 serverStore, 单独从后端拉一次(否则重启后回到默认值)
+    void useAIStore.getState().loadFromStorage();
   }, []);
 
   // 时钟更新

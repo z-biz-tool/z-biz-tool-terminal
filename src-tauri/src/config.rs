@@ -67,6 +67,28 @@ pub struct TabConfig {
     pub split_direction: Option<String>,
 }
 
+/// AI 配置（持久化到 config.json 的 `ai` 段，`apiKey` 以密文落盘）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiConfig {
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+}
+
+fn default_ai_provider() -> String {
+    "openai".into()
+}
+
 /// 全局配置（持久化到 ~/.z-terminal/config.json）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -84,6 +106,9 @@ pub struct AppConfig {
     pub active_tab_id: Option<String>,
     #[serde(default)]
     pub active_pane_id: Option<String>,
+    /// AI 助手配置(此前只存在前端内存, 重启即丢, 见 T-2-1)
+    #[serde(default)]
+    pub ai: Option<AiConfig>,
 }
 
 /// 终端设置
@@ -127,6 +152,20 @@ pub struct TerminalSettings {
     /// 自定义 CSS
     #[serde(default)]
     pub custom_css: Option<String>,
+    /// 严格主机密钥校验：首次连接需用户确认，密钥变更直接拒绝。
+    /// 关闭可回退到旧的自动接受行为（不建议）。
+    #[serde(default = "default_true")]
+    pub strict_host_key: bool,
+    /// 是否记录会话日志
+    #[serde(default = "default_true")]
+    pub session_logging: bool,
+    /// 会话日志脱敏（P-4）。关闭会把原始输出落盘，仅在明确需要排障时开启。
+    #[serde(default = "default_true")]
+    pub log_redaction: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_auto_reconnect() -> bool {
@@ -174,6 +213,9 @@ impl Default for TerminalSettings {
             ssh_agent_forward: false,
             background_image: None,
             custom_css: None,
+            strict_host_key: true,
+            session_logging: true,
+            log_redaction: true,
         }
     }
 }
@@ -188,6 +230,7 @@ pub fn get_log_dir() -> PathBuf {
     if !dir.exists() {
         let _ = fs::create_dir_all(&dir);
     }
+    restrict_private_dir(&dir);
     dir
 }
 
@@ -201,36 +244,144 @@ pub struct SessionLogEntry {
 }
 
 /// 获取配置目录
+/// 配置目录, 可用 `Z_TERMINAL_CONFIG_DIR` 覆盖(便携模式与集成测试用)
 pub fn get_config_dir() -> PathBuf {
+    if let Some(override_dir) = std::env::var_os("Z_TERMINAL_CONFIG_DIR") {
+        let dir = PathBuf::from(override_dir);
+        if !dir.exists() {
+            let _ = fs::create_dir_all(&dir);
+        }
+        return dir;
+    }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = home.join(".z-terminal");
     if !dir.exists() {
-        let _ = fs::create_dir_all(&dir);
+        if fs::create_dir_all(&dir).is_ok() {
+            // 目录本身也要挡同机其他用户, 否则 config.json 的 0600 只是第二道门
+            restrict_private_dir(&dir);
+        }
     }
     dir
 }
+
+/// 把目录权限收紧为仅属主可进入/读写
+#[cfg(unix)]
+pub fn restrict_private_dir(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+pub fn restrict_private_dir(_path: &std::path::Path) {}
 
 /// 配置文件路径
 pub fn get_config_path() -> PathBuf {
     get_config_dir().join("config.json")
 }
 
-/// 加载配置
+/// 加载配置（内存态：凭证已解密，可直接用于连接）
 pub fn load_config() -> AppConfig {
+    let mut config = load_config_raw();
+    open_secrets(&mut config);
+    config
+}
+
+/// 加载配置但不解密（导出、迁移检测等不需要明文的场景用）
+pub fn load_config_raw() -> AppConfig {
     let path = get_config_path();
     match fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
+            eprintln!("config.json 解析失败, 使用默认配置(原文件已保留在 backups/): {}", e);
+            AppConfig::default()
+        }),
         Err(_) => AppConfig::default(),
     }
 }
 
-/// 保存配置
+/// 落盘前加密所有凭证字段；已是本机可解密文的保持不变
+fn seal_secrets(config: &AppConfig) -> Result<AppConfig, String> {
+    let key = crate::secret::master_key()?;
+    let mut sealed = config.clone();
+    for server in sealed.servers.iter_mut() {
+        server.password = crate::secret::seal_opt(&key, &server.password)?;
+        server.private_key = crate::secret::seal_opt(&key, &server.private_key)?;
+    }
+    if let Some(ai) = sealed.ai.as_mut() {
+        ai.api_key = crate::secret::seal_opt(&key, &ai.api_key)?;
+    }
+    Ok(sealed)
+}
+
+/// 读盘后解密；旧明文值原样透传（§5.7 保留一版兼容读取）
+fn open_secrets(config: &mut AppConfig) {
+    let key = match crate::secret::master_key() {
+        Ok(key) => key,
+        Err(e) => {
+            // 主密钥拿不到时保留磁盘原值, 连接会以"认证失败"暴露问题, 比静默清空凭证更安全
+            eprintln!("无法读取主密钥, 凭证将按原样使用: {}", e);
+            return;
+        }
+    };
+    for server in config.servers.iter_mut() {
+        server.password = crate::secret::open_opt(&key, &server.password);
+        server.private_key = crate::secret::open_opt(&key, &server.private_key);
+    }
+    if let Some(ai) = config.ai.as_mut() {
+        ai.api_key = crate::secret::open_opt(&key, &ai.api_key);
+    }
+}
+
+/// 是否存在明文凭证（用于启动时一次性迁移检测）
+pub fn has_plaintext_secrets(config: &AppConfig) -> bool {
+    let key = match crate::secret::master_key() {
+        Ok(key) => key,
+        Err(_) => return false,
+    };
+    let plain = |v: &Option<String>| match v {
+        Some(s) if !s.is_empty() => crate::secret::needs_sealing_with(&key, s),
+        _ => false,
+    };
+    config.servers.iter().any(|s| plain(&s.password) || plain(&s.private_key))
+        || config
+            .ai
+            .as_ref()
+            .map(|ai| plain(&ai.api_key))
+            .unwrap_or(false)
+}
+
+/// 启动时一次性加固: 收紧目录权限 + 把历史明文凭证升级为密文。
+///
+/// 目录 chmod 必须无条件执行 —— 老安装的 `~/.z-terminal` 已经是 0755,
+/// 只在创建时设权限救不回来。
+pub fn harden_storage() -> Result<bool, String> {
+    restrict_private_dir(&get_config_dir());
+    restrict_private_dir(&get_log_dir());
+    let backup_dir = get_config_dir().join("backups");
+    if backup_dir.exists() {
+        restrict_private_dir(&backup_dir);
+    }
+
+    let raw = load_config_raw();
+    if !has_plaintext_secrets(&raw) {
+        return Ok(false);
+    }
+    let mut migrated = raw;
+    // 磁盘原值先按明文语义还原, 再由 save_config 重新封存
+    open_secrets(&mut migrated);
+    save_config(&migrated)?;
+    eprintln!("已将明文凭证升级为加密存储");
+    Ok(true)
+}
+
+/// 保存配置（磁盘态：凭证为密文）
 /// 关键改进:
-/// 1. **原子写入**: 先写 .tmp 再 rename, 写过程中崩溃不会损坏现有 config
-/// 2. **自动备份**: 写之前先把当前 config 备份到 backups/, 保留最近 10 份
+/// 1. **凭证加密**: 密码/私钥/API Key 以 AES-256-GCM 密文落盘, 备份与导出同步受益
+/// 2. **原子写入**: 先写 .tmp 再 rename, 写过程中崩溃不会损坏现有 config
+/// 3. **自动备份**: 写之前先把当前 config 备份到 backups/, 保留最近 10 份
 ///    防止意外丢数据(误删、磁盘问题、外部程序覆盖等)
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
     let path = get_config_path();
+    let sealed = seal_secrets(config)?;
 
     // 1. 写之前备份现有 config (如果存在)
     if path.exists() {
@@ -238,13 +389,26 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     }
 
     // 2. 原子写入: 先写临时文件, 再 rename 覆盖
-    let content = serde_json::to_string_pretty(config)
+    let content = serde_json::to_string_pretty(&sealed)
         .map_err(|e| format!("序列化失败: {}", e))?;
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
+    fs::write(&tmp, &content).map_err(|e| format!("写入临时文件失败: {}", e))?;
+    // config.json 含 SSH 凭证，必须 0600，否则同机任意用户可读（P-4）
+    restrict_private(&tmp);
     fs::rename(&tmp, &path).map_err(|e| format!("原子替换失败: {}", e))?;
+    restrict_private(&path);
     Ok(())
 }
+
+/// 将文件权限收紧为仅属主可读写
+#[cfg(unix)]
+pub fn restrict_private(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+pub fn restrict_private(_path: &std::path::Path) {}
 
 /// 把当前 config 备份到 backups/ 目录
 fn backup_existing_config() {
@@ -260,8 +424,11 @@ fn backup_existing_config() {
         eprintln!("备份 config 失败: {}", e);
         return;
     }
+    // 备份是 config 的完整副本，同样含凭证
+    restrict_private(&backup_path);
+    restrict_private_dir(&backup_dir);
     // 只保留最近 10 份, 防止无限增长
-    if let Ok(mut entries) = fs::read_dir(&backup_dir) {
+    if let Ok(entries) = fs::read_dir(&backup_dir) {
         let mut backups: Vec<_> = entries
             .filter_map(|e| e.ok())
             .filter(|e| {
@@ -350,13 +517,61 @@ pub async fn restore_config_from_backup(backup_path: String) -> Result<String, S
 }
 
 /// 导出配置到指定路径
+///
+/// 默认剔除所有密码与私钥（P-4）：导出的文件常被贴进工单或聊天窗口，
+/// 带凭证导出等于把堡垒机钥匙一起发出去。需要凭证时显式传 `include_secrets`。
 #[tauri::command]
-pub async fn export_config(path: String) -> Result<String, String> {
-    let config = load_config();
+pub async fn export_config(path: String, include_secrets: Option<bool>) -> Result<String, String> {
+    // 用 raw(不解密)读取: 即使勾选含凭证, 导出的也是密文,
+    // 拿不到 master.key 就无法还原（P-4 / 4.5「含凭证须显式勾选 + 加密」）
+    let mut config = load_config_raw();
+    if !include_secrets.unwrap_or(false) {
+        for server in config.servers.iter_mut() {
+            server.password = None;
+            server.private_key = None;
+        }
+        if let Some(ai) = config.ai.as_mut() {
+            ai.api_key = None;
+        }
+    }
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("序列化失败: {}", e))?;
     fs::write(&path, content).map_err(|e| format!("写入失败: {}", e))?;
-    Ok("导出成功".into())
+    restrict_private(&std::path::PathBuf::from(&path));
+    Ok(if include_secrets.unwrap_or(false) {
+        "导出成功（凭证以密文保留，离开本机需连同主密钥才能还原）".into()
+    } else {
+        "导出成功（已剔除密码、私钥与 API Key）".into()
+    })
+}
+
+/// 读取 AI 配置（apiKey 为解密后的明文，只存在于进程内）
+#[tauri::command]
+pub async fn get_ai_config() -> Result<Option<AiConfig>, String> {
+    Ok(load_config().ai)
+}
+
+/// 保存 AI 配置（apiKey 立即加密落盘）
+#[tauri::command]
+pub async fn save_ai_config(config: AiConfig) -> Result<(), String> {
+    let mut app = load_config();
+    app.ai = Some(config);
+    save_config(&app)
+}
+
+/// 列出已信任的主机密钥
+#[tauri::command]
+pub async fn list_host_keys() -> Result<Vec<crate::hostkeys::HostKeyEntry>, String> {
+    Ok(crate::hostkeys::load())
+}
+
+/// 删除某主机的信任记录（用于换钥匙 / 误信任后撤销）
+#[tauri::command]
+pub async fn remove_host_key(host_spec: String) -> Result<usize, String> {
+    if host_spec.trim().is_empty() {
+        return Err("host_spec 不能为空".into());
+    }
+    Ok(crate::hostkeys::remove(host_spec.trim()))
 }
 
 /// 导入配置
@@ -531,5 +746,162 @@ mod tests {
 
         assert_eq!(server.auth_type, "password");
         assert_eq!(server.password.as_deref(), Some("test-password"));
+    }
+
+    /// 落盘加密相关测试会改环境变量和临时目录, 必须串行
+    static FS_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_server(password: Option<&str>, private_key: Option<&str>) -> ServerConfig {
+        ServerConfig {
+            id: "server-1".into(),
+            name: "测试服务器".into(),
+            group: String::new(),
+            host: "127.0.0.1".into(),
+            port: 22,
+            username: "tester".into(),
+            auth_type: "password".into(),
+            password: password.map(Into::into),
+            private_key: private_key.map(Into::into),
+            remark: None,
+            pinned: None,
+            proxy_jump: None,
+            order: None,
+            tags: None,
+            color: None,
+        }
+    }
+
+    /// 把配置目录指向一次性临时目录; 返回 guard(持有期间禁止其他 fs 测试)
+    fn isolated_config_dir(tag: &str) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "z-terminal-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("临时目录应可创建");
+        std::env::set_var("Z_TERMINAL_CONFIG_DIR", &dir);
+        dir
+    }
+
+    fn config_with(password: Option<&str>) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.servers = vec![test_server(password, Some("-----BEGIN PRIVATE KEY-----abc"))];
+        config.ai = Some(AiConfig {
+            provider: "openai".into(),
+            api_key: password.map(|_| "sk-secret-key".into()),
+            base_url: Some("https://api.openai.com/v1".into()),
+            model: Some("gpt-4o-mini".into()),
+            temperature: Some(0.7),
+            max_tokens: Some(2048),
+        });
+        config
+    }
+
+    #[test]
+    fn credentials_are_sealed_at_rest_and_restored_on_load() {
+        let _guard = FS_GUARD.lock().unwrap();
+        let dir = isolated_config_dir("seal");
+
+        save_config(&config_with(Some("hunter2"))).expect("保存应成功");
+
+        let raw = fs::read_to_string(get_config_path()).expect("config.json 应存在");
+        assert!(raw.contains("enc:v1:"), "凭证应以密文落盘");
+        for secret in ["hunter2", "sk-secret-key", "BEGIN PRIVATE KEY"] {
+            assert!(
+                !raw.contains(secret),
+                "明文凭证 {} 不得出现在 config.json 中",
+                secret
+            );
+        }
+
+        let loaded = load_config();
+        assert_eq!(loaded.servers[0].password.as_deref(), Some("hunter2"));
+        assert_eq!(
+            loaded.ai.as_ref().unwrap().api_key.as_deref(),
+            Some("sk-secret-key")
+        );
+        assert!(
+            !has_plaintext_secrets(&load_config_raw()),
+            "落盘后磁盘态应全部为密文, 无需再迁移"
+        );
+        assert!(
+            has_plaintext_secrets(&loaded),
+            "内存态是明文, has_plaintext_secrets 应据此判定需要封存"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        std::env::remove_var("Z_TERMINAL_CONFIG_DIR");
+    }
+
+    #[test]
+    fn legacy_plaintext_config_is_migrated_by_harden_storage() {
+        let _guard = FS_GUARD.lock().unwrap();
+        let dir = isolated_config_dir("migrate");
+
+        // 绕过 save_config 直接序列化, 模拟旧版本写出的明文 config.json
+        let legacy = config_with(Some("old-plain-pass"));
+        fs::write(get_config_path(), serde_json::to_string(&legacy).unwrap()).unwrap();
+        assert!(has_plaintext_secrets(&load_config_raw()));
+        // 旧明文必须仍可读(§5.7 兼容一版)
+        assert_eq!(
+            load_config().servers[0].password.as_deref(),
+            Some("old-plain-pass")
+        );
+
+        assert!(harden_storage().unwrap(), "harden 应报告执行了迁移");
+
+        let raw = fs::read_to_string(get_config_path()).unwrap();
+        assert!(!raw.contains("old-plain-pass"), "迁移后不应残留明文密码");
+        assert!(!has_plaintext_secrets(&load_config_raw()));
+        assert_eq!(
+            load_config().servers[0].password.as_deref(),
+            Some("old-plain-pass"),
+            "迁移不应改变可用值"
+        );
+        assert!(!harden_storage().unwrap(), "二次运行应无操作");
+
+        fs::remove_dir_all(&dir).ok();
+        std::env::remove_var("Z_TERMINAL_CONFIG_DIR");
+    }
+
+    #[tokio::test]
+    async fn export_never_writes_plaintext_credentials() {
+        let _guard = FS_GUARD.lock().unwrap();
+        let dir = isolated_config_dir("export");
+        save_config(&config_with(Some("export-pass"))).unwrap();
+
+        let stripped = dir.join("out-stripped.json");
+        export_config(stripped.to_string_lossy().to_string(), None)
+            .await
+            .unwrap();
+        let stripped_raw = fs::read_to_string(&stripped).unwrap();
+        assert!(!stripped_raw.contains("export-pass"));
+        assert!(!stripped_raw.contains("sk-secret-key"));
+        assert_eq!(
+            serde_json::from_str::<AppConfig>(&stripped_raw).unwrap().servers[0]
+                .password,
+            None
+        );
+
+        // 显式含凭证: 保留字段但仍是密文
+        let with_secrets = dir.join("out-secrets.json");
+        export_config(with_secrets.to_string_lossy().to_string(), Some(true))
+            .await
+            .unwrap();
+        let raw = fs::read_to_string(&with_secrets).unwrap();
+        assert!(raw.contains("enc:v1:"));
+        assert!(
+            !raw.contains("export-pass") && !raw.contains("sk-secret-key"),
+            "含凭证导出也不得落明文"
+        );
+        assert!(serde_json::from_str::<AppConfig>(&raw).unwrap().servers[0]
+            .password
+            .is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        std::env::remove_var("Z_TERMINAL_CONFIG_DIR");
     }
 }

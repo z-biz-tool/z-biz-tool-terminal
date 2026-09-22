@@ -17,6 +17,7 @@ export abstract class AIClientBase implements AIClient {
   }): Promise<Response> {
     const { provider, apiKey, baseUrl, model } = this.config;
     
+    // 各 provider 的 endpoint 与鉴权方式不同, 不能都套 OpenAI 的 /chat/completions
     let url = `${baseUrl}/chat/completions`;
     let headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -26,12 +27,17 @@ export abstract class AIClientBase implements AIClient {
     if (provider === "openai" || provider === "custom") {
       headers["Authorization"] = `Bearer ${apiKey}`;
     } else if (provider === "claude") {
+      url = `${baseUrl}/messages`;
       headers["x-api-key"] = apiKey;
       headers["anthropic-version"] = "2023-06-01";
+      // 从 WebView 直连 Anthropic 必须显式声明, 否则预检被 CORS 拦掉
+      headers["anthropic-dangerous-direct-browser-access"] = "true";
     } else if (provider === "gemini") {
-      url = `${baseUrl}/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      // Key 走 header: 拼进 URL query 会落到网关/服务端访问日志里（P-4）
+      url = `${baseUrl}/v1beta/models/${model}:generateContent`;
+      headers["x-goog-api-key"] = apiKey;
     } else if (provider === "ollama") {
-      headers["Content-Type"] = "application/json";
+      url = `${baseUrl}/api/chat`;
     }
 
     const body = this.buildRequestBody(messages, options);
@@ -211,8 +217,11 @@ export class OllamaClient extends AIClientBase {
     return {
       model: this.config.model,
       messages: messages.map(m => ({ role: m.role, content: m.content })),
-      temperature: options?.temperature ?? this.config.temperature,
-      num_predict: options?.maxTokens ?? this.config.maxTokens,
+      // /api/chat 的采样参数在 options 里, 顶层同名字段会被忽略
+      options: {
+        temperature: options?.temperature ?? this.config.temperature,
+        num_predict: options?.maxTokens ?? this.config.maxTokens,
+      },
       stream: options?.stream ?? false,
     };
   }

@@ -6018,8 +6018,10 @@ dependencies = [
 name = "z-biz-tool-terminal"
 version = "0.2.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
  "chrono",
+ "data-encoding",
  "dirs 5.0.1",
  "getrandom 0.2.17",
  "russh",
@@ -6027,6 +6029,7 @@ dependencies = [
  "russh-sftp",
  "serde",
  "serde_json",
+ "sha2",
  "ssh-key",
  "tauri",
  "tauri-build",

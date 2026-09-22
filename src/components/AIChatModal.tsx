@@ -130,10 +130,15 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
     message.success("聊天记录已清空");
   };
 
-  const handleSaveSettings = (newConfig: AIConfig) => {
+  const handleSaveSettings = async (newConfig: AIConfig) => {
     updateConfig(newConfig);
-    setShowSettings(false);
-    message.success("配置已保存");
+    // 只有真正写进后端才提示成功(此前只改内存, 提示"已保存"是不实的)
+    if (await useAIStore.getState().save()) {
+      setShowSettings(false);
+      message.success("配置已保存");
+    } else {
+      message.error("保存失败，请重试");
+    }
   };
 
   const renderMessageContent = (content: string) => {

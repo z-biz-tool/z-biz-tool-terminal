@@ -2,18 +2,73 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
-use crate::ssh::{SshSession, SftpEntry};
+use crate::hostkeys::HostKeyPolicy;
+use crate::ssh::{shell_escape, SshSession, SftpEntry};
 
 /// SSH会话存储: session_id -> SshSession
-static SESSIONS: tokio::sync::OnceCell<Arc<Mutex<HashMap<String, SshSession>>>> =
+///
+/// 用 RwLock 保护映射表本身（增删查极快），会话以 `Arc<SshSession>` 存放。
+/// 取会话时克隆 Arc 后立即释放全局锁，避免远程 IO 期间阻塞其它会话（P-3 会话隔离）。
+static SESSIONS: tokio::sync::OnceCell<Arc<RwLock<HashMap<String, Arc<SshSession>>>>> =
     tokio::sync::OnceCell::const_new();
 
-async fn sessions() -> &'static Arc<Mutex<HashMap<String, SshSession>>> {
+async fn sessions() -> &'static Arc<RwLock<HashMap<String, Arc<SshSession>>>> {
     SESSIONS
-        .get_or_init(|| async { Arc::new(Mutex::new(HashMap::new())) })
+        .get_or_init(|| async { Arc::new(RwLock::new(HashMap::new())) })
         .await
+}
+
+/// 按 id 取会话句柄。只在读锁内做一次 `Arc` 克隆，不持锁跨 `await`。
+async fn get_session(session_id: &str) -> Option<Arc<SshSession>> {
+    sessions().await.read().await.get(session_id).cloned()
+}
+
+/// 会话不存在的统一错误文案
+fn no_session(session_id: &str) -> String {
+    format!("会话 {} 不存在", session_id)
+}
+
+/// 校验主机名 / IP 字面量，拒绝一切可能被 shell 解释的字符。
+///
+/// 允许 IPv6 的 `:` 与 IPv4-mapped 的 `[...]`，其余只接受字母、数字、`.`、`-`、`_`。
+pub fn validate_host(host: &str) -> Result<(), String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("主机不能为空".into());
+    }
+    if host.len() > 253 {
+        return Err("主机名过长".into());
+    }
+    let body = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if body.is_empty() {
+        return Err("主机不能为空".into());
+    }
+    // IPv6 允许 :: 缩写，因此连续的 ':' 也要放行
+    if body.contains("::") && body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b':' || b == b'.')
+    {
+        return Ok(());
+    }
+    for ch in body.chars() {
+        let ok = ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_');
+        if !ok {
+            return Err(format!("主机包含非法字符: {:?}", ch));
+        }
+    }
+    Ok(())
+}
+
+/// 构造诊断类失败结果
+fn diag_error(message: impl Into<String>) -> ExecResult {
+    ExecResult {
+        success: false,
+        output: String::new(),
+        error: Some(message.into()),
+    }
 }
 
 /// SSH连接参数
@@ -101,9 +156,25 @@ pub struct SftpListResult {
     pub error: Option<String>,
 }
 
+/// 按当前设置构造主机密钥校验策略。`strict_host_key` 关闭时回退为自动接受。
+fn host_policy(app: &tauri::AppHandle, host: &str, port: u16) -> HostKeyPolicy {
+    let strict = crate::config::load_config().settings.strict_host_key;
+    HostKeyPolicy::new(host, port, strict, Some(app.clone()))
+}
+
+/// 回应用端的「首次连接是否信任该主机密钥」请求
+#[tauri::command]
+pub async fn ssh_resolve_host_key(request_id: String, trusted: bool) -> Result<bool, String> {
+    if request_id.trim().is_empty() {
+        return Err("request_id 不能为空".into());
+    }
+    Ok(crate::hostkeys::resolve_request(&request_id, trusted))
+}
+
 /// 连接SSH服务器
 #[tauri::command]
-pub async fn ssh_connect(params: ConnectParams) -> ConnectResult {
+pub async fn ssh_connect(app: tauri::AppHandle, params: ConnectParams) -> ConnectResult {
+    let policy = host_policy(&app, &params.host, params.port);
     let timeout_secs = params.connection_timeout.unwrap_or(30).clamp(5, 300);
     let host = params.host.clone();
     let port = params.port;
@@ -117,6 +188,7 @@ pub async fn ssh_connect(params: ConnectParams) -> ConnectResult {
             params.password.as_deref(),
             params.private_key.as_deref(),
             params.keepalive_interval,
+            policy,
         ),
     )
     .await
@@ -130,8 +202,11 @@ pub async fn ssh_connect(params: ConnectParams) -> ConnectResult {
     match session {
         Ok(sess) => {
             let session_id = sess.id.clone();
-            let mut map = sessions().await.lock().await;
-            map.insert(session_id.clone(), sess);
+            sessions()
+                .await
+                .write()
+                .await
+                .insert(session_id.clone(), Arc::new(sess));
             ConnectResult {
                 success: true,
                 session_id: Some(session_id),
@@ -148,7 +223,12 @@ pub async fn ssh_connect(params: ConnectParams) -> ConnectResult {
 
 /// 通过跳板机连接SSH服务器
 #[tauri::command]
-pub async fn ssh_connect_via_jump(params: ConnectViaJumpParams) -> ConnectResult {
+pub async fn ssh_connect_via_jump(
+    app: tauri::AppHandle,
+    params: ConnectViaJumpParams,
+) -> ConnectResult {
+    let jump_policy = host_policy(&app, &params.jump_host, params.jump_port);
+    let target_policy = host_policy(&app, &params.target_host, params.target_port);
     let timeout_secs = params.connection_timeout.unwrap_or(30).clamp(5, 300);
     let jump_host = params.jump_host.clone();
     let jump_port = params.jump_port;
@@ -170,6 +250,8 @@ pub async fn ssh_connect_via_jump(params: ConnectViaJumpParams) -> ConnectResult
             params.target_password.as_deref(),
             params.target_private_key.as_deref(),
             params.keepalive_interval,
+            jump_policy,
+            target_policy,
         ),
     )
     .await
@@ -185,8 +267,11 @@ pub async fn ssh_connect_via_jump(params: ConnectViaJumpParams) -> ConnectResult
     match session {
         Ok(sess) => {
             let session_id = sess.id.clone();
-            let mut map = sessions().await.lock().await;
-            map.insert(session_id.clone(), sess);
+            sessions()
+                .await
+                .write()
+                .await
+                .insert(session_id.clone(), Arc::new(sess));
             ConnectResult {
                 success: true,
                 session_id: Some(session_id),
@@ -207,8 +292,9 @@ pub async fn ssh_connect_via_jump(params: ConnectViaJumpParams) -> ConnectResult
 /// 断开SSH连接
 #[tauri::command]
 pub async fn ssh_disconnect(session_id: String) -> ConnectResult {
-    let mut map = sessions().await.lock().await;
-    if let Some(sess) = map.remove(&session_id) {
+    // 写锁内只做移除，disconnect 的 IO 在无锁状态下进行
+    let removed = sessions().await.write().await.remove(&session_id);
+    if let Some(sess) = removed {
         sess.disconnect().await;
         ConnectResult {
             success: true,
@@ -219,7 +305,7 @@ pub async fn ssh_disconnect(session_id: String) -> ConnectResult {
         ConnectResult {
             success: false,
             session_id: None,
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -227,8 +313,7 @@ pub async fn ssh_disconnect(session_id: String) -> ConnectResult {
 /// 执行命令
 #[tauri::command]
 pub async fn ssh_execute(session_id: String, command: String) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.execute(&command).await {
             Ok(output) => ExecResult {
                 success: true,
@@ -245,7 +330,7 @@ pub async fn ssh_execute(session_id: String, command: String) -> ExecResult {
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -369,8 +454,7 @@ pub struct PortForwardResult {
 /// 启动端口转发
 #[tauri::command]
 pub async fn ssh_start_forward(params: PortForwardParams) -> PortForwardResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&params.session_id) {
+    if let Some(sess) = get_session(&params.session_id).await {
         let result = match params.forward_type.as_str() {
             "local" => {
                 let local_addr = params.local_addr.as_deref().unwrap_or("127.0.0.1");
@@ -457,8 +541,7 @@ pub async fn ssh_start_forward(params: PortForwardParams) -> PortForwardResult {
 /// 停止端口转发
 #[tauri::command]
 pub async fn ssh_stop_forward(session_id: String, forward_id: String) -> PortForwardResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.stop_forward(&forward_id).await {
             Ok(()) => PortForwardResult {
                 success: true,
@@ -478,7 +561,7 @@ pub async fn ssh_stop_forward(session_id: String, forward_id: String) -> PortFor
             success: false,
             forward_id: None,
             actual_port: None,
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -486,8 +569,7 @@ pub async fn ssh_stop_forward(session_id: String, forward_id: String) -> PortFor
 /// SFTP文件列表
 #[tauri::command]
 pub async fn sftp_list(session_id: String, path: String) -> SftpListResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.sftp_list(&path).await {
             Ok(entries) => SftpListResult {
                 success: true,
@@ -504,7 +586,7 @@ pub async fn sftp_list(session_id: String, path: String) -> SftpListResult {
         SftpListResult {
             success: false,
             entries: vec![],
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -516,8 +598,7 @@ pub async fn sftp_upload(
     local_path: String,
     remote_path: String,
 ) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.sftp_upload(&local_path, &remote_path).await {
             Ok(_) => ExecResult {
                 success: true,
@@ -534,7 +615,7 @@ pub async fn sftp_upload(
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -546,8 +627,7 @@ pub async fn sftp_download(
     remote_path: String,
     local_path: String,
 ) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.sftp_download(&remote_path, &local_path).await {
             Ok(_) => ExecResult {
                 success: true,
@@ -564,7 +644,7 @@ pub async fn sftp_download(
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -572,8 +652,7 @@ pub async fn sftp_download(
 /// SFTP 创建目录
 #[tauri::command]
 pub async fn sftp_mkdir(session_id: String, path: String) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.sftp_mkdir(&path).await {
             Ok(_) => ExecResult {
                 success: true,
@@ -590,7 +669,7 @@ pub async fn sftp_mkdir(session_id: String, path: String) -> ExecResult {
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -598,8 +677,7 @@ pub async fn sftp_mkdir(session_id: String, path: String) -> ExecResult {
 /// SFTP 删除文件
 #[tauri::command]
 pub async fn sftp_remove(session_id: String, path: String) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.sftp_remove(&path).await {
             Ok(_) => ExecResult {
                 success: true,
@@ -616,7 +694,7 @@ pub async fn sftp_remove(session_id: String, path: String) -> ExecResult {
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -628,8 +706,7 @@ pub async fn sftp_rename(
     old_path: String,
     new_path: String,
 ) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.sftp_rename(&old_path, &new_path).await {
             Ok(_) => ExecResult {
                 success: true,
@@ -646,7 +723,7 @@ pub async fn sftp_rename(
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -659,8 +736,7 @@ pub async fn ssh_start_pty(
     cols: u16,
     rows: u16,
 ) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.start_pty(app, cols, rows).await {
             Ok(_) => ExecResult {
                 success: true,
@@ -677,7 +753,7 @@ pub async fn ssh_start_pty(
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -685,8 +761,7 @@ pub async fn ssh_start_pty(
 /// 向PTY写入数据
 #[tauri::command]
 pub async fn ssh_pty_write(session_id: String, data: String) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.pty_write(&data).await {
             Ok(_) => ExecResult {
                 success: true,
@@ -703,7 +778,7 @@ pub async fn ssh_pty_write(session_id: String, data: String) -> ExecResult {
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -711,8 +786,7 @@ pub async fn ssh_pty_write(session_id: String, data: String) -> ExecResult {
 /// 调整PTY窗口大小
 #[tauri::command]
 pub async fn ssh_pty_resize(session_id: String, cols: u16, rows: u16) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Some(sess) = get_session(&session_id).await {
         match sess.pty_resize(cols, rows).await {
             Ok(_) => ExecResult {
                 success: true,
@@ -729,7 +803,7 @@ pub async fn ssh_pty_resize(session_id: String, cols: u16, rows: u16) -> ExecRes
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -883,10 +957,12 @@ pub async fn tcp_probe(host: String, port: u16, timeout_ms: Option<u64>) -> TcpP
 /// 诊断: Ping
 #[tauri::command]
 pub async fn ssh_diagnose_ping(session_id: String, host: String, count: Option<u32>) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
-        let c = count.unwrap_or(4);
-        let command = format!("ping -c {} {} 2>&1", c, host);
+    if let Err(e) = validate_host(&host) {
+        return diag_error(e);
+    }
+    if let Some(sess) = get_session(&session_id).await {
+        let c = count.unwrap_or(4).clamp(1, 20);
+        let command = format!("ping -c {} {} 2>&1", c, shell_escape(host.trim()));
         match sess.execute(&command).await {
             Ok(output) => ExecResult {
                 success: true,
@@ -903,7 +979,7 @@ pub async fn ssh_diagnose_ping(session_id: String, host: String, count: Option<u
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -911,12 +987,16 @@ pub async fn ssh_diagnose_ping(session_id: String, host: String, count: Option<u
 /// 诊断: 端口检测
 #[tauri::command]
 pub async fn ssh_diagnose_port(session_id: String, host: String, port: u16) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
+    if let Err(e) = validate_host(&host) {
+        return diag_error(e);
+    }
+    if let Some(sess) = get_session(&session_id).await {
+        let h = host.trim();
+        let bare = h.trim_start_matches('[').trim_end_matches(']');
         // Try nc first, fall back to bash /dev/tcp
         let command = format!(
             "(nc -z -w 5 {} {} 2>/dev/null && echo 'OPEN') || (timeout 5 bash -c '</dev/tcp/{}/{}' 2>/dev/null && echo 'OPEN') || echo 'CLOSED'",
-            host, port, host, port
+            shell_escape(h), port, bare, port
         );
         match sess.execute(&command).await {
             Ok(output) => ExecResult {
@@ -934,7 +1014,7 @@ pub async fn ssh_diagnose_port(session_id: String, host: String, port: u16) -> E
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -942,9 +1022,12 @@ pub async fn ssh_diagnose_port(session_id: String, host: String, port: u16) -> E
 /// 诊断: Traceroute
 #[tauri::command]
 pub async fn ssh_diagnose_traceroute(session_id: String, host: String) -> ExecResult {
-    let map = sessions().await.lock().await;
-    if let Some(sess) = map.get(&session_id) {
-        let command = format!("traceroute {} 2>&1 || tracepath {} 2>&1", host, host);
+    if let Err(e) = validate_host(&host) {
+        return diag_error(e);
+    }
+    if let Some(sess) = get_session(&session_id).await {
+        let h = shell_escape(host.trim());
+        let command = format!("traceroute {} 2>&1 || tracepath {} 2>&1", h, h);
         match sess.execute(&command).await {
             Ok(output) => ExecResult {
                 success: true,
@@ -961,7 +1044,7 @@ pub async fn ssh_diagnose_traceroute(session_id: String, host: String) -> ExecRe
         ExecResult {
             success: false,
             output: String::new(),
-            error: Some(format!("会话 {} 不存在", session_id)),
+            error: Some(no_session(&session_id)),
         }
     }
 }
@@ -1008,9 +1091,8 @@ pub async fn ssh_get_server_info(session_id: String) -> ServerSystemInfo {
         ..Default::default()
     };
 
-    let map = sessions().await.lock().await;
-    let Some(sess) = map.get(&session_id) else {
-        info.error = Some(format!("会话 {} 不存在", session_id));
+    let Some(sess) = get_session(&session_id).await else {
+        info.error = Some(no_session(&session_id));
         return info;
     };
 

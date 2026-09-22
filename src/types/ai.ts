@@ -1,17 +1,23 @@
 /**
- * AI 类型定义 - 兼容旧版和新版
+ * AI 类型定义
+ *
+ * 这里的 AIConfig 描述的是 services/aiClient.ts 里各 provider 客户端实际读取的字段,
+ * 因此由终端侧持有, 不从 z-biz-tool-shared 复用(共享包的 AIConfig 只有 modelName,
+ * 且其 AIManager 仅实现了 openai 一种传输, 无法满足 claude/gemini/ollama)。
  */
 
-import type { 
-  AIProvider as CoreAIProvider, 
-  AIFunctionType as CoreAIFunctionType,
-  AIConfig as CoreAIConfig
-} from 'z-biz-tool-shared/ai/types';
+/** 支持的 AI 提供商; custom 表示 OpenAI 兼容的自建网关 */
+export type AIProvider = 'openai' | 'claude' | 'gemini' | 'ollama' | 'custom';
 
-// 保持向后兼容的类型定义
-export type AIProvider = CoreAIProvider;
-export type AIFunctionType = CoreAIFunctionType;
-export type AIConfig = CoreAIConfig;
+/** AI 配置 */
+export interface AIConfig {
+  provider: AIProvider;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  temperature: number;
+  maxTokens: number;
+}
 
 /** AI 消息类型 */
 export interface AIMessage {
