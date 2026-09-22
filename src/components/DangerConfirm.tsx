@@ -8,10 +8,13 @@
 import { useEffect, useState } from "react";
 import { Modal, Input, Typography, Alert } from "antd";
 import { commandGuard, requiresConfirmation, BLOCK_CONFIRM_TEXT } from "../utils/commandGuard";
+import { envListPrefix, isProd } from "../utils/environment";
 
 export interface GuardTarget {
   name: string;
   host: string;
+  /** 服务器环境标记（T-5-2）；未标注时确认框与存量行为一致，不加噪声 */
+  environment?: string;
 }
 
 interface Request {
@@ -69,6 +72,7 @@ export default function DangerConfirmHost() {
 
   const isBlock = req?.level === "block";
   const canApprove = !isBlock || typed === BLOCK_CONFIRM_TEXT;
+  const prodCount = req ? req.targets.filter((t) => isProd(t.environment)).length : 0;
 
   return (
     <Modal
@@ -115,9 +119,24 @@ export default function DangerConfirmHost() {
             <Typography.Text type="secondary">
               将影响 {req.targets.length} 个会话
             </Typography.Text>
+            {prodCount > 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginTop: 6, padding: "4px 8px" }}
+                message={`清单中有 ${prodCount} 台生产环境主机`}
+              />
+            )}
             <ul style={{ margin: "4px 0 0", paddingLeft: 18, maxHeight: 160, overflow: "auto" }}>
               {req.targets.map((t, i) => (
                 <li key={`${t.host}-${i}`}>
+                  {isProd(t.environment) ? (
+                    <Typography.Text strong style={{ color: "#d4380d" }}>
+                      {envListPrefix(t.environment).trim()}{" "}
+                    </Typography.Text>
+                  ) : (
+                    envListPrefix(t.environment)
+                  )}
                   {t.name} <Typography.Text code>{t.host}</Typography.Text>
                 </li>
               ))}

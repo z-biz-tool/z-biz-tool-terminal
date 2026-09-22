@@ -10,6 +10,7 @@
 import { useServerStore } from "../stores/serverStore";
 import { confirmDangerousCommand, type GuardTarget } from "../components/DangerConfirm";
 import { commandGuard, requiresConfirmation } from "../utils/commandGuard";
+import { envListPrefix } from "../utils/environment";
 import { auditEvent } from "./auditLog";
 import type { ServerConfig } from "../types";
 
@@ -31,7 +32,8 @@ export interface GateDecision {
 }
 
 function hostList(targets: GuardTarget[]): string[] {
-  return targets.map((t) => `${t.name}<${t.host}>`);
+  // 审计里的受影响清单要能事后复原"当时是否含生产机"，环境前缀比裸主机名更有证据价值
+  return targets.map((t) => `${envListPrefix(t.environment)}${t.name}<${t.host}>`);
 }
 
 /** 网关是否启用；老配置没有这个字段时按开启处理 */
@@ -40,7 +42,11 @@ export function guardEnabled(): boolean {
 }
 
 function serverToTarget(server: ServerConfig): GuardTarget {
-  return { name: server.name || server.id, host: `${server.host}:${server.port}` };
+  return {
+    name: server.name || server.id,
+    host: `${server.host}:${server.port}`,
+    environment: server.environment,
+  };
 }
 
 function dedupe(targets: GuardTarget[]): GuardTarget[] {

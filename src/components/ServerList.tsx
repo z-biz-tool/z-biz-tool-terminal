@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { envMeta, ENV_OPTIONS } from "../utils/environment";
+import EnvBadge from "./EnvBadge";
 import {
   Button,
   Modal,
@@ -60,36 +61,6 @@ const PRESET_COLORS = [
   "#eb2f96",
   "#666666",
 ];
-
-/**
- * 环境徽标（T-5-2）。
- *
- * 未标注的主机一个像素都不占：存量配置普遍没有这个字段，给整列加"未知环境"
- * 只会把真正的生产标记淹没在噪声里。
- */
-function EnvBadge({ raw }: { raw?: string }) {
-  const meta = envMeta(raw);
-  if (!meta) return null;
-  return (
-    <Tooltip title={meta.label}>
-      <span
-        style={{
-          fontSize: 10,
-          lineHeight: "14px",
-          padding: "0 4px",
-          borderRadius: 3,
-          fontWeight: 700,
-          letterSpacing: 0.3,
-          color: "#fff",
-          background: meta.color,
-          flexShrink: 0,
-        }}
-      >
-        {meta.short}
-      </span>
-    </Tooltip>
-  );
-}
 
 export default function ServerList() {
   const {

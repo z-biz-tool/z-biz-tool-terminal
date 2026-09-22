@@ -94,6 +94,21 @@ await t("confirm 级命令无人确认时按拒绝处理并记录决定", async 
   eq(JSON.stringify(record.detail.hosts).includes("10.0.0.1:22"), true, "审计要含受影响主机");
 });
 
+await t("受影响主机清单带上环境标记，未标注的不加噪声（T-5-2）", async () => {
+  setGuard(true);
+  auditCalls.length = 0;
+  const targets: GuardTarget[] = [
+    { name: "订单主库", host: "10.0.0.9:22", environment: "prod" },
+    { name: "联调机", host: "10.0.0.10:2222", environment: "staging" },
+    { name: "未标注机", host: "10.0.0.11:22" },
+  ];
+  await decideCommand(DANGEROUS, targets, "manual");
+  const hosts: string[] = JSON.parse(JSON.stringify(lastAudit().detail.hosts));
+  eq(hosts[0], "[生产环境] 订单主库<10.0.0.9:22>", "生产主机要在审计里看得见");
+  eq(hosts[1], "[预发环境] 联调机<10.0.0.10:2222>");
+  eq(hosts[2], "未标注机<10.0.0.11:22>", "存量未标注配置保持原样");
+});
+
 await t("AI 来源的 confirm 级升级为 block（P-1）", async () => {
   setGuard(true);
   auditCalls.length = 0;

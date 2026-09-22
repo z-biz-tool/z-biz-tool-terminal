@@ -33,6 +33,8 @@ import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 import { auditEvent } from "./services/auditLog";
 import { commandGuard } from "./utils/commandGuard";
+import { envMeta, isProd } from "./utils/environment";
+import EnvBadge from "./components/EnvBadge";
 
 /**
  * AI 生成的命令只填入、不执行（P-1），但"AI 提议过什么"必须留痕（04 §4.9）。
@@ -544,6 +546,8 @@ function AppInner() {
         >
           {tabName}
         </span>
+        {/* 只有生产环境进标签页：预发/开发在侧栏看得见就够，标签条要保持可扫读 */}
+        {isProd(server?.environment) && <EnvBadge raw={server?.environment} compact />}
       </Space>
     );
     return {
@@ -829,12 +833,17 @@ function AppInner() {
         ) : (
           <>
             <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-              {tabs.map((tab) => (
+              {tabs.map((tab) => {
+                const tabServer = servers.find((s) => s.id === tab.serverId);
+                const dangerMeta = envMeta(tabServer?.environment);
+                return (
                 <div
                   key={tab.id}
                   style={{
                     display: tab.id === activeTabId ? "flex" : "none",
                     height: "100%",
+                    // 生产会话给整块终端加一条醒目顶边：切错标签页时第一眼就能看见
+                    boxShadow: dangerMeta?.danger ? `inset 0 3px 0 0 ${dangerMeta.color}` : undefined,
                     flexDirection: tab.panes.length > 1
                       ? tab.splitDirection === "vertical" ? "column" : "row"
                       : "column",
@@ -916,7 +925,8 @@ function AppInner() {
                     })
                   )}
                 </div>
-              ))}
+              );
+              })}
             </div>
             {sftpVisible && activeTabId && (
               <>
