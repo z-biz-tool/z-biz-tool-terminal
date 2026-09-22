@@ -1,10 +1,24 @@
-import { Modal, Form, InputNumber, Select, Switch, Input, Slider, message, Button, Space, Tabs, Empty, Spin, Popconfirm, Typography } from "antd";
+import { Modal, Form, InputNumber, Select, Switch, Input, Slider, message, Button, Space, Tabs, Empty, Spin, Popconfirm, Typography, Tag, Tooltip } from "antd";
 import { useServerStore } from "../stores/serverStore";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { exportAuditLog, fetchAuditRecords } from "../services/auditLog";
+import {
+  affectedAlgos,
+  filterGroups,
+  groupByHost,
+  matchServers,
+  type HostKeyGroup,
+  type HostKeyView,
+} from "../utils/hostkeys";
 import { useState, useEffect } from "react";
-import { ReloadOutlined, UndoOutlined, FolderOpenOutlined } from "@ant-design/icons";
+import {
+  CopyOutlined,
+  ReloadOutlined,
+  UndoOutlined,
+  FolderOpenOutlined,
+  SearchOutlined,
+} from "@ant-design/icons";
 
 interface Props {
   open: boolean;
@@ -356,6 +370,11 @@ export default function SettingsModal({ open, onClose }: Props) {
             children: <AuditTab />,
           },
           {
+            key: "hostkeys",
+            label: "主机信任",
+            children: <HostKeysTab />,
+          },
+          {
             key: "backup",
             label: "备份与恢复",
             children: <BackupTab />,
@@ -379,6 +398,7 @@ const AUDIT_LABELS: Record<string, string> = {
   save_key_file: "私钥落盘",
   audit_export: "导出审计",
   ai_command_suggested: "AI 命令填入",
+  known_hosts_revoke: "撤销主机信任",
 };
 
 interface AuditRecord {
@@ -503,6 +523,207 @@ function AuditTab() {
               </Typography.Text>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 主机信任（T-5-3）：查看/撤销 known_hosts。
+ *
+ * 撤销是安全操作，所以：一次确认 + 如实列出会被带走的全部算法（后端按主机标识整条删除），
+ * 并提醒"下次连接会重新要求确认指纹"——没有比这更容易被误当成中间人告警的地方。
+ */
+function HostKeysTab() {
+  const servers = useServerStore((s) => s.servers);
+  const [entries, setEntries] = useState<HostKeyView[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [revoking, setRevoking] = useState<string | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setEntries(await invoke<HostKeyView[]>("known_hosts_list"));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const groups = filterGroups(groupByHost(entries), query);
+
+  const copyFingerprint = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      message.success("指纹已复制");
+    } catch {
+      message.error("复制失败");
+    }
+  };
+
+  const revoke = async (group: HostKeyGroup) => {
+    setRevoking(group.hostSpec);
+    try {
+      // 审计由后端 known_hosts_remove 落盘，这里不再补一条，避免同一动作出现两条记录
+      const removed = await invoke<number>("known_hosts_remove", { hostSpec: group.hostSpec });
+      message.success(`已撤销 ${group.hostSpec} 的 ${removed} 条信任记录`);
+      await load();
+    } catch (e) {
+      message.error("撤销失败: " + e);
+    } finally {
+      setRevoking(null);
+    }
+  };
+
+  const renderGroup = (group: HostKeyGroup) => {
+    const linked = matchServers(group, servers);
+    return (
+      <div key={group.hostSpec} style={{ padding: "8px 12px", borderBottom: "1px solid #f5f5f5" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <Typography.Text
+            strong
+            style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {group.host}
+          </Typography.Text>
+          {group.port != null && (
+            <Tag color="blue" style={{ margin: 0 }}>
+              {group.port}
+            </Tag>
+          )}
+          {group.hasWeakAlgo && (
+            <Tooltip title="ssh-rsa 用 SHA-1 签名、ssh-dss 已被 OpenSSH 淘汰。建议服务端换用 ed25519 后重新确认指纹">
+              <Tag color="orange" style={{ margin: 0 }}>
+                弱算法
+              </Tag>
+            </Tooltip>
+          )}
+          {linked.map((server) => (
+            <Tooltip key={server.id} title={`对应服务器：${server.name}`}>
+              <Tag style={{ margin: 0, color: "#8c8c8c" }}>{server.name}</Tag>
+            </Tooltip>
+          ))}
+          <span style={{ flex: 1 }} />
+          <Popconfirm
+            title="撤销该主机的信任？"
+            description={
+              <div style={{ maxWidth: 280, fontSize: 12 }}>
+                <div>
+                  主机标识 <Typography.Text code>{group.hostSpec}</Typography.Text>
+                </div>
+                <div>
+                  会一并删除 {affectedAlgos(group)} 共 {group.entries.length} 条记录
+                </div>
+                <div style={{ color: "#d46b08", marginTop: 4 }}>
+                  下次连接将重新弹出指纹确认，这是正常的；若对方指纹与此处不同请立即中止
+                </div>
+              </div>
+            }
+            okText="撤销信任"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+            onConfirm={() => revoke(group)}
+          >
+            <Button size="small" type="link" danger loading={revoking === group.hostSpec}>
+              撤销
+            </Button>
+          </Popconfirm>
+        </div>
+        <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 2 }}>
+          {group.entries.map((entry) => (
+            <div key={`${entry.algo}-${entry.fingerprint}`} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+              <Typography.Text type="secondary" style={{ flex: "0 0 96px" }}>
+                {entry.algo}
+              </Typography.Text>
+              <Tooltip title={entry.fingerprint}>
+                <Typography.Text
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    fontFamily: "monospace",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {entry.fingerprint}
+                </Typography.Text>
+              </Tooltip>
+              <Button
+                size="small"
+                type="text"
+                title="复制指纹"
+                icon={<CopyOutlined />}
+                onClick={() => copyFingerprint(entry.fingerprint)}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div style={{ marginBottom: 8, display: "flex", gap: 8 }}>
+        <Input
+          size="small"
+          allowClear
+          style={{ flex: 1 }}
+          prefix={<SearchOutlined style={{ color: "#bfbfbf" }} />}
+          placeholder="按主机、端口、算法或指纹搜索"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={load}>
+          刷新
+        </Button>
+      </div>
+      <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+        首连确认指纹后写入 known_hosts；此处指纹与连接弹窗同一口径，可直接比对
+        {!error &&
+          entries.length > 0 &&
+          ` · 共 ${groupByHost(entries).length} 台主机 / ${entries.length} 条记录`}
+      </Typography.Text>
+      {loading ? (
+        <div style={{ textAlign: "center", padding: 24 }}>
+          <Spin />
+        </div>
+      ) : error ? (
+        <Typography.Text type="danger" style={{ fontSize: 12 }}>
+          读取信任列表失败: {error}
+        </Typography.Text>
+      ) : entries.length === 0 ? (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="尚未信任任何主机，连接 SSH 并确认指纹后会出现在这里"
+          style={{ padding: 24 }}
+        />
+      ) : groups.length === 0 ? (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={`没有匹配 “${query}” 的主机`}
+          style={{ padding: 24 }}
+        />
+      ) : (
+        <div
+          style={{
+            border: "1px solid #f0f0f0",
+            borderRadius: 6,
+            maxHeight: 320,
+            overflowY: "auto",
+          }}
+        >
+          {groups.map(renderGroup)}
         </div>
       )}
     </div>

@@ -121,6 +121,7 @@
 | 自定义日志目录 | 可配置日志存储路径 |
 | 安全审计轨迹 | `~/.z-terminal/audit.log`（JSONL 追加，0600，超 2 MB 滚动一代）：连接/断开、主机密钥每一条判定、命令执行、配置导出与密钥保存、危险命令的**放行与拒绝**、AI 建议填入、网关被关小的旁路 |
 | 审计查看与导出 | 设置 → 审计日志：最近 100 条（动作/主机/命令/结论），可导出 CSV（带 BOM、防公式注入）或 JSON；导出路径受白名单约束（家目录与临时目录） |
+| 主机信任管理 | 设置 → 主机信任：按主机聚合列出 known_hosts 的算法与 SHA-256 指纹（与连接弹窗同一口径，可一键复制比对），支持主机/端口/算法/指纹搜索、`ssh-rsa`/`ssh-dss` 弱算法提示、命中服务器时标注名称；撤销需确认并如实列出会一并删除的算法条数，动作写入审计 |
 
 审计写入是尽力而为：磁盘满、权限异常只会 `eprintln!`，绝不会让用户的连接或命令因此失败。审计永不记录密码与私钥内容。
 
@@ -268,7 +269,7 @@ npm run tauri build
 | `~/.z-terminal/config.json` | 服务器列表、设置、快捷命令 |
 | `~/.z-terminal/logs/` | SSH 会话日志（带时间戳，默认脱敏） |
 | `~/.z-terminal/master.key` | 本地加密凭证的信封密钥（密码/私钥/AI Key 密文存于 config.json） |
-| `~/.z-terminal/known_hosts` | 已信任的 SSH 主机公钥（TOFU 首连记录，指纹变化会阻断） |
+| `~/.z-terminal/known_hosts` | 已信任的 SSH 主机公钥（TOFU 首连记录，指纹变化会阻断；可在设置 → 主机信任查看/撤销） |
 | `~/.z-terminal/audit.log` | 安全审计轨迹（JSONL 追加，0600，超 2 MB 滚动到 `audit.log.1`；可在设置 → 审计日志查看/导出） |
 
 ---
@@ -284,8 +285,9 @@ npm run tauri build
 
 ## 🧪 验证口径（哪些是跑过的，哪些没有）
 
-- 已实测通过：`npm run typecheck` 0 错误、`npm test` 201 例、`npm run build`、`cargo fmt --check`、`cargo test --lib` 64 例。CI 工作流 `.github/workflows/ci.yml` 已就绪，但**尚未在 GitHub 上实际跑过一次**（未推送）。
-- **GUI 运行时未验证**：主机密钥确认弹窗、危险命令确认弹窗、审计日志 tab、WebGL 渲染器能否在 WKWebView 里建起上下文，目前都只有单元与静态层面证据，`npm run tauri dev` 未在本机跑起来（需要真机 WebView 与真 SSH 服务端）。SFTP 与 PTY 的端到端行为同样没有测试覆盖。WebGL 的不确定风险已被回退路径兜住：建不起来或上下文丢失即退回 DOM 渲染，最坏情况等同改动前。
+- 已实测通过：`npm run typecheck` 0 错误、`npm test` 238 例（9 个文件）、`npm run build`、`cargo fmt --check`、`cargo test --lib` 70 例。
+- **「主机信任」设置页已在浏览器里用 stub `invoke` 渲染真实组件跑过**：列表聚合、搜索命中/空态、撤销确认文案与调用参数、错误态与空态区分均已实测；但这仍不是 Tauri 运行时，真实 known_hosts 文件未对过样。
+- **其余 GUI 运行时未验证**：主机密钥确认弹窗、危险命令确认弹窗、审计日志 tab、WebGL 渲染器能否在 WKWebView 里建起上下文，目前都只有单元与静态层面证据，`npm run tauri dev` 未在本机跑起来（需要真机 WebView 与真 SSH 服务端）。SFTP 与 PTY 的端到端行为同样没有测试覆盖。WebGL 的不确定风险已被回退路径兜住：建不起来或上下文丢失即退回 DOM 渲染，最坏情况等同改动前。
 - 安全网关是"防误操作"级别的前端防线：远端主机的真实权限边界仍在服务端，关掉开关即完全旁路（审计轨迹会记下 `command_gate_bypassed`）。
 - 进度、落地位置与有意偏离的口径见 [`doc/优化方案/07_实施进度.md`](doc/优化方案/07_实施进度.md)。
 
