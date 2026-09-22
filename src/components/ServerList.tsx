@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
+import { envMeta, ENV_OPTIONS } from "../utils/environment";
 import {
   Button,
   Modal,
@@ -60,6 +61,36 @@ const PRESET_COLORS = [
   "#666666",
 ];
 
+/**
+ * 环境徽标（T-5-2）。
+ *
+ * 未标注的主机一个像素都不占：存量配置普遍没有这个字段，给整列加"未知环境"
+ * 只会把真正的生产标记淹没在噪声里。
+ */
+function EnvBadge({ raw }: { raw?: string }) {
+  const meta = envMeta(raw);
+  if (!meta) return null;
+  return (
+    <Tooltip title={meta.label}>
+      <span
+        style={{
+          fontSize: 10,
+          lineHeight: "14px",
+          padding: "0 4px",
+          borderRadius: 3,
+          fontWeight: 700,
+          letterSpacing: 0.3,
+          color: "#fff",
+          background: meta.color,
+          flexShrink: 0,
+        }}
+      >
+        {meta.short}
+      </span>
+    </Tooltip>
+  );
+}
+
 export default function ServerList() {
   const {
     servers,
@@ -116,7 +147,10 @@ export default function ServerList() {
         s.name.toLowerCase().includes(lower) ||
         s.host.toLowerCase().includes(lower) ||
         (s.group || "").toLowerCase().includes(lower) ||
-        (s.tags || "").toLowerCase().includes(lower)
+        (s.tags || "").toLowerCase().includes(lower) ||
+        // 搜"生产"要能捞出标成 prod 的机器，标值与中文标签同时参与匹配
+        (s.environment || "").toLowerCase().includes(lower) ||
+        (envMeta(s.environment)?.label ?? "").includes(searchText.trim())
     );
   }, [servers, searchText]);
 
@@ -251,6 +285,7 @@ export default function ServerList() {
               >
                 {s.name}
               </span>
+              <EnvBadge raw={s.environment} />
               <span style={{ color: "#bbb", fontSize: 11, flexShrink: 0 }}>
                 {s.host}:{s.port}
               </span>
@@ -795,6 +830,36 @@ export default function ServerList() {
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
             <Input placeholder="例如: 生产环境Web服务器" />
+          </Form.Item>
+          <Form.Item
+            name="environment"
+            label="环境"
+            extra="标为生产的机器会在列表、标签页和危险命令确认框里醒目提示；留空不提醒"
+          >
+            <Select
+              allowClear
+              placeholder="未标注"
+              options={ENV_OPTIONS.map((o) => {
+                const meta = envMeta(o.value);
+                return {
+                  value: o.value,
+                  label: (
+                    <Space size={6}>
+                      <span
+                        style={{
+                          display: "inline-block",
+                          width: 8,
+                          height: 8,
+                          borderRadius: 2,
+                          background: meta?.color,
+                        }}
+                      />
+                      {meta?.label}
+                    </Space>
+                  ),
+                };
+              })}
+            />
           </Form.Item>
           <Space.Compact style={{ width: "100%" }}>
             <Form.Item

@@ -30,6 +30,10 @@ pub struct ServerConfig {
     /// 颜色标签(hex 字符串, 如 #1677ff), 用于在侧边栏高亮该服务器
     #[serde(default)]
     pub color: Option<String>,
+    /// 环境标记（prod / staging / dev）。存量配置没有这个字段，读出来即 None=未标注；
+    /// 前端用 `environment.ts` 归一化，后端只原样存取，不参与判定。
+    #[serde(default)]
+    pub environment: Option<String>,
 }
 
 fn default_auth_type() -> String {
@@ -770,11 +774,33 @@ mod tests {
             order: None,
             tags: None,
             color: None,
+            environment: None,
         };
 
         let value = serde_json::to_value(server).expect("服务器配置应能序列化");
         assert_eq!(value["authType"], "password");
         assert!(value.get("auth_type").is_none());
+    }
+
+    /// 环境标记要原样往返；存量配置缺这个字段时按"未标注"读入（§5.7 向后兼容）
+    #[test]
+    fn server_environment_round_trips_and_defaults_to_none() {
+        let mut server = test_server(None, None);
+        server.environment = Some("prod".into());
+        let value = serde_json::to_value(server).expect("服务器配置应能序列化");
+        assert_eq!(value["environment"], "prod");
+
+        let legacy: ServerConfig = serde_json::from_value(json!({
+            "id": "server-1",
+            "name": "测试服务器",
+            "group": "",
+            "host": "127.0.0.1",
+            "port": 22,
+            "username": "tester",
+            "authType": "password"
+        }))
+        .expect("缺少 environment 的存量配置应能读取");
+        assert_eq!(legacy.environment, None);
     }
 
     #[test]
@@ -869,6 +895,7 @@ mod tests {
             order: None,
             tags: None,
             color: None,
+            environment: None,
         }
     }
 

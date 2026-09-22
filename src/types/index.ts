@@ -30,6 +30,11 @@ export interface ServerConfig {
   tags?: string;
   /** 颜色标签(hex, 如 #1677ff) */
   color?: string;
+  /**
+   * 环境标记（T-5-2）。存原始字符串即可：存量配置没有这个字段，
+   * 用户也可能手写过 "production" 之类的别名，统一由 environment.ts 归一化。
+   */
+  environment?: string;
 }
 
 /** 连接状态 */
