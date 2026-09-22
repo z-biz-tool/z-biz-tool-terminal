@@ -3,6 +3,7 @@ import { Modal, Tabs, Form, Input, InputNumber, Button, Table, Tag, Space, messa
 import { SwapOutlined, StopOutlined, PlayCircleOutlined } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import { useServerStore } from "../stores/serverStore";
+import { pickActiveSession } from "../utils/session";
 
 interface ActiveForward {
   forwardId: string;
@@ -47,12 +48,10 @@ export default function PortForwardModal({ open, onClose }: Props) {
   const [dynLocalAddr, setDynLocalAddr] = useState("127.0.0.1");
   const [dynLocalPort, setDynLocalPort] = useState<number | null>(null);
 
-  const getSessionId = useCallback(() => {
-    const { tabs, activeTabId, activePaneId } = useServerStore.getState();
-    const tab = tabs.find((t) => t.serverId === activeTabId);
-    const activePane = tab?.panes.find((p) => p.id === activePaneId);
-    return activePane?.sessionId || tab?.sessionId;
-  }, []);
+  const getSessionId = useCallback(
+    () => pickActiveSession(useServerStore.getState()),
+    []
+  );
 
   const refreshForwards = useCallback(() => {
     // Currently we track forwards in component state only

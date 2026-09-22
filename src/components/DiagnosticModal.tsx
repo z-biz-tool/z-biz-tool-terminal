@@ -3,6 +3,7 @@ import { Modal, Tabs, Input, InputNumber, Button, Space, message, theme } from "
 import { BugOutlined, CopyOutlined, PlayCircleOutlined } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import { useServerStore } from "../stores/serverStore";
+import { pickActiveSession } from "../utils/session";
 
 interface Props {
   open: boolean;
@@ -32,12 +33,10 @@ export default function DiagnosticModal({ open, onClose }: Props) {
 
   const outputRef = useRef<HTMLPreElement>(null);
 
-  const getSessionId = useCallback(() => {
-    const { tabs, activeTabId, activePaneId } = useServerStore.getState();
-    const tab = tabs.find((t) => t.id === activeTabId);
-    const activePane = tab?.panes.find((p) => p.id === activePaneId);
-    return activePane?.sessionId || tab?.sessionId;
-  }, []);
+  const getSessionId = useCallback(
+    () => pickActiveSession(useServerStore.getState()),
+    []
+  );
 
   // Auto-scroll output
   useEffect(() => {
