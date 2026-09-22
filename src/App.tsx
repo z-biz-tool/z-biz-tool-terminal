@@ -34,6 +34,7 @@ import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 import { auditEvent } from "./services/auditLog";
 import { commandGuard } from "./utils/commandGuard";
+import { comboLabel, hit, isMacPlatform } from "./utils/shortcuts";
 import { envMeta, isProd } from "./utils/environment";
 import EnvBadge from "./components/EnvBadge";
 
@@ -146,21 +147,19 @@ function AppInner() {
     return () => clearInterval(timer);
   }, []);
 
-  // 全局键盘快捷键
+  // 全局键盘快捷键：绑定关系全部来自 utils/shortcuts，这里只负责"命中之后做什么"
   useEffect(() => {
-    const isMac = navigator.platform.toUpperCase().includes("MAC");
+    const mac = isMacPlatform();
     const handler = (e: KeyboardEvent) => {
-      const modKey = isMac ? e.metaKey : e.ctrlKey;
-
       // Cmd/Ctrl + T - 新建连接
-      if (modKey && e.key === "t" && !e.shiftKey) {
+      if (hit(e, "add-server", mac)) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent("z-terminal:add-server"));
         return;
       }
 
       // Cmd/Ctrl + W - 关闭当前标签
-      if (modKey && e.key === "w" && !e.shiftKey) {
+      if (hit(e, "close-tab", mac)) {
         e.preventDefault();
         const { activeTabId: aId, closeTab: ct } = useServerStore.getState();
         if (aId) ct(aId);
@@ -168,7 +167,7 @@ function AppInner() {
       }
 
       // Cmd/Ctrl + Shift + E - 切换 SFTP
-      if (modKey && e.shiftKey && (e.key === "E" || e.key === "e")) {
+      if (hit(e, "toggle-sftp", mac)) {
         e.preventDefault();
         const { sftpVisible: sv, toggleSftp: ts, activeTabId: aId, listSftp: ls } = useServerStore.getState();
         if (!sv && aId) {
@@ -181,37 +180,37 @@ function AppInner() {
       }
 
       // Cmd/Ctrl + Shift + S - 切换 Snippets
-      if (modKey && e.shiftKey && (e.key === "S" || e.key === "s")) {
+      if (hit(e, "toggle-snippets", mac)) {
         e.preventDefault();
         useServerStore.getState().toggleSnippets();
         return;
       }
 
       // Cmd/Ctrl + Shift + H - 水平分屏
-      if (modKey && e.shiftKey && (e.key === "H" || e.key === "h")) {
+      if (hit(e, "split-horizontal", mac)) {
         e.preventDefault();
         if (activeTabId) splitTab(activeTabId, "horizontal");
         return;
       }
 
       // Cmd/Ctrl + Shift + V - 垂直分屏
-      if (modKey && e.shiftKey && (e.key === "V" || e.key === "v")) {
+      if (hit(e, "split-vertical", mac)) {
         e.preventDefault();
         if (activeTabId) splitTab(activeTabId, "vertical");
         return;
       }
 
       // Cmd/Ctrl + 1-9 - 切换标签
-      if (modKey && e.key >= "1" && e.key <= "9" && !e.shiftKey) {
+      if (hit(e, "tab-index", mac)) {
         e.preventDefault();
         const { tabs: t, setActiveTab: sat } = useServerStore.getState();
-        const idx = parseInt(e.key) - 1;
+        const idx = parseInt(e.key, 10) - 1;
         if (idx < t.length) sat(t[idx].id);
         return;
       }
 
       // Cmd/Ctrl + Tab - 切换到下一个标签
-      if (modKey && e.key === "Tab") {
+      if (hit(e, "next-tab", mac)) {
         e.preventDefault();
         const { tabs: t, activeTabId: aId, setActiveTab: sat } = useServerStore.getState();
         if (t.length > 1) {
@@ -223,92 +222,91 @@ function AppInner() {
       }
 
       // Cmd/Ctrl + / - 显示快捷键
-      if (modKey && e.key === "/") {
+      if (hit(e, "show-shortcuts", mac)) {
         e.preventDefault();
         setShortcutsOpen(true);
         return;
       }
 
       // Cmd/Ctrl + Shift + I - AI 聊天助手
-      if (modKey && e.shiftKey && (e.key === "I" || e.key === "i")) {
+      if (hit(e, "ai-chat", mac)) {
         e.preventDefault();
         setAiChatOpen(true);
         return;
       }
 
       // Cmd/Ctrl + Shift + X - AI 命令解释
-      // 不能用 Shift+E：那条已被 SFTP 面板占用（同一个 keydown 里前面的分支会先 return）
-      if (modKey && e.shiftKey && (e.key === "X" || e.key === "x")) {
+      if (hit(e, "ai-explain", mac)) {
         e.preventDefault();
         openAiExplain();
         return;
       }
 
       // Cmd/Ctrl + Shift + A - AI 错误分析
-      if (modKey && e.shiftKey && (e.key === "A" || e.key === "a")) {
+      if (hit(e, "ai-error", mac)) {
         e.preventDefault();
         openAiError();
         return;
       }
 
-      // Shift + 3 - 自然语言转命令
-      if (e.shiftKey && (e.key === "3" || e.key === "#")) {
+      // Cmd/Ctrl + Shift + N - 自然语言转命令
+      if (hit(e, "ai-natural-language", mac)) {
         e.preventDefault();
         setAiNaturalLanguageOpen(true);
         return;
       }
 
       // Cmd/Ctrl + Shift + R - AI 代码编辑
-      if (modKey && e.shiftKey && (e.key === "R" || e.key === "r")) {
+      if (hit(e, "ai-code", mac)) {
         e.preventDefault();
         openAiCode();
         return;
       }
 
       // Cmd/Ctrl + Shift + G - AI Git 提交信息（在面板里粘贴 diff，选中内容作为初始值）
-      if (modKey && e.shiftKey && (e.key === "G" || e.key === "g")) {
+      if (hit(e, "ai-git", mac)) {
         e.preventDefault();
         openAiGit();
         return;
       }
 
       // Cmd/Ctrl + Shift + C - 多智能体协作
-      if (modKey && e.shiftKey && (e.key === "C" || e.key === "c")) {
+      if (hit(e, "ai-multi-agent", mac)) {
         e.preventDefault();
         setAiMultiAgentsOpen(true);
         return;
       }
 
       // Cmd/Ctrl + Shift + D - AI 数据面板（本机）
-      if (modKey && e.shiftKey && (e.key === "D" || e.key === "d")) {
+      if (hit(e, "ai-data", mac)) {
         e.preventDefault();
         setCloudAgentOpen(true);
         return;
       }
 
       // Cmd/Ctrl + K - 命令面板
-      if (modKey && (e.key === "k" || e.key === "K") && !e.shiftKey) {
+      if (hit(e, "command-palette", mac)) {
         e.preventDefault();
         setPaletteOpen(true);
         return;
       }
 
       // Cmd/Ctrl + L - 快速连接栏
-      if (modKey && (e.key === "l" || e.key === "L") && !e.shiftKey) {
+      if (hit(e, "quick-connect", mac)) {
         e.preventDefault();
         setQuickConnectOpen((prev) => !prev);
         return;
       }
 
       // Cmd/Ctrl + Shift + P - 命令面板（VSCode 风格）
-      if (modKey && e.shiftKey && (e.key === "P" || e.key === "p")) {
+      if (hit(e, "command-palette-vscode", mac)) {
         e.preventDefault();
         setPaletteOpen(true);
         return;
       }
 
       // Cmd/Ctrl + Shift + Y - 命令历史检索（填入不执行，P-1）
-      if (modKey && e.shiftKey && (e.key === "Y" || e.key === "y")) {
+      if (hit(e, "command-history", mac)) {
         e.preventDefault();
         setHistoryOpen(true);
         return;
@@ -575,7 +573,7 @@ function AppInner() {
 
   const headerExtra = (
     <Space>
-      <Tooltip title="命令面板 (Ctrl+K / Cmd+K)">
+      <Tooltip title={`命令面板 ${comboLabel("command-palette")}`}>
         <Button
           size="small"
           type="text"
@@ -619,7 +617,7 @@ function AppInner() {
         </Button>
       )}
       {activeTabId && (
-        <Tooltip title="命令历史 (Ctrl+Shift+Y)">
+        <Tooltip title={`命令历史 ${comboLabel("command-history")}`}>
           <Button
             size="small"
             type={historyOpen ? "primary" : "text"}
@@ -641,7 +639,7 @@ function AppInner() {
         </Tooltip>
       )}
       {activeTabId && (
-        <Tooltip title="水平分屏 (Ctrl+Shift+H)">
+        <Tooltip title={`水平分屏 ${comboLabel("split-horizontal")}`}>
           <Button
             size="small"
             type="text"
@@ -651,7 +649,7 @@ function AppInner() {
         </Tooltip>
       )}
       {activeTabId && (
-        <Tooltip title="垂直分屏 (Ctrl+Shift+V)">
+        <Tooltip title={`垂直分屏 ${comboLabel("split-vertical")}`}>
           <Button
             size="small"
             type="text"
@@ -684,7 +682,7 @@ function AppInner() {
           </Button>
         </Tooltip>
       )}
-      <Tooltip title="AI 聊天助手 (Ctrl+Shift+I)">
+      <Tooltip title={`AI 聊天助手 ${comboLabel("ai-chat")}`}>
         <Button
           size="small"
           type="text"
@@ -692,7 +690,7 @@ function AppInner() {
           onClick={() => setAiChatOpen(true)}
         />
       </Tooltip>
-      <Tooltip title="AI 命令解释 (Ctrl+Shift+X)">
+      <Tooltip title={`AI 命令解释 ${comboLabel("ai-explain")}`}>
         <Button
           size="small"
           type="text"
@@ -700,7 +698,7 @@ function AppInner() {
           onClick={openAiExplain}
         />
       </Tooltip>
-      <Tooltip title="AI 错误分析 (Ctrl+Shift+A)">
+      <Tooltip title={`AI 错误分析 ${comboLabel("ai-error")}`}>
         <Button
           size="small"
           type="text"
@@ -708,7 +706,7 @@ function AppInner() {
           onClick={openAiError}
         />
       </Tooltip>
-      <Tooltip title="自然语言转命令 (Shift+3)">
+      <Tooltip title={`自然语言转命令 ${comboLabel("ai-natural-language")}`}>
         <Button
           size="small"
           type="text"
@@ -716,7 +714,7 @@ function AppInner() {
           onClick={() => setAiNaturalLanguageOpen(true)}
         />
       </Tooltip>
-      <Tooltip title="AI 代码编辑 (Ctrl+Shift+R)">
+      <Tooltip title={`AI 代码编辑 ${comboLabel("ai-code")}`}>
         <Button
           size="small"
           type="text"
@@ -724,7 +722,7 @@ function AppInner() {
           onClick={openAiCode}
         />
       </Tooltip>
-      <Tooltip title="AI Git 提交 (Ctrl+Shift+G)">
+      <Tooltip title={`AI Git 提交 ${comboLabel("ai-git")}`}>
         <Button
           size="small"
           type="text"
@@ -732,7 +730,7 @@ function AppInner() {
           onClick={openAiGit}
         />
       </Tooltip>
-      <Tooltip title="多智能体协作 (Ctrl+Shift+C)">
+      <Tooltip title={`多智能体协作 ${comboLabel("ai-multi-agent")}`}>
         <Button
           size="small"
           type="text"
@@ -740,7 +738,7 @@ function AppInner() {
           onClick={() => setAiMultiAgentsOpen(true)}
         />
       </Tooltip>
-      <Tooltip title="AI 数据（本机，无云端同步） (Ctrl+Shift+D)">
+      <Tooltip title={`AI 数据（本机，无云端同步） ${comboLabel("ai-data")}`}>
         <Button
           size="small"
           type="text"
@@ -766,7 +764,7 @@ function AppInner() {
         type="text"
         icon={<RobotOutlined />}
         onClick={() => setAiChatOpen(true)}
-        title="AI 聊天助手 (Ctrl+Shift+I / Cmd+Shift+I)"
+        title={`AI 聊天助手 ${comboLabel("ai-chat")}`}
       />
       <Button
         size="small"

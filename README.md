@@ -161,23 +161,33 @@
 
 ## ⌨️ 快捷键
 
-| 快捷键 | 功能 |
+| 快捷键（macOS 上的 `Cmd` 即下表 `Ctrl`） | 功能 |
 |--------|------|
-| `Cmd/Ctrl + T` | 新建连接 |
-| `Cmd/Ctrl + W` | 关闭当前标签 |
-| `Cmd/Ctrl + K` | 打开命令面板 |
-| `Cmd/Ctrl + Shift + P` | 命令面板 (VSCode 风格) |
-| `Cmd/Ctrl + F` | 终端内搜索 |
-| `Cmd/Ctrl + L` | 快速连接栏 |
-| `Cmd/Ctrl + Shift + E` | 切换 SFTP 面板 |
-| `Cmd/Ctrl + Shift + S` | 切换快捷命令面板 |
-| `Cmd/Ctrl + Shift + H` | 水平分屏 |
-| `Cmd/Ctrl + Shift + V` | 垂直分屏 |
-| `Cmd/Ctrl + 1-9` | 切换到第 N 个标签 |
-| `Cmd/Ctrl + Tab` | 切换到下一个标签 |
-| `Cmd/Ctrl + /` | 显示快捷键列表 |
-| `Cmd/Ctrl + Shift + Y` | 命令历史检索（回车/点击只填入命令行，不执行） |
-| `Esc` | 关闭对话框/搜索 |
+| `Ctrl+T` | 新建连接 |
+| `Ctrl+W` | 关闭当前标签 |
+| `Ctrl+Tab` | 切换到下一个标签 |
+| `Ctrl+1-9` | 切换到第 N 个标签 |
+| `Ctrl+Shift+E` | 切换 SFTP 面板 |
+| `Ctrl+Shift+S` | 切换命令片段面板 |
+| `Ctrl+Shift+H` | 水平分屏 |
+| `Ctrl+Shift+V` | 垂直分屏 |
+| `Ctrl+/` | 显示快捷键 |
+| `Ctrl+L` | 快速连接栏 |
+| `Ctrl+K` | 打开命令面板 |
+| `Ctrl+Shift+P` | 命令面板（VSCode 风格） |
+| `Ctrl+Shift+Y` | 命令历史检索（只填入、不执行） |
+| `Ctrl+F` | 在当前终端里搜索 |
+| `Ctrl+Shift+I` | AI 聊天助手 |
+| `Ctrl+Shift+X` | AI 命令解释（分析选区） |
+| `Ctrl+Shift+A` | AI 错误分析 |
+| `Ctrl+Shift+R` | AI 代码编辑 |
+| `Ctrl+Shift+G` | AI Git 提交信息 |
+| `Ctrl+Shift+C` | 多智能体协作 |
+| `Ctrl+Shift+D` | AI 数据面板（本机，不经云端） |
+| `Ctrl+Shift+N` | 自然语言转命令 |
+| `Esc` | 关闭对话框 / 搜索 / 快速连接栏 |
+
+> 这张表由 `src/utils/shortcuts.ts` 生成，与「查看快捷键」面板同源；新增绑定只改那一处，`tests/shortcuts.test.ts` 会核对每条绑定真的接了线。
 
 ---
 
@@ -289,7 +299,7 @@ npm run tauri build
 
 ## 🧪 验证口径（哪些是跑过的，哪些没有）
 
-- 已实测通过：`npm run typecheck` 0 错误、`npm test` 324 例（11 个文件）、`npm run build`、`cargo fmt --check`、`cargo test --lib` 71 例。
+- 已实测通过：`npm run typecheck` 0 错误、`npm test` 395 例（12 个文件，含 `shortcuts` 71 例漂移守卫与三条变异验证）、`npm run build`、`cargo fmt --check`、`cargo test --lib` 71 例。
 - **「主机信任」设置页已在浏览器里用 stub `invoke` 渲染真实组件跑过**：列表聚合、搜索命中/空态、撤销确认文案与调用参数、错误态与空态区分均已实测；但这仍不是 Tauri 运行时，真实 known_hosts 文件未对过样。
 - **「危险命令确认弹窗」与「环境标识」同样在浏览器里跑过真实组件**：走真实 `confirmDangerousCommand()` 入口弹框，实测生产机汇总台数、`[生产环境]` 加粗标红前缀、预发/未标注的差异化展示；`EnvBadge` 三色与"未标注不占任何 DOM 节点"实测；整棵 `App` 在 stub `__TAURI_INTERNALS__` 下渲染，确认只有生产 tab 带 `PROD` 徽标与红色顶边、切 tab 不漏染。这仍不是 Tauri 运行时。
 - **「命令历史」面板已在浏览器里跑过真实 `App`**（`invoke` 打桩 + 假终端句柄）：4 条记录去重成 3 行、`×2` 计次、危险等级标签与 `[生产环境]` 前缀、搜索过滤、点击填入时 PTY 通道收到的 payload **不含回车**、清空二次确认后存储转 `{"v":1,"items":[]}`、设置里 `command_history` 开关关掉后面板出现提示条；`localStorage` 里落盘的 mysql 命令形如 `mysql -uroot -p**** -e 'show databases'`（口令在写盘那一刻已是掩码）。这仍不是 Tauri 运行时。

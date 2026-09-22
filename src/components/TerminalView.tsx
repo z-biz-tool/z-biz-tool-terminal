@@ -14,6 +14,7 @@ import { attachWebglRenderer } from "../utils/webglRenderer";
 import { ensurePtyListening, subscribePtyOutput } from "../services/ptyBus";
 import { approveCommand, guardEnabled, paneTargets } from "../services/commandGate";
 import { registerTerminal } from "../services/terminalFeeds";
+import { hit, isMacPlatform } from "../utils/shortcuts";
 import ZmodemOverlay, { isZmodemHandshake, type ZmodemState, type ZmodemTransferType } from "./ZmodemOverlay";
 
 const THEMES: Record<string, {
@@ -652,17 +653,22 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
     }
   }, [paneSessionId]);
 
-  // 全局 Cmd/Ctrl+F 拦截：唤起终端内搜索
+  // 全局 Cmd/Ctrl+F 拦截：唤起终端内搜索（绑定定义在 utils/shortcuts）
+  // 非活跃标签页的终端是常驻挂载、只是 display:none，所以必须只让"当前活跃面板"响应，
+  // 否则按一次 Cmd+F 会给每个隐藏面板都打开一条搜索栏。
   useEffect(() => {
+    const mac = isMacPlatform();
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
-        e.preventDefault();
-        setSearchOpen(true);
-      }
+      if (!hit(e, "terminal-search", mac)) return;
+      const { activeTabId, activePaneId } = useServerStore.getState();
+      if (tabId !== activeTabId) return;
+      if (paneId && activePaneId && paneId !== activePaneId) return;
+      e.preventDefault();
+      setSearchOpen(true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [tabId, paneId]);
 
   const themePreset = THEMES[settings.theme] || THEMES.dark;
   const bgWithAlpha = settings.background_image
