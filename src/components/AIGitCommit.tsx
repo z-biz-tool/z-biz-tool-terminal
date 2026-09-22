@@ -1,35 +1,37 @@
 import { useState, useEffect } from "react";
-import { Modal, Button, Typography, message, Divider } from "antd";
+import { Modal, Button, Typography, message, Divider, Input } from "antd";
 import { GitlabOutlined } from "@ant-design/icons";
 import type { AIMessage } from "../types/ai";
 import { useAIStore } from "../stores/aiStore";
-import { createAIClient } from "../services/aiClient";
+import { createAIClient, parseJsonReply } from "../services/aiClient";
 
 const { Title, Text, Paragraph } = Typography;
 
 interface AIGitCommitProps {
   open: boolean;
   onClose: () => void;
+  /** 终端里选中的文本作为初始 diff；本项目不派生本地 git，diff 需要用户粘贴 */
   diff: string;
-  onCommitMessageGenerated: (message: string, body?: string) => void;
 }
 
-export default function AIGitCommit({ open, onClose, diff, onCommitMessageGenerated }: AIGitCommitProps) {
+export default function AIGitCommit({ open, onClose, diff }: AIGitCommitProps) {
   const { config } = useAIStore();
   const [loading, setLoading] = useState(false);
+  const [diffText, setDiffText] = useState(diff);
   const [commitMessage, setCommitMessage] = useState("");
   const [commitBody, setCommitBody] = useState("");
 
   useEffect(() => {
-    if (!open) {
+    if (open) {
+      setDiffText(diff);
       setCommitMessage("");
       setCommitBody("");
     }
-  }, [open]);
+  }, [open, diff]);
 
   const generateCommitMessage = async () => {
-    if (!diff.trim() || !config.apiKey) {
-      message.warning("请输入 diff 内容并配置 API Key");
+    if (!diffText.trim() || !config.apiKey) {
+      message.warning("请粘贴 diff 内容并配置 API Key");
       return;
     }
 
@@ -37,7 +39,7 @@ export default function AIGitCommit({ open, onClose, diff, onCommitMessageGenera
 
     try {
       const client = createAIClient(config);
-      const prompt = `分析以下 Git diff，生成符合 Conventional Commits 规范的提交信息。\n\n要求：\n1. 主标题格式: <type>(<scope>): <description> (不超过50字符)\n2. 类型: feat(新功能), fix(修复), docs(文档), style(样式), refactor(重构), test(测试), chore(维护)\n3. 如有必要，添加详细描述\n\nDiff：\n\`\`\`\n${diff}\n\`\`\`\n\n请以JSON格式输出：\n{\n  "message": "主标题",\n  "body": "详细描述（可选）"\n}`;
+      const prompt = `分析以下 Git diff，生成符合 Conventional Commits 规范的提交信息。\n\n要求：\n1. 主标题格式: <type>(<scope>): <description> (不超过50字符)\n2. 类型: feat(新功能), fix(修复), docs(文档), style(样式), refactor(重构), test(测试), chore(维护)\n3. 如有必要，添加详细描述\n\nDiff：\n\`\`\`\n${diffText}\n\`\`\`\n\n请以JSON格式输出：\n{\n  "message": "主标题",\n  "body": "详细描述（可选）"\n}`;
       
       const messages: AIMessage[] = [
         { role: "system", content: "你是 Git 提交专家。生成简洁、准确、符合规范的提交信息。", timestamp: Date.now() },
@@ -45,10 +47,13 @@ export default function AIGitCommit({ open, onClose, diff, onCommitMessageGenera
       ];
 
       const response = await client.chat(messages, { temperature: 0.5, maxTokens: 1000 });
-      const result = typeof response === "string" ? JSON.parse(response) : { message: "", body: "" };
-      
-      setCommitMessage(result.message || "feat: 添加新功能");
-      setCommitBody(result.body || "");
+      const result = parseJsonReply<{ message?: string; body?: string }>(response);
+      if (!result.message?.trim()) {
+        // 旧实现在这里兜底成 "feat: 添加新功能"，等于凭空编了一条与 diff 无关的提交信息
+        throw new Error("模型没有给出主标题，请重试或缩小 diff");
+      }
+      setCommitMessage(result.message.trim());
+      setCommitBody(result.body?.trim() ?? "");
       setLoading(false);
     } catch (error: any) {
       console.error("Failed to generate commit message:", error);
@@ -63,7 +68,11 @@ export default function AIGitCommit({ open, onClose, diff, onCommitMessageGenera
   };
 
   const handleUseMessage = () => {
-    onCommitMessageGenerated(commitMessage, commitBody);
+    // "使用此提交信息"原本回调到 App 的 () => {}，即点了什么都没发生；
+    // 本应用不派生本地 git 进程，能落地的动作就是带走这段文本。
+    const composed = commitBody ? `${commitMessage}\n\n${commitBody}` : commitMessage;
+    navigator.clipboard.writeText(composed);
+    message.success("完整提交信息（含正文）已复制到剪贴板");
     onClose();
   };
 
@@ -88,7 +97,21 @@ export default function AIGitCommit({ open, onClose, diff, onCommitMessageGenera
           分析代码变更，自动生成符合规范的提交信息
         </Paragraph>
 
-        <div style={{ background: "#1e1e1e", padding: "16px", borderRadius: "8px", marginBottom: "24px" }}>
+        <div style={{ background: "#1e1e1e", padding: "16px", borderRadius: "8px", marginBottom: "24px", textAlign: "left" }}>
+          <Title level={4} style={{ margin: "0 0 12px 0", fontSize: 14, color: "#faad14" }}>
+            待分析的 diff
+          </Title>
+          <Input.TextArea
+            value={diffText}
+            onChange={(e) => setDiffText(e.target.value)}
+            placeholder="粘贴 git diff / git diff HEAD 的输出（在终端里选中后按本快捷键会自动带入）"
+            autoSize={{ minRows: 4, maxRows: 12 }}
+            style={{ fontFamily: "Menlo, Consolas, monospace", fontSize: 12 }}
+            disabled={loading}
+          />
+        </div>
+
+        <div style={{ background: "#1e1e1e", padding: "16px", borderRadius: "8px", marginBottom: "24px", textAlign: "left" }}>
           <Title level={4} style={{ margin: "0 0 12px 0", fontSize: 14, color: "#faad14" }}>
             💡 提示
           </Title>
@@ -105,7 +128,7 @@ export default function AIGitCommit({ open, onClose, diff, onCommitMessageGenera
             icon={<GitlabOutlined />}
             onClick={generateCommitMessage}
             loading={loading}
-            disabled={!diff.trim() || !config.apiKey}
+            disabled={!diffText.trim() || !config.apiKey}
             style={{ minWidth: "200px" }}
           >
             {loading ? "生成提交信息中..." : "生成提交信息"}

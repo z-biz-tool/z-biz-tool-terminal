@@ -1,6 +1,8 @@
+mod audit;
 mod commands;
 mod config;
 mod hostkeys;
+mod paths;
 mod redact;
 mod secret;
 mod ssh;
@@ -17,6 +19,9 @@ pub fn run() {
             commands::ssh_connect_via_jump,
             commands::ssh_disconnect,
             commands::ssh_execute,
+            commands::audit_event,
+            audit::audit_records,
+            audit::audit_export,
             commands::ssh_start_pty,
             commands::ssh_pty_write,
             commands::ssh_pty_resize,
@@ -43,6 +48,7 @@ pub fn run() {
             commands::get_file_modified_time,
             commands::read_file_content,
             commands::read_file_as_base64,
+            commands::save_key_file,
             config::get_config,
             config::save_servers,
             config::save_settings,

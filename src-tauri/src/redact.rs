@@ -3,7 +3,6 @@
 //! 终端输出按任意边界分块到达，因此这里按行缓冲处理：只有遇到 `\n` 才判定，
 //! 未完成的行尾保留到下一块。PEM 私钥块用状态机跨行吞掉，避免半截私钥落盘。
 
-
 /// 需要整体抹掉价值内容的敏感键名（不区分大小写）
 const SECRET_KEYS: &[&str] = &[
     "password",
@@ -84,8 +83,7 @@ impl LogRedactor {
     }
 }
 
-/// 无状态便捷入口（测试与一次性文本脱敏用）
-#[cfg(test)]
+/// 无状态便捷入口（一次性文本脱敏：审计日志、错误信息里的命令原文）
 pub fn redact_once(text: &str) -> String {
     let mut r = LogRedactor::default();
     let mut out = r.push(text);
@@ -99,7 +97,9 @@ fn is_private_key_begin(line: &str) -> bool {
 }
 
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
-    haystack.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
 }
 
 /// 剥除 ANSI CSI / OSC 转义序列。
@@ -367,7 +367,12 @@ fn mask_cli_password_once(line: &str) -> Option<String> {
     let lower: Vec<char> = chars.iter().flat_map(|c| c.to_lowercase()).collect();
 
     for flag in [
-        "--password=", "--passwd=", "--pass=", "--token=", "--api-key=", "--apikey=",
+        "--password=",
+        "--passwd=",
+        "--pass=",
+        "--token=",
+        "--api-key=",
+        "--apikey=",
     ] {
         let fb: Vec<char> = flag.chars().collect();
         if let Some(rel) = find_sub_chars(&lower, &fb) {
@@ -388,7 +393,10 @@ fn mask_cli_password_once(line: &str) -> Option<String> {
     // `-p<secret>` / `-p <secret>` 只有在使用方确实是接受口令的 CLI 时才启用，
     // 否则会把 `grep -pattern` 之类的普通参数当成口令打掉。
     let lower_str: String = lower.iter().collect();
-    if !MENTIONS_CREDENTIAL_CLI.iter().any(|c| lower_str.contains(*c)) {
+    if !MENTIONS_CREDENTIAL_CLI
+        .iter()
+        .any(|c| lower_str.contains(*c))
+    {
         return None;
     }
     let mut i = 0;
@@ -424,8 +432,19 @@ fn is_already_redacted(chars: &[char], start: usize, end: usize) -> bool {
 
 /// 接受明文口令参数的命令行工具
 const MENTIONS_CREDENTIAL_CLI: &[&str] = &[
-    "mysql", "mysqldump", "mysqladmin", "psql", "pg_dump", "redis-cli", "sshpass", "ldapsearch",
-    "ssh ", "scp ", "sftp ", "curl -u", "wget --password",
+    "mysql",
+    "mysqldump",
+    "mysqladmin",
+    "psql",
+    "pg_dump",
+    "redis-cli",
+    "sshpass",
+    "ldapsearch",
+    "ssh ",
+    "scp ",
+    "sftp ",
+    "curl -u",
+    "wget --password",
 ];
 
 fn find_sub_chars(hay: &[char], needle: &[char]) -> Option<usize> {
@@ -442,9 +461,14 @@ fn mask_public_key_blobs(line: &str) -> String {
         if lower.contains(prefix) {
             if let Some(rel) = lower.find(prefix) {
                 let value_start = rel + prefix.len();
-                let blob = line[value_start..].trim_start().split_whitespace().next().unwrap_or("");
+                let blob = line[value_start..]
+                    .trim_start()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
                 if looks_like_base64(blob) {
-                    let cut = value_start + (line[value_start..].len() - line[value_start..].trim_start().len());
+                    let cut = value_start
+                        + (line[value_start..].len() - line[value_start..].trim_start().len());
                     let mut out = line[..cut].to_string();
                     out.push_str(REDACTED);
                     return out;
@@ -456,7 +480,9 @@ fn mask_public_key_blobs(line: &str) -> String {
 }
 
 fn looks_like_base64(s: &str) -> bool {
-    s.len() >= 24 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' || b == b' ')
+    s.len() >= 24
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' || b == b' ')
 }
 
 #[cfg(test)]
@@ -481,7 +507,10 @@ mod tests {
     fn masks_key_value_assignments() {
         for case in [
             ("Password: hunter2", "hunter2"),
-            ("export API_KEY=sk-live-abcdef123456", "sk-live-abcdef123456"),
+            (
+                "export API_KEY=sk-live-abcdef123456",
+                "sk-live-abcdef123456",
+            ),
             ("client_secret = \"quoted-secret\"", "quoted-secret"),
             ("token: mytoken123 tail", "mytoken123"),
             ("\"password\":\"p@ssw0rd!\"", "p@ssw0rd!"),
@@ -518,13 +547,18 @@ mod tests {
     #[test]
     fn swallows_pem_private_key_block_across_chunks() {
         let mut r = LogRedactor::default();
-        let chunk1 = "before\ncat id_rsa\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n";
+        let chunk1 =
+            "before\ncat id_rsa\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n";
         let chunk2 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n-----END OPENSSH PRIVATE KEY-----\nafter\n";
         let out = format!("{}{}", r.push(chunk1), {
             let t = r.push(chunk2);
             t
         });
-        assert!(!out.contains("b3BlbnNzaC1rZXktdjEA"), "私钥正文泄漏: {}", out);
+        assert!(
+            !out.contains("b3BlbnNzaC1rZXktdjEA"),
+            "私钥正文泄漏: {}",
+            out
+        );
         assert!(!out.contains("AAAAAA"), "私钥正文泄漏: {}", out);
         assert!(out.contains("before"), "正常内容应保留: {}", out);
         assert!(out.contains("after"), "块结束后应恢复: {}", out);

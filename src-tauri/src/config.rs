@@ -162,6 +162,23 @@ pub struct TerminalSettings {
     /// 会话日志脱敏（P-4）。关闭会把原始输出落盘，仅在明确需要排障时开启。
     #[serde(default = "default_true")]
     pub log_redaction: bool,
+    /// 危险命令二次确认网关（P-2/P-1）。关闭后命令将不再拦截，仅作回退用途。
+    #[serde(default = "default_true")]
+    pub dangerous_command_guard: bool,
+    /// PTY 输出批处理窗口(毫秒)：窗口内的多个数据块合并成一次 IPC。
+    /// 设 0 回退为逐块下发（§5.7 回退开关），代价是高频 IPC/渲染。
+    #[serde(default = "default_pty_batch_window_ms")]
+    pub pty_batch_window_ms: u64,
+    /// 会话日志异步落盘（独立 task + 通道）。关闭后退化为"至多一次在途写"的近同步语义。
+    #[serde(default = "default_true")]
+    pub session_log_async: bool,
+    /// xterm WebGL 渲染器（T-3-7）。关闭、或运行时装不上/丢上下文，都会回退 DOM 渲染。
+    #[serde(default = "default_true")]
+    pub webgl_renderer: bool,
+}
+
+fn default_pty_batch_window_ms() -> u64 {
+    16
 }
 
 fn default_true() -> bool {
@@ -216,6 +233,10 @@ impl Default for TerminalSettings {
             strict_host_key: true,
             session_logging: true,
             log_redaction: true,
+            dangerous_command_guard: true,
+            pty_batch_window_ms: 16,
+            session_log_async: true,
+            webgl_renderer: true,
         }
     }
 }
@@ -274,6 +295,18 @@ pub fn restrict_private_dir(path: &std::path::Path) {
 #[cfg(not(unix))]
 pub fn restrict_private_dir(_path: &std::path::Path) {}
 
+/// `Z_TERMINAL_CONFIG_DIR` 是进程级环境变量，改它的测试必须全仓库串行（不只同文件内）。
+#[cfg(test)]
+pub(crate) static CONFIG_DIR_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 取串行锁；某个测试 panic 时不把 panic 扩散成其它测试的 PoisonError。
+#[cfg(test)]
+pub(crate) fn lock_config_dir_env() -> std::sync::MutexGuard<'static, ()> {
+    CONFIG_DIR_TEST_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// 配置文件路径
 pub fn get_config_path() -> PathBuf {
     get_config_dir().join("config.json")
@@ -291,7 +324,10 @@ pub fn load_config_raw() -> AppConfig {
     let path = get_config_path();
     match fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-            eprintln!("config.json 解析失败, 使用默认配置(原文件已保留在 backups/): {}", e);
+            eprintln!(
+                "config.json 解析失败, 使用默认配置(原文件已保留在 backups/): {}",
+                e
+            );
             AppConfig::default()
         }),
         Err(_) => AppConfig::default(),
@@ -341,7 +377,10 @@ pub fn has_plaintext_secrets(config: &AppConfig) -> bool {
         Some(s) if !s.is_empty() => crate::secret::needs_sealing_with(&key, s),
         _ => false,
     };
-    config.servers.iter().any(|s| plain(&s.password) || plain(&s.private_key))
+    config
+        .servers
+        .iter()
+        .any(|s| plain(&s.password) || plain(&s.private_key))
         || config
             .ai
             .as_ref()
@@ -389,8 +428,8 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     }
 
     // 2. 原子写入: 先写临时文件, 再 rename 覆盖
-    let content = serde_json::to_string_pretty(&sealed)
-        .map_err(|e| format!("序列化失败: {}", e))?;
+    let content =
+        serde_json::to_string_pretty(&sealed).map_err(|e| format!("序列化失败: {}", e))?;
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, &content).map_err(|e| format!("写入临时文件失败: {}", e))?;
     // config.json 含 SSH 凭证，必须 0600，否则同机任意用户可读（P-4）
@@ -431,11 +470,7 @@ fn backup_existing_config() {
     if let Ok(entries) = fs::read_dir(&backup_dir) {
         let mut backups: Vec<_> = entries
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("config_")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("config_"))
             .collect();
         backups.sort_by_key(|e| e.file_name());
         if backups.len() > 10 {
@@ -506,8 +541,8 @@ pub async fn restore_config_from_backup(backup_path: String) -> Result<String, S
     }
     // 验证备份文件可解析
     let content = fs::read_to_string(&backup).map_err(|e| format!("读取备份失败: {}", e))?;
-    let _parsed: AppConfig = serde_json::from_str(&content)
-        .map_err(|e| format!("备份格式损坏, 无法恢复: {}", e))?;
+    let _parsed: AppConfig =
+        serde_json::from_str(&content).map_err(|e| format!("备份格式损坏, 无法恢复: {}", e))?;
     // 原子替换当前 config
     let target = get_config_path();
     let tmp = target.with_extension("json.tmp");
@@ -522,27 +557,40 @@ pub async fn restore_config_from_backup(backup_path: String) -> Result<String, S
 /// 带凭证导出等于把堡垒机钥匙一起发出去。需要凭证时显式传 `include_secrets`。
 #[tauri::command]
 pub async fn export_config(path: String, include_secrets: Option<bool>) -> Result<String, String> {
-    // 用 raw(不解密)读取: 即使勾选含凭证, 导出的也是密文,
-    // 拿不到 master.key 就无法还原（P-4 / 4.5「含凭证须显式勾选 + 加密」）
-    let mut config = load_config_raw();
-    if !include_secrets.unwrap_or(false) {
-        for server in config.servers.iter_mut() {
-            server.password = None;
-            server.private_key = None;
+    let outcome: Result<String, String> = (|| {
+        // 用 raw(不解密)读取: 即使勾选含凭证, 导出的也是密文,
+        // 拿不到 master.key 就无法还原（P-4 / 4.5「含凭证须显式勾选 + 加密」）
+        let mut config = load_config_raw();
+        if !include_secrets.unwrap_or(false) {
+            for server in config.servers.iter_mut() {
+                server.password = None;
+                server.private_key = None;
+            }
+            if let Some(ai) = config.ai.as_mut() {
+                ai.api_key = None;
+            }
         }
-        if let Some(ai) = config.ai.as_mut() {
-            ai.api_key = None;
-        }
-    }
-    let content = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("序列化失败: {}", e))?;
-    fs::write(&path, content).map_err(|e| format!("写入失败: {}", e))?;
-    restrict_private(&std::path::PathBuf::from(&path));
-    Ok(if include_secrets.unwrap_or(false) {
-        "导出成功（凭证以密文保留，离开本机需连同主密钥才能还原）".into()
-    } else {
-        "导出成功（已剔除密码、私钥与 API Key）".into()
-    })
+        let content =
+            serde_json::to_string_pretty(&config).map_err(|e| format!("序列化失败: {}", e))?;
+        fs::write(&path, content).map_err(|e| format!("写入失败: {}", e))?;
+        restrict_private(&std::path::PathBuf::from(&path));
+        Ok(if include_secrets.unwrap_or(false) {
+            "导出成功（凭证以密文保留，离开本机需连同主密钥才能还原）".into()
+        } else {
+            "导出成功（已剔除密码、私钥与 API Key）".into()
+        })
+    })();
+    // 导出是合规上最需要留痕的动作：导到了哪、是否带凭证，失败也要记
+    crate::audit::record(
+        "export_config",
+        serde_json::json!({
+            "path": path,
+            "include_secrets": include_secrets.unwrap_or(false),
+            "success": outcome.is_ok(),
+            "error": outcome.as_ref().err(),
+        }),
+    );
+    outcome
 }
 
 /// 读取 AI 配置（apiKey 为解密后的明文，只存在于进程内）
@@ -578,7 +626,8 @@ pub async fn remove_host_key(host_spec: String) -> Result<usize, String> {
 #[tauri::command]
 pub async fn import_config(path: String) -> Result<AppConfig, String> {
     let content = fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
-    let config: AppConfig = serde_json::from_str(&content).map_err(|e| format!("解析失败: {}", e))?;
+    let config: AppConfig =
+        serde_json::from_str(&content).map_err(|e| format!("解析失败: {}", e))?;
     save_config(&config)?;
     Ok(config)
 }
@@ -650,13 +699,21 @@ pub async fn get_session_logs() -> Result<Vec<SessionLogEntry>, String> {
         if path.extension().and_then(|s| s.to_str()) != Some("log") {
             continue;
         }
-        let metadata = entry.metadata().map_err(|e| format!("读取文件元数据失败: {}", e))?;
-        let modified = metadata.modified().map_err(|e| format!("读取修改时间失败: {}", e))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("读取文件元数据失败: {}", e))?;
+        let modified = metadata
+            .modified()
+            .map_err(|e| format!("读取修改时间失败: {}", e))?;
         let modified_str: String = {
             let dt: chrono::DateTime<chrono::Local> = modified.into();
             dt.format("%Y-%m-%d %H:%M:%S").to_string()
         };
-        let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
         entries.push(SessionLogEntry {
             filename,
             path: path.to_string_lossy().to_string(),
@@ -675,8 +732,12 @@ pub async fn read_session_log(path: String) -> Result<String, String> {
     let path = PathBuf::from(&path);
     // 安全检查: 确保路径在日志目录内
     let log_dir = get_log_dir();
-    let canonical_path = path.canonicalize().map_err(|e| format!("路径无效: {}", e))?;
-    let canonical_log_dir = log_dir.canonicalize().map_err(|e| format!("日志目录无效: {}", e))?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|e| format!("路径无效: {}", e))?;
+    let canonical_log_dir = log_dir
+        .canonicalize()
+        .map_err(|e| format!("日志目录无效: {}", e))?;
     if !canonical_path.starts_with(&canonical_log_dir) {
         return Err("路径不在日志目录内".into());
     }
@@ -689,8 +750,12 @@ pub async fn delete_session_log(path: String) -> Result<(), String> {
     let path = PathBuf::from(&path);
     // 安全检查: 确保路径在日志目录内
     let log_dir = get_log_dir();
-    let canonical_path = path.canonicalize().map_err(|e| format!("路径无效: {}", e))?;
-    let canonical_log_dir = log_dir.canonicalize().map_err(|e| format!("日志目录无效: {}", e))?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|e| format!("路径无效: {}", e))?;
+    let canonical_log_dir = log_dir
+        .canonicalize()
+        .map_err(|e| format!("日志目录无效: {}", e))?;
     if !canonical_path.starts_with(&canonical_log_dir) {
         return Err("路径不在日志目录内".into());
     }
@@ -748,8 +813,59 @@ mod tests {
         assert_eq!(server.password.as_deref(), Some("test-password"));
     }
 
-    /// 落盘加密相关测试会改环境变量和临时目录, 必须串行
-    static FS_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// §5.7：新增的性能开关必须能读旧配置（缺字段走默认值），否则整份设置反序列化失败
+    #[test]
+    fn settings_fill_new_perf_fields_from_legacy_config() {
+        let settings: TerminalSettings = serde_json::from_value(json!({
+            "font_size": 12,
+            "font_family": "Menlo",
+            "theme": "dark",
+            "scrollback": 1000,
+            "cursor_blink": true,
+            "cursor_style": "bar",
+            "opacity": 0.9,
+            "bell": false,
+            "copy_on_select": true,
+            "right_click_paste": true,
+            "auto_reconnect": true,
+            "connection_timeout": 30
+        }))
+        .expect("旧设置快照应能继续读取");
+
+        assert_eq!(settings.pty_batch_window_ms, 16);
+        assert!(settings.session_log_async);
+        assert!(settings.webgl_renderer);
+        assert!(settings.strict_host_key);
+        assert!(settings.dangerous_command_guard);
+    }
+
+    #[test]
+    fn settings_perf_fields_round_trip() {
+        let settings: TerminalSettings = serde_json::from_value(json!({
+            "font_size": 12,
+            "font_family": "Menlo",
+            "theme": "dark",
+            "scrollback": 1000,
+            "cursor_blink": true,
+            "cursor_style": "bar",
+            "opacity": 0.9,
+            "bell": false,
+            "copy_on_select": true,
+            "right_click_paste": true,
+            "auto_reconnect": true,
+            "connection_timeout": 30,
+            "pty_batch_window_ms": 0,
+            "session_log_async": false,
+            "webgl_renderer": false
+        }))
+        .expect("新字段应能读取");
+
+        assert_eq!(settings.pty_batch_window_ms, 0);
+        assert!(!settings.session_log_async);
+        assert!(!settings.webgl_renderer);
+    }
+
+    /// 落盘加密相关测试会改环境变量和临时目录, 必须串行（锁定义在模块级，跨文件共用）
 
     fn test_server(password: Option<&str>, private_key: Option<&str>) -> ServerConfig {
         ServerConfig {
@@ -788,7 +904,10 @@ mod tests {
 
     fn config_with(password: Option<&str>) -> AppConfig {
         let mut config = AppConfig::default();
-        config.servers = vec![test_server(password, Some("-----BEGIN PRIVATE KEY-----abc"))];
+        config.servers = vec![test_server(
+            password,
+            Some("-----BEGIN PRIVATE KEY-----abc"),
+        )];
         config.ai = Some(AiConfig {
             provider: "openai".into(),
             api_key: password.map(|_| "sk-secret-key".into()),
@@ -802,7 +921,7 @@ mod tests {
 
     #[test]
     fn credentials_are_sealed_at_rest_and_restored_on_load() {
-        let _guard = FS_GUARD.lock().unwrap();
+        let _guard = lock_config_dir_env();
         let dir = isolated_config_dir("seal");
 
         save_config(&config_with(Some("hunter2"))).expect("保存应成功");
@@ -838,7 +957,7 @@ mod tests {
 
     #[test]
     fn legacy_plaintext_config_is_migrated_by_harden_storage() {
-        let _guard = FS_GUARD.lock().unwrap();
+        let _guard = lock_config_dir_env();
         let dir = isolated_config_dir("migrate");
 
         // 绕过 save_config 直接序列化, 模拟旧版本写出的明文 config.json
@@ -869,7 +988,7 @@ mod tests {
 
     #[tokio::test]
     async fn export_never_writes_plaintext_credentials() {
-        let _guard = FS_GUARD.lock().unwrap();
+        let _guard = lock_config_dir_env();
         let dir = isolated_config_dir("export");
         save_config(&config_with(Some("export-pass"))).unwrap();
 
@@ -881,7 +1000,9 @@ mod tests {
         assert!(!stripped_raw.contains("export-pass"));
         assert!(!stripped_raw.contains("sk-secret-key"));
         assert_eq!(
-            serde_json::from_str::<AppConfig>(&stripped_raw).unwrap().servers[0]
+            serde_json::from_str::<AppConfig>(&stripped_raw)
+                .unwrap()
+                .servers[0]
                 .password,
             None
         );

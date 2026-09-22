@@ -1,207 +1,127 @@
+/**
+ * AI 数据面板（本机）
+ *
+ * 历史上这里是"Cloud Agent 云端同步"，实现只有 setTimeout + 「已同步到云端」提示，
+ * 没有任何网络请求 —— 属于对用户的虚假承诺（01 §E-4）。
+ * 现在改为如实展示：只列出保存在本机的 AI 相关数据，并明确说明云端同步未实现。
+ */
+
 import { useState, useEffect } from "react";
-import { Modal, Button, Typography, message, List, Badge } from "antd";
-import { CloudOutlined, SyncOutlined } from "@ant-design/icons";
+import { Modal, Alert, Typography, List, Button, message, Popconfirm } from "antd";
+import { DatabaseOutlined, DeleteOutlined } from "@ant-design/icons";
 
-const { Title, Text, Paragraph } = Typography;
+const { Text, Paragraph } = Typography;
 
-interface CloudSession {
-  id: string;
+interface LocalDataset {
+  key: string;
   title: string;
-  type: "chat" | "command" | "analysis" | "code";
-  lastActivity: string;
-  content: string;
-  synced: boolean;
+  detail: string;
+  bytes: number;
 }
 
-interface CloudAgentProps {
+/** 只读取已知存在的键，避免把无关 localStorage 内容暴露出来 */
+const LOCAL_KEYS: Array<{ key: string; title: string; detail: string }> = [
+  { key: "z-terminal:ai-chat-history", title: "AI 聊天记录", detail: "保存在本机浏览器的会话历史" },
+  { key: "z-terminal:snippets", title: "命令片段", detail: "含命令文本，不执行任何操作" },
+];
+
+interface Props {
   open: boolean;
   onClose: () => void;
 }
 
-export default function CloudAgent({ open, onClose }: CloudAgentProps) {
-  const [loading, setLoading] = useState(false);
-  const [sessions, setSessions] = useState<CloudSession[]>([]);
-  const [syncing, setSyncing] = useState(false);
+function readDatasets(): LocalDataset[] {
+  const out: LocalDataset[] = [];
+  for (const meta of LOCAL_KEYS) {
+    const raw = localStorage.getItem(meta.key);
+    if (!raw) continue;
+    out.push({ ...meta, bytes: new Blob([raw]).size });
+  }
+  return out;
+}
+
+export default function CloudAgent({ open, onClose }: Props) {
+  const [datasets, setDatasets] = useState<LocalDataset[]>([]);
 
   useEffect(() => {
-    if (open) {
-      // 加载本地历史记录作为"云端"会话
-      const savedChat = localStorage.getItem("z-terminal:ai-chat-history");
-      const savedConfig = localStorage.getItem("z-terminal:ai-config");
-      
-      const initialSessions: CloudSession[] = [];
-      
-      if (savedChat) {
-        initialSessions.push({
-          id: "chat-history",
-          title: "聊天记录",
-          type: "chat",
-          lastActivity: new Date().toLocaleString(),
-          content: savedChat,
-          synced: true,
-        });
-      }
-      
-      if (savedConfig) {
-        initialSessions.push({
-          id: "config",
-          title: "配置信息",
-          type: "command",
-          lastActivity: new Date().toLocaleString(),
-          content: savedConfig,
-          synced: true,
-        });
-      }
-      
-      setSessions(initialSessions);
-    }
+    if (open) setDatasets(readDatasets());
   }, [open]);
 
-  const syncToCloud = async () => {
-    setSyncing(true);
-    
-    try {
-      // 模拟同步到云端
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      setSessions(prev => prev.map(s => ({ ...s, synced: true })));
-      message.success("所有数据已同步到云端");
-      setSyncing(false);
-    } catch (error: any) {
-      console.error("Sync failed:", error);
-      message.error("同步失败: " + (error.message || "未知错误"));
-      setSyncing(false);
-    }
+  const removeDataset = (key: string) => {
+    localStorage.removeItem(key);
+    setDatasets(readDatasets());
+    message.success("已从本机删除");
   };
-
-  const syncSession = async (session: CloudSession) => {
-    setLoading(true);
-    
-    try {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      setSessions(prev => prev.map(s => 
-        s.id === session.id ? { ...s, synced: true } : s
-      ));
-      message.success(`${session.title} 已同步到云端`);
-      setLoading(false);
-    } catch (error: any) {
-      console.error("Sync failed:", error);
-      message.error("同步失败: " + (error.message || "未知错误"));
-      setLoading(false);
-    }
-  };
-
-  const getIconByType = (type: string) => {
-    switch (type) {
-      case "chat":
-        return <CloudOutlined style={{ color: "#1890ff" }} />;
-      case "command":
-        return <CloudOutlined style={{ color: "#52c41a" }} />;
-      case "analysis":
-        return <CloudOutlined style={{ color: "#faad14" }} />;
-      case "code":
-        return <CloudOutlined style={{ color: "#722ed1" }} />;
-      default:
-        return <CloudOutlined style={{ color: "#d9d9d9" }} />;
-    }
-  };
-
-  if (!open) return null;
 
   return (
     <Modal
       open={open}
       onCancel={onClose}
-      width={700}
+      width={640}
       footer={null}
-      styles={{
-        body: { padding: "24px" },
-      }}
+      title="AI 与终端数据（本机）"
+      styles={{ body: { padding: "16px 24px 24px" } }}
     >
-      <div style={{ textAlign: "center" }}>
-        <div style={{ width: 60, height: 60, borderRadius: "50%", background: "linear-gradient(135deg, #1890ff 0%, #0050b3 100%)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 24px" }}>
-          <CloudOutlined style={{ fontSize: 32, color: "#fff" }} />
-        </div>
-        <Title level={2} style={{ margin: "0 0 16px" }}>Cloud Agent 云端同步</Title>
-        <Paragraph type="secondary" style={{ marginBottom: "24px" }}>
-          将 AI 会话、命令和配置同步到云端，实现多设备同步
-        </Paragraph>
-
-        <div style={{ display: "flex", gap: "8px", justifyContent: "center", marginBottom: "24px" }}>
-          <Button
-            type="primary"
-            icon={syncing ? <SyncOutlined spin /> : <SyncOutlined />}
-            onClick={syncToCloud}
-            loading={syncing}
-            disabled={sessions.length === 0}
-          >
-            {syncing ? "同步中..." : "全部同步到云端"}
-          </Button>
-        </div>
-
-        {sessions.length > 0 ? (
-          <List
-            itemLayout="horizontal"
-            dataSource={sessions}
-            renderItem={(session) => (
-              <List.Item
-                actions={[
-                  <Button
-                    key="sync"
-                    size="small"
-                    type="link"
-                    onClick={() => syncSession(session)}
-                    loading={loading && sessions.find(s => s.id === session.id)?.synced === false}
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="云端同步未实现"
+        description="下列数据只存在你这台机器的本地存储里，不会上传到任何服务器；应用内也没有任何「同步到云端」的能力。需要迁移请用「设置 → 备份与恢复」。"
+      />
+      {datasets.length > 0 ? (
+        <List
+          dataSource={datasets}
+          renderItem={(item) => (
+            <List.Item
+              actions={[
+                <Popconfirm
+                  key="del"
+                  title="删除本机保存的这份数据？"
+                  description="删除后不可恢复"
+                  okText="删除"
+                  cancelText="取消"
+                  onConfirm={() => removeDataset(item.key)}
+                >
+                  <Button size="small" type="text" danger icon={<DeleteOutlined />}>
+                    删除
+                  </Button>
+                </Popconfirm>,
+              ]}
+            >
+              <List.Item.Meta
+                avatar={
+                  <div
+                    style={{
+                      width: 40,
+                      height: 40,
+                      borderRadius: 8,
+                      background: "rgba(127,127,127,0.12)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
                   >
-                    {session.synced ? "已同步" : "同步"}
-                  </Button>,
-                ]}
-              >
-                <List.Item.Meta
-                  avatar={
-                    <Badge dot={!session.synced}>
-                      <div style={{ width: 40, height: 40, borderRadius: "8px", background: "#f0f0f0", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                        {getIconByType(session.type)}
-                      </div>
-                    </Badge>
-                  }
-                  title={
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                      <Text strong>{session.title}</Text>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {session.type === "chat" ? "💬 聊天记录" : session.type === "command" ? "💻 命令历史" : session.type === "analysis" ? "📊 错误分析" : "📝 代码片段"}
-                      </Text>
-                    </div>
-                  }
-                  description={
-                    <Text type="secondary" style={{ fontSize: 13 }}>
-                      最后活动: {session.lastActivity}
-                    </Text>
-                  }
-                />
-              </List.Item>
-            )}
-          />
-        ) : (
-          <div style={{ textAlign: "center", padding: "40px", color: "#999" }}>
-            <CloudOutlined style={{ fontSize: 48, marginBottom: "16px", opacity: 0.3 }} />
-            <Paragraph>暂无数据，开始使用 AI 功能后数据将自动保存</Paragraph>
-          </div>
-        )}
-
-        <div style={{ background: "#e6f7ff", padding: "16px", borderRadius: "8px", marginTop: "24px" }}>
-          <Title level={5} style={{ margin: "0 0 8px 0", color: "#1890ff" }}>
-            💡 使用提示
-          </Title>
-          <ul style={{ margin: 0, paddingLeft: "20px", fontSize: 13, color: "#555" }}>
-            <li>所有 AI 聊天记录会自动保存到本地</li>
-            <li>点击"同步"按钮可将数据保存到云端</li>
-            <li>云端数据支持多设备同步</li>
-            <li>配置信息也会同步，确保一致性</li>
-          </ul>
+                    <DatabaseOutlined />
+                  </div>
+                }
+                title={<Text strong>{item.title}</Text>}
+                description={
+                  <Text type="secondary" style={{ fontSize: 13 }}>
+                    {item.detail} · {(item.bytes / 1024).toFixed(1)} KB · 键名 {item.key}
+                  </Text>
+                }
+              />
+            </List.Item>
+          )}
+        />
+      ) : (
+        <div style={{ textAlign: "center", padding: "32px 0", color: "#999" }}>
+          <Paragraph type="secondary" style={{ margin: 0 }}>
+            本机暂无已保存的 AI 数据
+          </Paragraph>
         </div>
-      </div>
+      )}
     </Modal>
   );
 }

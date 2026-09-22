@@ -3,7 +3,7 @@ import { Modal, Button, Typography, message, Tabs, Tag } from "antd";
 import { CodeOutlined, BulbOutlined } from "@ant-design/icons";
 import type { AIMessage } from "../types/ai";
 import { useAIStore } from "../stores/aiStore";
-import { createAIClient } from "../services/aiClient";
+import { createAIClient, parseJsonReply } from "../services/aiClient";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -38,7 +38,8 @@ export default function AICodeEditor({ open, onClose, code, language, onCodeUpda
   }, [open, code]);
 
   const generateSuggestions = async () => {
-    if (!code.trim() || !config.apiKey) {
+    // 分析对象用编辑区的内容：原来读的是外部 code 属性，用户在编辑区改了什么都不生效
+    if (!editCode.trim() || !config.apiKey) {
       message.warning("请输入代码并配置 API Key");
       return;
     }
@@ -47,7 +48,7 @@ export default function AICodeEditor({ open, onClose, code, language, onCodeUpda
 
     try {
       const client = createAIClient(config);
-      const prompt = `分析以下${language}代码，并提供3-5个改进建议（重构、优化、修复、改进）。\n\n代码：\`\`\`${language}\n${code}\n\`\`\`\n\n请以JSON格式输出：\n[\n  {\n    "id": "suggestion-1",\n    "type": "refactor|optimize|fix|improve",\n    "title": "建议标题",\n    "description": "详细描述",\n    "code": "修改后的代码片段"\n  }\n]`;
+      const prompt = `分析以下${language}代码，并提供3-5个改进建议（重构、优化、修复、改进）。\n\n代码：\`\`\`${language}\n${editCode}\n\`\`\`\n\n请以JSON格式输出：\n[\n  {\n    "id": "suggestion-1",\n    "type": "refactor|optimize|fix|improve",\n    "title": "建议标题",\n    "description": "详细描述",\n    "code": "修改后的代码片段"\n  }\n]`;
       
       const messages: AIMessage[] = [
         { role: "system", content: "你是代码优化专家。提供具体、实用的改进建议。", timestamp: Date.now() },
@@ -55,7 +56,8 @@ export default function AICodeEditor({ open, onClose, code, language, onCodeUpda
       ];
 
       const response = await client.chat(messages, { temperature: 0.7, maxTokens: 3000 });
-      const result = typeof response === "string" ? JSON.parse(response) : [];
+      const result = parseJsonReply<CodeSuggestion[]>(response);
+      if (!Array.isArray(result)) throw new Error("模型没有返回建议列表");
       
       setSuggestions(result);
       setLoading(false);
@@ -67,9 +69,9 @@ export default function AICodeEditor({ open, onClose, code, language, onCodeUpda
   };
 
   const applySuggestion = (suggestion: CodeSuggestion) => {
-    // 这里可以实现更复杂的代码合并逻辑
-    message.success(`已应用建议: ${suggestion.title}`);
-    // 暂时只展示消息，实际应用需要更复杂的代码合并
+    // 此前只弹一句"已应用建议"，编辑区一个字都没改
+    setEditCode(suggestion.code);
+    message.success(`已套用建议: ${suggestion.title}`);
   };
 
   const handleUpdateCode = () => {
@@ -149,7 +151,7 @@ export default function AICodeEditor({ open, onClose, code, language, onCodeUpda
                   icon={<BulbOutlined />}
                   onClick={generateSuggestions}
                   loading={loading}
-                  disabled={!code.trim() || !config.apiKey}
+                  disabled={!editCode.trim() || !config.apiKey}
                 >
                   {loading ? "生成建议中..." : "生成改进建议"}
                 </Button>

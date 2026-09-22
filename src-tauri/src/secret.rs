@@ -68,8 +68,7 @@ fn cached_master_key() -> Result<[u8; KEY_LEN], String> {
 
 /// 用指定密钥加密(测试可注入密钥, 避免碰真实文件)
 pub fn encrypt_with(key: &[u8; KEY_LEN], plain: &str) -> Result<String, String> {
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| format!("初始化加密器失败: {}", e))?;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| format!("初始化加密器失败: {}", e))?;
     let mut nonce = [0u8; NONCE_LEN];
     getrandom::getrandom(&mut nonce).map_err(|e| format!("生成随机数失败: {}", e))?;
 
@@ -100,8 +99,7 @@ pub fn decrypt_with(key: &[u8; KEY_LEN], value: &str) -> Result<String, String> 
     }
     let (nonce, body) = raw.split_at(NONCE_LEN);
 
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| format!("初始化解密器失败: {}", e))?;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| format!("初始化解密器失败: {}", e))?;
     let plain = cipher
         .decrypt(Nonce::from_slice(nonce), body)
         .map_err(|_| "解密失败(主密钥可能已丢失或与密文不匹配)".to_string())?;
@@ -133,7 +131,10 @@ pub fn open_opt(key: &[u8; KEY_LEN], value: &Option<String>) -> Option<String> {
         Some(v) if is_encrypted(v) => match decrypt_with(key, v) {
             Ok(plain) => Some(plain),
             Err(e) => {
-                eprintln!("凭证解密失败, 已按未配置处理: {}。请在设置里重新输入密码/私钥", e);
+                eprintln!(
+                    "凭证解密失败, 已按未配置处理: {}。请在设置里重新输入密码/私钥",
+                    e
+                );
                 None
             }
         },
@@ -188,7 +189,10 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
         let tampered = format!("{}{}", ENC_PREFIX, data_encoding::BASE64.encode(&bytes));
-        assert!(decrypt_with(&key, &tampered).is_err(), "GCM 认证标签应拦下篡改");
+        assert!(
+            decrypt_with(&key, &tampered).is_err(),
+            "GCM 认证标签应拦下篡改"
+        );
     }
 
     #[test]

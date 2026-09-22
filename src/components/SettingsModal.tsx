@@ -1,7 +1,8 @@
 import { Modal, Form, InputNumber, Select, Switch, Input, Slider, message, Button, Space, Tabs, Empty, Spin, Popconfirm, Typography } from "antd";
 import { useServerStore } from "../stores/serverStore";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { exportAuditLog, fetchAuditRecords } from "../services/auditLog";
 import { useState, useEffect } from "react";
 import { ReloadOutlined, UndoOutlined, FolderOpenOutlined } from "@ant-design/icons";
 
@@ -271,6 +272,90 @@ export default function SettingsModal({ open, onClose }: Props) {
             ),
           },
           {
+            key: "performance",
+            label: "性能",
+            children: (
+              <Form layout="vertical" style={{ marginTop: 4 }}>
+                <Form.Item
+                  label="输出批处理窗口(毫秒)"
+                  extra="窗口内到达的多个数据块合并成一次 IPC，刷屏时明显降低渲染开销；交互延迟最多增加该值。0 表示关闭合并（回退开关）。新建连接后生效"
+                >
+                  <InputNumber
+                    min={0}
+                    max={250}
+                    step={4}
+                    value={settings.pty_batch_window_ms ?? 16}
+                    onChange={(v) => v !== null && updateSettings({ pty_batch_window_ms: v })}
+                  />
+                </Form.Item>
+                <Form.Item
+                  label="WebGL 渲染"
+                  extra="用 GPU 绘制终端字符，刷屏时更省主线程。装不上或显卡上下文丢失会自动退回 DOM 渲染，不会留下空白终端。新建连接后生效"
+                >
+                  <Switch
+                    checked={settings.webgl_renderer !== false}
+                    onChange={(v) => updateSettings({ webgl_renderer: v })}
+                  />
+                </Form.Item>
+              </Form>
+            ),
+          },
+          {
+            key: "security",
+            label: "安全",
+            children: (
+              <Form layout="vertical" style={{ marginTop: 4 }}>
+                <Form.Item
+                  label="危险命令二次确认"
+                  extra="手输、Snippet、批量执行、AI 生成的命令命中危险规则时会弹出确认并列出受影响主机；AI 来源的命令要求逐字输入确认文本。关闭后不再拦截（不建议）"
+                >
+                  <Switch
+                    checked={settings.dangerous_command_guard !== false}
+                    onChange={(v) => updateSettings({ dangerous_command_guard: v })}
+                  />
+                </Form.Item>
+                <Form.Item
+                  label="严格主机密钥校验"
+                  extra="首次连接需确认指纹，指纹变化直接拒绝，防中间人。关闭即回退为自动接受"
+                >
+                  <Switch
+                    checked={settings.strict_host_key !== false}
+                    onChange={(v) => updateSettings({ strict_host_key: v })}
+                  />
+                </Form.Item>
+                <Form.Item label="会话日志" extra="记录终端原文，便于事后回溯">
+                  <Switch
+                    checked={settings.session_logging !== false}
+                    onChange={(v) => updateSettings({ session_logging: v })}
+                  />
+                </Form.Item>
+                <Form.Item
+                  label="会话日志异步落盘"
+                  extra="日志写盘交给独立任务，慢盘不会拖住终端输出。关闭后退化为同步语义（每条日志刷盘后才继续）"
+                >
+                  <Switch
+                    checked={settings.session_log_async !== false}
+                    onChange={(v) => updateSettings({ session_log_async: v })}
+                  />
+                </Form.Item>
+                <Form.Item
+                  label="日志脱敏"
+                  extra="把口令、私钥、API Key 等从会话日志里替换掉。关闭会把原文落盘，仅排障时临时使用"
+                >
+                  <Switch
+                    checked={settings.log_redaction !== false}
+                    onChange={(v) => updateSettings({ log_redaction: v })}
+                  />
+                </Form.Item>
+              </Form>
+            ),
+          },
+          {
+            key: "audit",
+            label: "审计日志",
+            children: <AuditTab />,
+          },
+          {
             key: "backup",
             label: "备份与恢复",
             children: <BackupTab />,
@@ -278,6 +363,149 @@ export default function SettingsModal({ open, onClose }: Props) {
         ]}
       />
     </Modal>
+  );
+}
+
+/** 审计动作 → 中文说明；未登记的动作原样显示，避免加了新记录点却看不见 */
+const AUDIT_LABELS: Record<string, string> = {
+  ssh_connect: "连接服务器",
+  ssh_connect_via_jump: "跳板连接",
+  ssh_disconnect: "断开连接",
+  ssh_execute: "命令执行",
+  host_key: "主机密钥决策",
+  dangerous_command_decision: "危险命令确认",
+  command_gate_bypassed: "网关已关闭",
+  export_config: "导出配置",
+  save_key_file: "私钥落盘",
+  audit_export: "导出审计",
+  ai_command_suggested: "AI 命令填入",
+};
+
+interface AuditRecord {
+  ts?: string;
+  action?: string;
+  [key: string]: unknown;
+}
+
+function auditSummary(record: AuditRecord): string {
+  const host =
+    typeof record.host === "string"
+      ? record.host
+      : typeof record.host_spec === "string"
+        ? record.host_spec
+        : "";
+  const command = typeof record.command === "string" ? record.command : "";
+  return [host, command].filter(Boolean).join(" · ") || "-";
+}
+
+function auditOutcome(record: AuditRecord): string {
+  if (typeof record.approved === "boolean") return record.approved ? "已放行" : "已拒绝";
+  if (typeof record.success === "boolean") return record.success ? "成功" : "失败";
+  if (typeof record.decision === "string") return record.decision;
+  return "-";
+}
+
+function AuditTab() {
+  const [records, setRecords] = useState<AuditRecord[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      setRecords(await fetchAuditRecords(100));
+    } catch (e) {
+      message.error("读取审计日志失败: " + e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const exportTo = async (format: "csv" | "json") => {
+    try {
+      const path = await saveDialog({
+        title: `导出审计日志（${format}）`,
+        defaultPath: `z-terminal-audit.${format}`,
+        filters: [{ name: format.toUpperCase(), extensions: [format] }],
+      });
+      if (!path) return;
+      message.success(await exportAuditLog(path, format));
+    } catch (e) {
+      message.error("导出失败: " + e);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div
+        style={{
+          marginBottom: 12,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          只追加、已脱敏；记录连接、命令下发与危险命令确认/拒绝，最多保留两代
+        </Typography.Text>
+        <Space>
+          <Button size="small" onClick={() => exportTo("csv")}>
+            导出 CSV
+          </Button>
+          <Button size="small" onClick={() => exportTo("json")}>
+            导出 JSON
+          </Button>
+          <Button size="small" icon={<ReloadOutlined />} onClick={load}>
+            刷新
+          </Button>
+        </Space>
+      </div>
+      {loading ? (
+        <div style={{ textAlign: "center", padding: 24 }}>
+          <Spin />
+        </div>
+      ) : records.length === 0 ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无审计记录" style={{ padding: 24 }} />
+      ) : (
+        <div
+          style={{
+            border: "1px solid #f0f0f0",
+            borderRadius: 6,
+            maxHeight: 360,
+            overflowY: "auto",
+          }}
+        >
+          {records.map((record, index) => (
+            <div
+              key={`${record.ts ?? ""}-${index}`}
+              style={{
+                display: "flex",
+                gap: 8,
+                padding: "6px 10px",
+                fontSize: 12,
+                borderBottom: "1px solid #f5f5f5",
+              }}
+            >
+              <Typography.Text type="secondary" style={{ flex: "0 0 150px" }}>
+                {record.ts ?? "-"}
+              </Typography.Text>
+              <Typography.Text style={{ flex: "0 0 110px" }}>
+                {AUDIT_LABELS[record.action ?? ""] ?? record.action}
+              </Typography.Text>
+              <Typography.Text style={{ flex: 1, wordBreak: "break-all" }}>
+                {auditSummary(record)}
+              </Typography.Text>
+              <Typography.Text type="warning" style={{ flex: "0 0 60px", textAlign: "right" }}>
+                {auditOutcome(record)}
+              </Typography.Text>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -325,8 +553,10 @@ function BackupTab() {
 
   const openConfigDir = async () => {
     try {
-      const { open } = await import("@tauri-apps/plugin-shell");
-      await open("~/.z-terminal");
+      const { homeDir } = await import("@tauri-apps/api/path");
+      const home = (await homeDir()).replace(/[/\\]+$/, "");
+      // shell 插件的 open 只放行 mailto/tel/http(s)，目录要走后端的白名单打开口
+      await invoke("open_file_with_default_app", { path: `${home}/.z-terminal` });
     } catch (e) {
       message.error("打开目录失败: " + e);
     }

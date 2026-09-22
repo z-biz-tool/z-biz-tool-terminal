@@ -3,7 +3,6 @@ import { Modal, Select, Input, Button, Space, message, theme, Typography } from 
 import { KeyOutlined, CopyOutlined, SaveOutlined, FolderOpenOutlined } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { writeFile, mkdir, exists } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
 
 const { TextArea } = Input;
@@ -67,9 +66,9 @@ export default function KeyGenModal({ open, onClose }: Props) {
         filters: [{ name: "所有文件", extensions: ["*"] }],
       });
       if (filePath) {
-        const encoder = new TextEncoder();
-        await writeFile(filePath, encoder.encode(privateKey));
-        message.success("私钥已保存");
+        // 写盘交给后端：路径按白名单校验，权限固定 0600
+        await invoke("save_key_file", { path: filePath, content: privateKey });
+        message.success("私钥已保存（权限 0600）");
       }
     } catch (e) {
       message.error(`保存失败: ${e}`);
@@ -79,19 +78,14 @@ export default function KeyGenModal({ open, onClose }: Props) {
   const handleSaveToSshDir = async () => {
     try {
       const home = await homeDir();
-      const sshDir = `${home}.ssh`;
+      const sshDir = `${home.replace(/[/\\]+$/, "")}/.ssh`;
       const pubFileName = keyType === "ed25519" ? "id_ed25519.pub" : "id_rsa.pub";
       const privFileName = keyType === "ed25519" ? "id_ed25519" : "id_rsa";
 
-      // Ensure .ssh directory exists
-      if (!(await exists(sshDir))) {
-        await mkdir(sshDir);
-      }
-
-      const encoder = new TextEncoder();
-      await writeFile(`${sshDir}/${privFileName}`, encoder.encode(privateKey));
-      await writeFile(`${sshDir}/${pubFileName}`, encoder.encode(publicKey));
-      message.success(`密钥已保存到 ${sshDir}/`);
+      // .ssh 不存在时由后端以 0700 创建
+      await invoke("save_key_file", { path: `${sshDir}/${privFileName}`, content: privateKey });
+      await invoke("save_key_file", { path: `${sshDir}/${pubFileName}`, content: publicKey });
+      message.success(`密钥已保存到 ${sshDir}/（私钥 0600）`);
     } catch (e) {
       message.error(`保存到 ~/.ssh/ 失败: ${e}`);
     }

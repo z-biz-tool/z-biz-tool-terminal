@@ -50,8 +50,7 @@ export default function AINaturalLanguageCommand({ open, onClose, onCommandGener
         message.success("命令已生成并复制到剪贴板！");
       });
 
-      // 调用回调
-      onCommandGenerated(command);
+      // 生成后不碰终端：是否落地由用户点"填入终端"决定（P-1）
 
     } catch (error: any) {
       console.error("Failed to generate command:", error);
@@ -112,11 +111,10 @@ export default function AINaturalLanguageCommand({ open, onClose, onCommandGener
                 复制
               </Button>
               <Button type="primary" onClick={() => {
-                navigator.clipboard.writeText(generatedCommand);
                 onCommandGenerated(generatedCommand);
                 onClose();
               }}>
-                发送到终端
+                填入终端（不自动执行）
               </Button>
             </div>
           </div>

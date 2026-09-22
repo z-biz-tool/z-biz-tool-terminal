@@ -1,0 +1,69 @@
+name: CI
+
+# 与 build.yml 分离：build.yml 只在打 tag 时产出安装包，
+# 这里守的是每次 push/PR 的最小可门禁（typecheck / 测试 / 编译）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # lockfile 里 z-biz-tool-shared 的 resolved 指向 npmmirror，保持一致
+      - name: Install dependencies
+        run: npm ci --registry=https://registry.npmmirror.com
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests (esbuild + node assertions)
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  backend:
+    # macOS runner 不需要 webkit2gtk 等系统依赖，编译最快；
+    # 跨平台产物仍由 build.yml 的四平台矩阵负责。
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Workaround: GitHub's new token format (2026-08) corrupts the cargo config
+      # that dtolnay/rust-toolchain writes; see build.yml.
+      - name: Reset broken cargo config
+        run: rm -f "$HOME/.cargo/config.toml"
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Tests
+        run: cargo test --lib
+
+      # 仓库存量 warning 未清零，先只做可见性不卡门禁；清零后改成 -D warnings
+      - name: Clippy (non-gating)
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -W warnings

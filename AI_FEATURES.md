@@ -1,217 +1,122 @@
 # z-terminal AI 功能实现说明
 
-## ✅ 已实现功能
+> 本文只写**代码里真实存在**的能力。凡是"未实现"的会直接标出来，不再用"云端同步""自动执行"这类
+> 描述给未落地的功能背书。实施进度与实测数字见 `doc/优化方案/07_实施进度.md`。
 
-### 1. **AI 服务配置管理**
-- 支持多种 AI 提供商：OpenAI、Claude、Gemini、Ollama
-- 用户自定义配置：API Key、Base URL、模型名称、温度参数
-- 配置持久化存储到 localStorage
-
-### 2. **AI 对话助手面板** (Ctrl+Shift+I / Cmd+Shift+I)
-- 侧边栏滑出式设计
-- 实时流式对话界面
-- 支持多轮对话和上下文记忆（最近 20 条消息）
-- Markdown 渲染和代码高亮
-- 自动滚动和智能流式渲染
-- 聊天历史持久化存储
-
-### 3. **AI 命令解释功能** (Ctrl+Shift+E)
-- 选中命令后按快捷键即可解释
-- 展示：功能描述、参数说明、使用示例、注意事项
-- 自动分析命令结构和用法
-
-### 4. **AI 错误分析功能** (Ctrl+Shift+A)
-- 提供错误原因分析和解决方案
-- 给出预防措施建议
-- 智能诊断和修复建议
-
-### 5. **自然语言转命令** (Shift+3)
-- Warp 风格的悬浮窗设计
-- 输入自然语言 → 生成 Shell 命令
-- 自动复制到剪贴板
-- "发送到终端"功能
-
-### 6. **AI 代码编辑和重构** (Ctrl+Shift+R)
-- 代码编辑器内置
-- AI 生成代码改进建议
-- 支持重构、优化、修复、改进类型
-- 建议预览和应用功能
-
-### 7. **Git 智能提交信息生成** (Ctrl+Shift+G)
-- 分析 Git diff 生成提交信息
-- 符合 Conventional Commits 规范
-- 支持主标题和详细描述
-- 自动复制到剪贴板
-
-### 8. **多智能体并行协作** (Ctrl+Shift+C)
-- 架构师、开发者、测试员、审查员多个智能体
-- 并行执行不同任务
-- 进度条显示和状态跟踪
-- 综合报告生成
-
-### 9. **Cloud Agent 云端同步** (Ctrl+Shift+D)
-- 同步聊天记录、配置信息
-- 多设备数据同步
-- 进度显示和状态管理
-
-## 📁 文件结构
+## 架构
 
 ```
-z-biz-tool-terminal/src/
-├── types/
-│   └── ai.ts                    # AI 功能类型定义
-├── stores/
-│   └── aiStore.ts               # AI 状态管理 (Zustand)
+src/
+├── types/ai.ts                      # AIConfig / AIMessage / AIClient 契约
+├── stores/aiStore.ts                # zustand：配置 + 与后端加密存储的读写
 ├── services/
-│   └── aiClient.ts              # AI 客户端实现
-├── components/
-│   ├── AIChatModal.tsx          # AI 聊天助手面板
-│   ├── AICommandExplanation.tsx # 命令解释组件
-│   ├── AIErrorAnalysis.tsx      # 错误分析组件
-│   └── AINaturalLanguageCommand.tsx # 自然语言转命令
+│   ├── aiClient.ts                  # 四个 provider 客户端 + 流式解析
+│   └── terminalFeeds.ts             # 活跃终端的读(选区/最近输出)写(填入命令行)通道
+├── utils/markdown.tsx               # AI 回复的 Markdown 渲染
+└── components/
+    ├── AIChatModal.tsx              # 聊天助手（流式 + 停止）
+    ├── AICommandExplanation.tsx     # 命令解释
+    ├── AIErrorAnalysis.tsx          # 错误分析
+    ├── AINaturalLanguageCommand.tsx # 自然语言转命令
+    ├── AICodeEditor.tsx             # 代码建议
+    ├── AIGitCommit.tsx              # 提交信息生成
+    ├── AIMultiAgents.tsx            # 多角色并行提问
+    └── CloudAgent.tsx               # 本机 AI 数据面板（无云端）
 ```
 
-## 🎯 快捷键
+终端**不接入** `z-biz-tool-shared` 的 `AIManager`：共享包的 `AIConfig` 只有 `modelName`，且只实现了
+openai 一种传输，无法覆盖 claude/gemini/ollama/自建网关。因此 AI 客户端由终端自持，
+配置真源统一在后端 `config.json` 的 `ai` 段（内存里才有明文副本）。
 
-| 快捷键 | 功能 | 说明 |
-|--------|------|------|
-| `Ctrl+Shift+I` / `Cmd+Shift+I` | AI 聊天助手 | 打开 AI 对话面板 |
-| `Ctrl+Shift+E` | 命令解释 | 解释当前选中的命令 |
-| `Ctrl+Shift+A` | 错误分析 | 分析错误信息 |
-| `Shift+3` | 自然语言转命令 | 将自然语言转换为 Shell 命令 |
-| `Ctrl+Shift+R` | AI 代码编辑 | 代码编辑和重构建议 |
-| `Ctrl+Shift+G` | Git 提交信息 | 生成 Git 提交信息 |
-| `Ctrl+Shift+C` | 多智能体协作 | 并行执行复杂任务 |
-| `Ctrl+Shift+D` | Cloud Agent | 云端数据同步 |
+## 传输层（services/aiClient.ts）
 
-## 🔧 使用方法
+| Provider | Endpoint | 鉴权 | 流式协议 |
+|----------|----------|------|----------|
+| openai / custom | `{baseUrl}/chat/completions` | `Authorization: Bearer` | SSE `data:` |
+| claude | `{baseUrl}/messages` | `x-api-key` + `anthropic-version` + `anthropic-dangerous-direct-browser-access` | SSE，只取 `content_block_delta` |
+| gemini | `{baseUrl}/v1beta/models/{model}:generateContent`（流式改 `:streamGenerateContent?alt=sse`） | `x-goog-api-key` | SSE |
+| ollama | `{baseUrl}/api/chat` | 无 | NDJSON（裸 JSON 行） |
 
-### 1. 首次使用配置 API Key
-1. 点击界面右上角的 **AI** 按钮
-2. 在设置中选择 AI 提供商
-3. 输入 API Key
-4. 选择模型名称
+要点：
 
-### 2. 使用 AI 聊天助手
-1. 按 `Ctrl+Shift+I` 或点击 AI 按钮
-2. 在输入框中输入问题
-3. 按 Enter 发送，Shift+Enter 换行
-4. 支持 Markdown 格式输出
+- **API Key 一律走 header**，不拼进 URL —— query 会落进网关/服务端访问日志（P-4）。
+- **流式按行重组**：一条事件被拆到多个网络包时不会丢字；坏 JSON / 心跳行跳过而不是中断整轮。
+- **停止是真的中止**：`AbortSignal` 透传给 `fetch`，中断后已产出的文本保留，不追加空气泡。
+- **结构化输出容错**：模型常把 JSON 包在 ```` ```json ```` 围栏里或前后加客套话，`parseJsonReply`
+  负责剥壳，对象和数组都能取；真的解析不出来就明确报错，不猜一个默认值。
+- 切换 provider 会同步换 `baseUrl`/`model` 预设；用户手填过的非默认值保留。`custom` 不填
+  `baseUrl` 时直接报错，不再发 `undefined/chat/completions`。
 
-### 3. 解释命令
-1. 在终端中选中要解释的命令
-2. 按 `Ctrl+Shift+E`
-3. 查看 AI 分析结果
+## 已实现功能
 
-### 4. 错误分析
-1. 在终端中选中错误信息
-2. 按 `Ctrl+Shift+A`
-3. 查看 AI 的诊断和解决方案
+### 1. AI 聊天助手（`Ctrl+Shift+I`）
+流式输出（按帧合并增量后落一次 state），停止按钮真正断开请求，多轮上下文取最近 20 条，
+Markdown 渲染，历史存 localStorage 并限制 200 条。
 
-### 5. 自然语言转命令
-1. 按 `Shift+3`
-2. 输入自然语言描述
-3. 自动复制到剪贴板
-4. 可选择"发送到终端"
+### 2. 命令解释（`Ctrl+Shift+X`）/ 错误分析（`Ctrl+Shift+A`）
+分析对象来自**终端选区**（`terminalFeeds.activeSelection()`）：
+- 命令解释：没有选区时提示"先选中命令"，不打开空面板。
+- 错误分析：没选中则退化为分析屏幕上最近 60 行输出。
 
-## 💡 AI 模型推荐
+> 为什么不是 `Ctrl+Shift+E`：那条快捷键属于「切换 SFTP 面板」，在同一个 keydown 里先 return，
+> 原来的"命令解释"分支是永远走不到的死代码。
 
-### 免费/低成本方案
-- **Gemini**: https://aistudio.google.com/ (免费额度)
-- **OpenRouter**: https://openrouter.ai/ (多种模型)
-- **Groq**: https://console.groq.com/ (免费额度)
-- **Ollama**: 本地运行 (完全免费)
+### 3. 自然语言转命令（`Shift+3`）
+生成后**只填入命令行，不自动执行**（P-1）：文本经终端自己的输入通道写入，不带回车；
+用户按回车时由 `inputGuard` 按"AI 来源"升级为逐字确认（`confirm` 级命令一律升到 `block`）。
+剪贴板仍会复制一份。
 
-### 付费方案
-- **OpenAI GPT-4o-mini**: 性价比高
-- **Anthropic Claude 3.5 Sonnet**: 性能优秀
-- **Gemini 2.0 Flash**: Google 的最新模型
+### 4. 代码建议（`Ctrl+Shift+R`）
+分析对象是编辑区内容（不是打开瞬间的快照），"应用建议"会把建议代码写回编辑区；
+"更新代码"经同一条只填不执行的通道回填终端。
 
-## 📊 未来计划
+### 5. Git 提交信息（`Ctrl+Shift+G`）
+本应用不派生本地进程，**diff 需要粘贴**（终端选区作为初始值）。生成结果为空时直接报错，
+不再兜底成 "feat: 添加新功能" 这种与 diff 无关的假提交信息。"使用此提交信息" = 把标题+正文
+复制进剪贴板（此前它回调到一个空函数，点了没有任何效果）。
 
-### 第二阶段
-- [ ] 终端内代码编辑和重构
-- [ ] Git 智能提交 message 生成
-- [ ] 多智能体并行协作
+### 6. 多角色协作（`Ctrl+Shift+C`）
+架构师/开发者/测试员/审查员四个角色**并发**提问后再生成综合报告。这是同一模型的四个并行
+prompt，不是四个独立智能体运行时；任务描述在面板内输入。
 
-### 第三阶段
-- [ ] Cloud Agent 云端同步
-- [ ] 插件系统
-- [ ] 自定义 Prompt 模板
+### 7. AI 数据面板（`Ctrl+Shift+D`）
+展示并可删除本机 localStorage 里的聊天记录与快捷命令。**云端同步未实现**：
+原实现是 `setTimeout` 假装的进度条，现已删除并把标题/提示改成"本机数据"。
 
-## 🛠️ 开发说明
+## 凭证与日志
 
-### 运行项目
-```bash
-cd z-biz-tool-terminal
-npm run dev
-```
+- AI Key 以 AES-256-GCM 信封加密存进 `~/.z-terminal/config.json`（`enc:v1:` 前缀），
+  只在内存里持明文副本；密钥存 `~/.z-terminal/master.key`。
+- 会话日志脱敏由设置里的「日志脱敏」开关控制（默认开）；「会话日志」可整体关掉（P-4）。
+- 读取配置时若发现仍有明文凭证（`has_plaintext_secrets`），会就地加密回写，不再把明文留在盘上。
 
-### 构建项目
-```bash
-npm run build
-```
+## 快捷键
 
-### 代码结构说明
+| 快捷键 | 功能 |
+|--------|------|
+| `Ctrl/Cmd+Shift+I` | AI 聊天助手 |
+| `Ctrl/Cmd+Shift+X` | AI 命令解释（需先选中） |
+| `Ctrl/Cmd+Shift+A` | AI 错误分析 |
+| `Shift+3` | 自然语言转命令 |
+| `Ctrl/Cmd+Shift+R` | 代码建议 |
+| `Ctrl/Cmd+Shift+G` | Git 提交信息 |
+| `Ctrl/Cmd+Shift+C` | 多角色协作 |
+| `Ctrl/Cmd+Shift+D` | AI 数据（本机） |
 
-#### aiClient.ts
-实现了多个 AI 提供商的客户端：
-- `OpenAIClient`: OpenAI GPT 系列
-- `ClaudeClient`: Anthropic Claude 系列
-- `GeminiClient`: Google Gemini 系列
-- `OllamaClient`: 本地 Ollama 模型
+## 未实现 / 已知边界
 
-每个客户端实现了：
-- `chat()`: 基础聊天功能
-- `explainCommand()`: 命令解释
-- `analyzeError()`: 错误分析
-- `commandFromNaturalLanguage()`: 自然语言转命令
+- **云端同步**（含多设备同步）：没有服务端，也没有实现，UI 已改为如实描述。
+- **本地 PTY / 本地命令执行**：本应用的"终端"是 russh 的**远程** shell 通道，AI 不直接执行任何命令。
+- 工具调用 / function calling：无。所有 AI 能力都是单轮或 few-shot 文本请求。
+- 请求限流与用量统计：无。多角色协作是 5 次请求（4 角色 + 1 汇总），成本由用户自行承担。
+- 图片/文件输入：无。
 
-#### aiStore.ts
-使用 Zustand 管理 AI 状态：
-- `config`: AI 配置
-- `setConfig()`: 设置完整配置
-- `updateConfig()`: 部分更新配置
+## 验证
 
-### 扩展新功能
-
-1. **添加新的 AI 功能**
-   - 在 `aiClient.ts` 中添加新的方法
-   - 在 `ai.ts` 中定义类型
-   - 在组件中调用
-
-2. **添加新的提供商**
-   - 继承 `AIClientBase`
-   - 实现 `buildRequestBody()` 和 `extractContent()`
-   - 在 `createAIClient()` 中注册
-
-3. **修改快捷键**
-   - 在 `App.tsx` 的 `handler` 中添加键盘事件
-   - 在 `ShortcutsModal.tsx` 中添加说明
-
-## 📝 注意事项
-
-1. API Key 安全存储：使用 AES-256-GCM 加密
-2. 请求限流：建议添加节流机制
-3. 错误处理：所有 AI 请求都有错误捕获
-4. 网络要求：需要网络连接（Ollama 除外）
-
-## 🎨 界面风格
-
-- 暗色主题为主，适配终端风格
-- 渐变色图标，美观大方
-- 响应式设计，适配不同屏幕
-- Unicode 图标增强视觉效果
-
-## 🔗 参考项目
-
-- Warp Terminal: https://www.warp.dev/
-- ssh-terminal: https://github.com/shenjianZ/ssh-terminal
-- Aider: https://aider.chat/
-- Cursor CLI: https://cursor.com/
-- Zed Terminal: https://zed.dev/
+`npm test`（零依赖：用 vite 自带的 esbuild 打包 `tests/*.test.ts` 后交 node 跑）。
+AI 传输层相关 23 例覆盖跨包拆分的 SSE 重组、四类协议解析、abort 语义、HTTP 错误、
+`parseJsonReply` 容错、key 不进 URL。数字见 `doc/优化方案/07_实施进度.md`。
 
 ---
 
-**最后更新**: 2026-09-01
-**版本**: v1.0.0
+**最后更新**: 2026-09-22（与代码同步；此前版本描述过多项不存在的能力）

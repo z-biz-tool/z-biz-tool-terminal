@@ -51,14 +51,26 @@ export interface ErrorAnalysis {
   预防措施?: string[];
 }
 
+/** 非流式对话参数 */
+export interface ChatOptions {
+  temperature?: number;
+  maxTokens?: number;
+}
+
+/** 流式对话参数 */
+export interface StreamOptions extends ChatOptions {
+  /** 中止信号：取消必须真的断开连接，而不是只改前端状态 */
+  signal?: AbortSignal;
+  onDelta?: (delta: string) => void;
+}
+
 /** AI 服务接口 */
 export interface AIClient {
-  chat: (messages: AIMessage[], options?: {
-    stream?: boolean;
-    temperature?: number;
-    maxTokens?: number;
-  }) => Promise<string | ReadableStream>;
-  
+  chat: (messages: AIMessage[], options?: ChatOptions) => Promise<string>;
+
+  /** 流式对话：逐段回调 delta，resolve 时为完整文本 */
+  chatStream: (messages: AIMessage[], options: StreamOptions) => Promise<string>;
+
   explainCommand: (command: string) => Promise<CommandExplanation>;
   
   analyzeError: (error: string) => Promise<ErrorAnalysis>;

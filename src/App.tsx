@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useAIStore } from "./stores/aiStore";
 import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message } from "antd";
 import type { MenuProps } from "antd";
-import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined, CloudOutlined } from "@ant-design/icons";
+import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined, DatabaseOutlined } from "@ant-design/icons";
 import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
@@ -22,12 +22,32 @@ import AIChatModal from "./components/AIChatModal";
 import AICommandExplanation from "./components/AICommandExplanation";
 import AIErrorAnalysis from "./components/AIErrorAnalysis";
 import AINaturalLanguageCommand from "./components/AINaturalLanguageCommand";
+import DangerConfirmHost from "./components/DangerConfirm";
+import HostKeyPrompt from "./components/HostKeyPrompt";
+import { activeRecentOutput, activeSelection, feedActiveTerminal } from "./services/terminalFeeds";
 import AICodeEditor from "./components/AICodeEditor";
 import AIGitCommit from "./components/AIGitCommit";
 import AIMultiAgents from "./components/AIMultiAgents";
 import CloudAgent from "./components/CloudAgent";
 import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
+import { auditEvent } from "./services/auditLog";
+import { commandGuard } from "./utils/commandGuard";
+
+/**
+ * AI 生成的命令只填入、不执行（P-1），但"AI 提议过什么"必须留痕（04 §4.9）。
+ * 真正的执行痕迹由网关与后端 ssh_execute 各自记录，这里只记来源。
+ */
+function auditAiFill(command: string, kind: string, filled: boolean) {
+  if (!command) return;
+  auditEvent("ai_command_suggested", {
+    command,
+    kind,
+    source: "ai",
+    filled,
+    guard_level: commandGuard(command, true).level,
+  });
+}
 
 function AppInner() {
   const { token } = theme.useToken();
@@ -70,6 +90,37 @@ function AppInner() {
   const [aiGitCommitOpen, setAiGitCommitOpen] = useState(false);
   const [aiMultiAgentsOpen, setAiMultiAgentsOpen] = useState(false);
   const [cloudAgentOpen, setCloudAgentOpen] = useState(false);
+  // AI 面板的分析对象：此前 mount 时硬编码成空串，五个面板打开后都是空白（T-2-3）
+  const [aiSubject, setAiSubject] = useState({ command: "", error: "", code: "", diff: "" });
+
+  // 快捷键与工具栏按钮共用同一组入口：先从活跃终端取选区，再打开面板
+  const openAiExplain = () => {
+    const selected = activeSelection();
+    if (!selected) {
+      message.info("请先在终端里选中要解释的命令");
+      return;
+    }
+    setAiSubject((s) => ({ ...s, command: selected }));
+    setAiCommandExpOpen(true);
+  };
+  const openAiError = () => {
+    // 没选中就退化成分析屏幕上最近 60 行输出：报错往往就是刚滚过去的那几行
+    const text = activeSelection() || activeRecentOutput(60);
+    if (!text) {
+      message.info("终端里还没有可分析的内容");
+      return;
+    }
+    setAiSubject((s) => ({ ...s, error: text }));
+    setAiErrorAnalysisOpen(true);
+  };
+  const openAiCode = () => {
+    setAiSubject((s) => ({ ...s, code: activeSelection() }));
+    setAiCodeEditorOpen(true);
+  };
+  const openAiGit = () => {
+    setAiSubject((s) => ({ ...s, diff: activeSelection() }));
+    setAiGitCommitOpen(true);
+  };
   const [currentTime, setCurrentTime] = useState(new Date());
   // SFTP 面板高度(px)
   const [sftpHeight, setSftpHeight] = useState(260);
@@ -181,17 +232,18 @@ function AppInner() {
         return;
       }
 
-      // Cmd/Ctrl + Shift + E - AI 命令解释
-      if (modKey && e.shiftKey && (e.key === "E" || e.key === "e")) {
+      // Cmd/Ctrl + Shift + X - AI 命令解释
+      // 不能用 Shift+E：那条已被 SFTP 面板占用（同一个 keydown 里前面的分支会先 return）
+      if (modKey && e.shiftKey && (e.key === "X" || e.key === "x")) {
         e.preventDefault();
-        setAiCommandExpOpen(true);
+        openAiExplain();
         return;
       }
 
       // Cmd/Ctrl + Shift + A - AI 错误分析
       if (modKey && e.shiftKey && (e.key === "A" || e.key === "a")) {
         e.preventDefault();
-        setAiErrorAnalysisOpen(true);
+        openAiError();
         return;
       }
 
@@ -205,14 +257,14 @@ function AppInner() {
       // Cmd/Ctrl + Shift + R - AI 代码编辑
       if (modKey && e.shiftKey && (e.key === "R" || e.key === "r")) {
         e.preventDefault();
-        setAiCodeEditorOpen(true);
+        openAiCode();
         return;
       }
 
-      // Cmd/Ctrl + Shift + G - AI Git 提交
+      // Cmd/Ctrl + Shift + G - AI Git 提交信息（在面板里粘贴 diff，选中内容作为初始值）
       if (modKey && e.shiftKey && (e.key === "G" || e.key === "g")) {
         e.preventDefault();
-        setAiGitCommitOpen(true);
+        openAiGit();
         return;
       }
 
@@ -223,7 +275,7 @@ function AppInner() {
         return;
       }
 
-      // Cmd/Ctrl + Shift + D - Cloud Agent
+      // Cmd/Ctrl + Shift + D - AI 数据面板（本机）
       if (modKey && e.shiftKey && (e.key === "D" || e.key === "d")) {
         e.preventDefault();
         setCloudAgentOpen(true);
@@ -617,12 +669,12 @@ function AppInner() {
           onClick={() => setAiChatOpen(true)}
         />
       </Tooltip>
-      <Tooltip title="AI 命令解释 (Ctrl+Shift+E)">
+      <Tooltip title="AI 命令解释 (Ctrl+Shift+X)">
         <Button
           size="small"
           type="text"
           icon={<CodeOutlined />}
-          onClick={() => setAiCommandExpOpen(true)}
+          onClick={openAiExplain}
         />
       </Tooltip>
       <Tooltip title="AI 错误分析 (Ctrl+Shift+A)">
@@ -630,7 +682,7 @@ function AppInner() {
           size="small"
           type="text"
           icon={<BugOutlined />}
-          onClick={() => setAiErrorAnalysisOpen(true)}
+          onClick={openAiError}
         />
       </Tooltip>
       <Tooltip title="自然语言转命令 (Shift+3)">
@@ -646,7 +698,7 @@ function AppInner() {
           size="small"
           type="text"
           icon={<ColumnWidthOutlined />}
-          onClick={() => setAiCodeEditorOpen(true)}
+          onClick={openAiCode}
         />
       </Tooltip>
       <Tooltip title="AI Git 提交 (Ctrl+Shift+G)">
@@ -654,7 +706,7 @@ function AppInner() {
           size="small"
           type="text"
           icon={<FolderOpenOutlined />}
-          onClick={() => setAiGitCommitOpen(true)}
+          onClick={openAiGit}
         />
       </Tooltip>
       <Tooltip title="多智能体协作 (Ctrl+Shift+C)">
@@ -665,11 +717,11 @@ function AppInner() {
           onClick={() => setAiMultiAgentsOpen(true)}
         />
       </Tooltip>
-      <Tooltip title="Cloud Agent (Ctrl+Shift+D)">
+      <Tooltip title="AI 数据（本机，无云端同步） (Ctrl+Shift+D)">
         <Button
           size="small"
           type="text"
-          icon={<CloudOutlined />}
+          icon={<DatabaseOutlined />}
           onClick={() => setCloudAgentOpen(true)}
         />
       </Tooltip>
@@ -961,13 +1013,43 @@ function AppInner() {
         onOpenLogs={() => setLogsOpen(true)}
       />
       <AIChatModal open={aiChatOpen} onClose={() => setAiChatOpen(false)} />
-      <AICommandExplanation open={aiCommandExpOpen} onClose={() => setAiCommandExpOpen(false)} command="" />
-      <AIErrorAnalysis open={aiErrorAnalysisOpen} onClose={() => setAiErrorAnalysisOpen(false)} error="" />
-      <AINaturalLanguageCommand open={aiNaturalLanguageOpen} onClose={() => setAiNaturalLanguageOpen(false)} onCommandGenerated={() => {}} />
-      <AICodeEditor open={aiCodeEditorOpen} onClose={() => setAiCodeEditorOpen(false)} code="" language="bash" onCodeUpdated={() => {}} />
-      <AIGitCommit open={aiGitCommitOpen} onClose={() => setAiGitCommitOpen(false)} diff="" onCommitMessageGenerated={() => {}} />
-      <AIMultiAgents open={aiMultiAgentsOpen} onClose={() => setAiMultiAgentsOpen(false)} task="" />
+      <AICommandExplanation open={aiCommandExpOpen} onClose={() => setAiCommandExpOpen(false)} command={aiSubject.command} />
+      <AIErrorAnalysis open={aiErrorAnalysisOpen} onClose={() => setAiErrorAnalysisOpen(false)} error={aiSubject.error} />
+      <AINaturalLanguageCommand
+        open={aiNaturalLanguageOpen}
+        onClose={() => setAiNaturalLanguageOpen(false)}
+        onCommandGenerated={(command) => {
+          // 只填入命令行、不带回车：AI 命令永不自动执行（P-1），
+          // 用户自己按回车时仍会过网关，并按 AI 来源升级为逐字确认。
+          const filled = feedActiveTerminal(command, { aiSource: true });
+          auditAiFill(command, "natural_language", filled);
+          if (filled) {
+            message.success("已填入活动终端命令行，未执行；确认无误后按回车");
+          } else {
+            message.warning("当前没有可用终端会话，命令已复制到剪贴板");
+          }
+        }}
+      />
+      <AICodeEditor
+        open={aiCodeEditorOpen}
+        onClose={() => setAiCodeEditorOpen(false)}
+        code={aiSubject.code}
+        language="bash"
+        onCodeUpdated={(code) => {
+          // 回填终端也只填不执行（P-1）
+          const filled = feedActiveTerminal(code, { aiSource: true });
+          auditAiFill(code, "code_editor", filled);
+          if (filled) message.success("已填入命令行，回车前会再确认");
+          else message.warning("没有可用终端，代码保留在编辑器里");
+        }}
+      />
+      <AIGitCommit open={aiGitCommitOpen} onClose={() => setAiGitCommitOpen(false)} diff={aiSubject.diff} />
+      <AIMultiAgents open={aiMultiAgentsOpen} onClose={() => setAiMultiAgentsOpen(false)} />
       <CloudAgent open={cloudAgentOpen} onClose={() => setCloudAgentOpen(false)} />
+      {/* 危险命令二次确认弹窗：手输/Snippet/批量/AI 四个下发口共用（P-2） */}
+      <DangerConfirmHost />
+      {/* known_hosts 首连确认与密钥变更告警（P0-1） */}
+      <HostKeyPrompt />
     </AppShell>
   );
 }

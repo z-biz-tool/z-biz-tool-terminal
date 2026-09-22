@@ -1,17 +1,23 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Modal, Button, Space, Tag, message, Input, Typography, Tabs } from "antd";
+import { Modal, Button, Space, Tag, message, Input, Tabs } from "antd";
 import type { TabsProps } from "antd";
 import { SendOutlined, StopOutlined, SettingOutlined, PlusOutlined, DeleteOutlined } from "@ant-design/icons";
-import type { AIMessage, AIConfig } from "../types/ai";
-import { useAIStore } from "../stores/aiStore";
+import type { AIMessage, AIConfig, AIProvider } from "../types/ai";
+import { useAIStore, withProvider } from "../stores/aiStore";
 import { createAIClient } from "../services/aiClient";
-
-const { Text } = Typography;
+import { renderMarkdown } from "../utils/markdown";
 
 interface AIChatModalProps {
   open: boolean;
   onClose: () => void;
 }
+
+const HISTORY_KEY = "z-terminal:ai-chat-history";
+/** 历史只留最近若干条：此前无上限，localStorage 会无限增长 */
+const MAX_HISTORY = 200;
+
+const SYSTEM_PROMPT =
+  "你是一个专业的终端助手，可以回答关于 Linux/Unix 命令、Shell 脚本、系统管理等方面的问题。请提供简洁、准确的答案。";
 
 export default function AIChatModal({ open, onClose }: AIChatModalProps) {
   const { config, updateConfig } = useAIStore();
@@ -21,7 +27,10 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
   const [showSettings, setShowSettings] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  
+  // 流式期间不能依赖闭包里的 messages：它始终是发送前那一刻的快照
+  const messagesRef = useRef<AIMessage[]>([]);
+  messagesRef.current = messages;
+
   // 切换到设置页面
   const handleShowSettings = () => setShowSettings(true);
   // 切换回聊天页面
@@ -31,7 +40,7 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
   useEffect(() => {
     if (open) {
       try {
-        const stored = localStorage.getItem("z-terminal:ai-chat-history");
+        const stored = localStorage.getItem(HISTORY_KEY);
         if (stored) {
           setMessages(JSON.parse(stored));
         }
@@ -48,8 +57,16 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
     }
   }, [messages, open]);
 
+  const persist = (list: AIMessage[]) => {
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(-MAX_HISTORY)));
+    } catch (e) {
+      console.error("Failed to persist chat history:", e);
+    }
+  };
+
   const handleSend = async () => {
-    if (!input.trim()) return;
+    if (!input.trim() || isGenerating) return;
 
     // 如果没有 API key，提示配置
     if (!config.apiKey) {
@@ -58,59 +75,68 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
       return;
     }
 
+    const context = messagesRef.current;
     const userMessage: AIMessage = {
       role: "user",
       content: input.trim(),
       timestamp: Date.now(),
     };
+    const conversation = [...context, userMessage];
+    // 系统提示每轮重新拼, 不进历史: 否则历史里会堆叠多条 system
+    const fullContext: AIMessage[] = [{ role: "system", content: SYSTEM_PROMPT, timestamp: 0 }, ...context.slice(-20), userMessage];
 
-    setMessages(prev => [...prev, userMessage]);
+    setMessages(conversation);
     setInput("");
     setIsGenerating(true);
+    persist(conversation);
 
-    // 创建 abort controller 用于取消请求
-    abortControllerRef.current = new AbortController();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    let streamed = "";
+    let scheduled = false;
+    const flush = () => {
+      scheduled = false;
+      setMessages((prev) => {
+        const next = [...prev];
+        next[next.length - 1] = { role: "assistant", content: streamed, timestamp: Date.now() };
+        return next;
+      });
+    };
+    // 按帧合并 delta：一个 token 一次 setState 会在长回复时把主线程打满
+    const onDelta = (delta: string) => {
+      streamed += delta;
+      if (!scheduled) {
+        scheduled = true;
+        requestAnimationFrame(flush);
+      }
+    };
+
+    // 先占一条空的 assistant 消息, 流式内容就地落到它上面
+    setMessages((prev) => [...prev, { role: "assistant", content: "", timestamp: Date.now() }]);
 
     try {
       const client = createAIClient(config);
-      
-      // 构建上下文（只保留最近 20 条消息）
-      const context = messages.slice(-20);
-      
-      // 添加系统提示
-      const systemMessage: AIMessage = {
-        role: "system",
-        content: "你是一个专业的终端助手，可以回答关于 Linux/Unix 命令、Shell 脚本、系统管理等方面的问题。请提供简洁、准确的答案。",
-        timestamp: Date.now(),
-      };
-      
-      const fullContext = [systemMessage, ...context];
-
-      const response = await client.chat(fullContext, {
-        stream: false,
+      await client.chatStream(fullContext, {
         temperature: config.temperature,
         maxTokens: config.maxTokens,
+        signal: controller.signal,
+        onDelta,
       });
-
-      const assistantMessage: AIMessage = {
-        role: "assistant",
-        content: response as string,
-        timestamp: Date.now(),
-      };
-
-      setMessages(prev => [...prev, assistantMessage]);
-      
-      // 保存到本地存储
-      localStorage.setItem("z-terminal:ai-chat-history", JSON.stringify([...messages, userMessage, assistantMessage]));
-
+      flush();
+      persist([...conversation, { role: "assistant", content: streamed, timestamp: Date.now() }]);
     } catch (error: any) {
-      console.error("AI chat error:", error);
-      const errorMessage: AIMessage = {
-        role: "assistant",
-        content: `❌ 错误: ${error.message || "未知错误"}`,
-        timestamp: Date.now(),
-      };
-      setMessages(prev => [...prev, errorMessage]);
+      const aborted = error?.name === "AbortError";
+      const suffix = aborted ? "已停止生成" : `❌ 错误: ${error?.message || "未知错误"}`;
+      if (!streamed && aborted) {
+        // 停止且一个字都没有：留一条空 AI 气泡没有意义
+        setMessages(conversation);
+      } else {
+        const content = streamed ? `${streamed}\n\n> ${suffix}` : suffix;
+        setMessages([...conversation, { role: "assistant", content, timestamp: Date.now() }]);
+        persist([...conversation, { role: "assistant", content, timestamp: Date.now() }]);
+      }
+      if (!aborted) console.error("AI chat error:", error);
     } finally {
       setIsGenerating(false);
       abortControllerRef.current = null;
@@ -118,15 +144,13 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
   };
 
   const handleStop = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      setIsGenerating(false);
-    }
+    // 此前只改前端状态, 请求仍在跑, 费用与 token 继续产生
+    abortControllerRef.current?.abort();
   };
 
   const handleClearHistory = () => {
     setMessages([]);
-    localStorage.removeItem("z-terminal:ai-chat-history");
+    localStorage.removeItem(HISTORY_KEY);
     message.success("聊天记录已清空");
   };
 
@@ -141,31 +165,6 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
     }
   };
 
-  const renderMessageContent = (content: string) => {
-    // 简单的 Markdown 解析
-    const lines = content.split("\n");
-    return lines.map((line, index) => {
-      if (line.startsWith("```")) {
-        // 代码块（简化处理）
-        const code = lines.slice(index + 1).join("\n").split("```")[0];
-        return (
-          <div key={index} style={{ background: "#1e1e1e", padding: "8px", borderRadius: "4px", fontFamily: "monospace", marginTop: "8px" }}>
-            <Text code>{code}</Text>
-          </div>
-        );
-      } else if (line.startsWith("# ")) {
-        return <h3 key={index} style={{ margin: "12px 0 8px", color: "#1890ff" }}>{line.replace("# ", "")}</h3>;
-      } else if (line.startsWith("## ")) {
-        return <h4 key={index} style={{ margin: "10px 0 6px", color: "#1890ff" }}>{line.replace("## ", "")}</h4>;
-      } else if (line.startsWith("- ") || line.startsWith("* ")) {
-        return <li key={index} style={{ marginLeft: "20px" }}>{line.replace(/[-*] /, "")}</li>;
-      } else if (line.trim() === "") {
-        return <br key={index} />;
-      } else {
-        return <p key={index} style={{ margin: "4px 0" }}>{line}</p>;
-      }
-    });
-  };
 
   const items: TabsProps["items"] = [
     {
@@ -219,7 +218,7 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
                       {msg.role === "user" ? "你" : "AI助手"} · {new Date(msg.timestamp).toLocaleTimeString()}
                     </div>
                     <div style={{ color: "#fff", lineHeight: 1.6 }}>
-                      {renderMessageContent(msg.content)}
+                      {renderMarkdown(msg.content, `m${index}`)}
                     </div>
                   </div>
                 </div>
@@ -250,7 +249,8 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
                 icon={isGenerating ? <StopOutlined /> : <SendOutlined />}
                 onClick={isGenerating ? handleStop : handleSend}
                 size="large"
-                disabled={!input.trim()}
+                // 生成中必须保持可点：此前 disabled 绑在输入框上, "停止"按钮永远点不动
+                disabled={isGenerating ? false : !input.trim()}
               >
                 {isGenerating ? "停止" : "发送"}
               </Button>
@@ -318,14 +318,14 @@ function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave:
       <div style={{ marginBottom: "16px" }}>
         <label style={{ display: "block", marginBottom: "8px", fontWeight: "bold" }}>AI 提供商</label>
         <Space direction="horizontal">
-          {["openai", "claude", "gemini", "ollama"].map((provider) => (
+          {(["openai", "claude", "gemini", "ollama", "custom"] as AIProvider[]).map((provider) => (
             <Tag
               key={provider}
               color={formData.provider === provider ? "blue" : "default"}
               style={{ cursor: "pointer", padding: "8px 16px" }}
-              onClick={() => setFormData({ ...formData, provider: provider as any })}
+              onClick={() => setFormData(withProvider(formData, provider as AIProvider))}
             >
-              {provider === "openai" ? "OpenAI" : provider === "claude" ? "Claude" : provider === "gemini" ? "Gemini" : "Ollama"}
+              {({ openai: "OpenAI", claude: "Claude", gemini: "Gemini", ollama: "Ollama", custom: "自建网关" } as Record<AIProvider, string>)[provider]}
             </Tag>
           ))}
         </Space>

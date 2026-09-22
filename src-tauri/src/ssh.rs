@@ -20,6 +20,10 @@ const EXECUTE_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const EXECUTE_TIMEOUT_SECS: u64 = 60;
 /// 首连主机密钥确认的最长等待（秒）
 const HOST_KEY_CONFIRM_TIMEOUT_SECS: u64 = 120;
+/// PTY 输出批处理的单批上限（字节）：达到即刷出，兼顾吞吐与内存占用
+const PTY_BATCH_MAX_BYTES: usize = 64 * 1024;
+/// 会话日志通道深度：磁盘暂时落后时先缓冲，不阻塞终端读循环
+const LOG_CHANNEL_CAPACITY: usize = 256;
 
 /// 会话日志落盘目标。
 ///
@@ -30,6 +34,39 @@ pub struct SessionLogSink {
     redactor: crate::redact::LogRedactor,
     /// false 表示不做脱敏（仅在用户显式关闭该开关时）
     redact: bool,
+}
+
+/// 交给日志 task 的消息。通道 FIFO，因此 `Close` 之前的块一定先被写入。
+enum LogCommand {
+    Chunk(String),
+    Close,
+}
+
+impl SessionLogSink {
+    /// 写入一块终端输出(带时间戳, 默认经脱敏)
+    async fn append(&mut self, data: &str) {
+        let text = if self.redact {
+            self.redactor.push(data)
+        } else {
+            data.to_string()
+        };
+        if text.is_empty() {
+            return;
+        }
+        let timestamp = chrono::Local::now().format("[%Y-%m-%d %H:%M:%S] ");
+        let log_line = format!("{}{}", timestamp, text);
+        let _ = self.file.write_all(log_line.as_bytes()).await;
+    }
+
+    /// 收尾：把脱敏器里攒着的未完成行冲刷出来，然后丢掉句柄关闭文件
+    async fn finish(mut self) {
+        if self.redact {
+            let tail = self.redactor.flush();
+            if !tail.is_empty() {
+                let _ = self.file.write_all(tail.as_bytes()).await;
+            }
+        }
+    }
 }
 
 /// SFTP文件条目
@@ -55,8 +92,8 @@ pub struct SshSession {
     pty_writer: Arc<Mutex<Option<tokio::sync::mpsc::Sender<String>>>>,
     /// PTY 窗口大小调整通道
     pty_resize_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<(u32, u32)>>>>,
-    /// 会话日志（含脱敏状态）
-    log_file: Arc<Mutex<Option<SessionLogSink>>>,
+    /// 会话日志写入通道：真正的磁盘写由独立 task 承担（T-3-2）
+    log_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<LogCommand>>>>,
     /// 活跃的端口转发任务: forward_id -> JoinHandle
     forwards: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// 远程转发通道接收器
@@ -119,6 +156,27 @@ impl client::Handler for ClientHandler {
     }
 }
 
+/// 把一段输出追加进缓冲，触到 `limit` 就截断并返回 true。
+///
+/// 截断点必须落在字符边界上：远程日志常见中文（3 字节），
+/// 直接按字节切 `&chunk[..remaining]` 会 panic 在"byte index is not a char boundary"。
+fn append_capped(output: &mut String, chunk: &str, limit: usize) -> bool {
+    if output.len() >= limit {
+        return true;
+    }
+    let remaining = limit - output.len();
+    if chunk.len() <= remaining {
+        output.push_str(chunk);
+        return false;
+    }
+    let mut end = remaining;
+    while end > 0 && !chunk.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.push_str(&chunk[..end]);
+    true
+}
+
 /// 读取 exec 通道的 stdout/stderr，超过上限即停止累积并提前退出。
 async fn collect_channel_output(
     mut channel: Channel<client::Msg>,
@@ -129,17 +187,10 @@ async fn collect_channel_output(
     while let Some(msg) = channel.wait().await {
         match msg {
             ChannelMsg::Data { ref data } | ChannelMsg::ExtendedData { ref data, .. } => {
-                if output.len() >= EXECUTE_OUTPUT_LIMIT {
+                let chunk = String::from_utf8_lossy(data);
+                if append_capped(&mut output, &chunk, EXECUTE_OUTPUT_LIMIT) {
                     truncated = true;
                     break;
-                }
-                let remaining = EXECUTE_OUTPUT_LIMIT - output.len();
-                let chunk = String::from_utf8_lossy(data);
-                if chunk.len() > remaining {
-                    output.push_str(&chunk[..remaining]);
-                    truncated = true;
-                } else {
-                    output.push_str(&chunk);
                 }
             }
             ChannelMsg::ExitStatus { .. } => break,
@@ -177,17 +228,56 @@ async fn verify_server_key(
                 "[ssh] 主机 {} 密钥与已记录不一致，已拒绝连接（疑似中间人攻击）",
                 policy.host_spec
             );
+            audit_host_key(
+                policy,
+                server_public_key,
+                serde_json::json!({
+                    "decision": "rejected_changed",
+                    "expected_fingerprint": expected_fingerprint,
+                    "fingerprint": actual_fingerprint,
+                }),
+            );
             false
         }
         hostkeys::Verdict::Unknown { fingerprint } => {
             if !policy.strict {
                 // 回退开关：沿用旧的自动接受，但仍落盘记录，便于后续收紧
                 let _ = hostkeys::trust(&policy.host_spec, server_public_key);
+                audit_host_key(
+                    policy,
+                    server_public_key,
+                    serde_json::json!({
+                        "decision": "auto_accepted",
+                        "reason": "strict_host_key 已关闭",
+                        "fingerprint": fingerprint,
+                    }),
+                );
                 return true;
             }
             confirm_host_key(policy, server_public_key, &fingerprint).await
         }
     }
+}
+
+/// 主机密钥决策进审计（T-4-7）。指纹本身不是凭证，可放心留档用于事后比对。
+fn audit_host_key(
+    policy: &HostKeyPolicy,
+    server_public_key: &keys::key::PublicKey,
+    detail: serde_json::Value,
+) {
+    let mut obj = match detail {
+        serde_json::Value::Object(obj) => obj,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert(
+        "host_spec".into(),
+        serde_json::Value::String(policy.host_spec.clone()),
+    );
+    obj.insert(
+        "algo".into(),
+        serde_json::Value::String(server_public_key.name().to_string()),
+    );
+    crate::audit::record("host_key", serde_json::Value::Object(obj));
 }
 
 /// 向前端发起首连确认并等待应答。超时 / 前端不应答 / 明确拒绝都返回 false。
@@ -201,6 +291,14 @@ async fn confirm_host_key(
         eprintln!(
             "[ssh] 主机 {} 首次出现，但没有可用于确认的界面，已拒绝连接",
             policy.host_spec
+        );
+        audit_host_key(
+            policy,
+            server_public_key,
+            serde_json::json!({
+                "decision": "rejected_no_ui",
+                "fingerprint": fingerprint,
+            }),
         );
         return false;
     };
@@ -217,23 +315,41 @@ async fn confirm_host_key(
         }),
     );
 
-    let trusted = match tokio::time::timeout(
+    let (trusted, decision) = match tokio::time::timeout(
         std::time::Duration::from_secs(HOST_KEY_CONFIRM_TIMEOUT_SECS),
         &mut rx,
     )
     .await
     {
-        Ok(Ok(trusted)) => trusted,
-        Ok(Err(_)) => false,
+        Ok(Ok(true)) => (true, "user_trusted"),
+        Ok(Ok(false)) => (false, "user_rejected"),
+        Ok(Err(_)) => (false, "confirm_channel_closed"),
         Err(_) => {
             hostkeys::drop_request(&request_id);
-            false
+            (false, "confirm_timeout")
         }
     };
+    audit_host_key(
+        policy,
+        server_public_key,
+        serde_json::json!({
+            "decision": decision,
+            "fingerprint": fingerprint,
+        }),
+    );
 
     if trusted {
         if let Err(e) = hostkeys::trust(&policy.host_spec, server_public_key) {
             eprintln!("[ssh] 写入 known_hosts 失败: {}", e);
+            audit_host_key(
+                policy,
+                server_public_key,
+                serde_json::json!({
+                    "decision": "known_hosts_write_failed",
+                    "error": e.to_string(),
+                    "fingerprint": fingerprint,
+                }),
+            );
             return false;
         }
     }
@@ -261,7 +377,11 @@ fn build_client_config(
     }
 
     // russh 0.45 默认列表遗漏了 P-384，但它是现代安全算法。
-    config.preferred.key.to_mut().push(keys::key::ECDSA_SHA2_NISTP384);
+    config
+        .preferred
+        .key
+        .to_mut()
+        .push(keys::key::ECDSA_SHA2_NISTP384);
 
     if legacy_algorithms {
         // 兼容算法只在现代协商失败后启用，避免普通连接主动降级。
@@ -317,8 +437,7 @@ async fn connect_with_fallback(
         Ok(session) => Ok((session, forward_rx)),
         Err(error) if should_retry_with_legacy(&error) => {
             eprintln!("[ssh] 现代算法协商失败，尝试兼容算法: {}", error);
-            let (legacy_forward_tx, legacy_forward_rx) =
-                tokio::sync::mpsc::unbounded_channel();
+            let (legacy_forward_tx, legacy_forward_rx) = tokio::sync::mpsc::unbounded_channel();
             let legacy_handler = ClientHandler {
                 forward_tx: Some(legacy_forward_tx),
                 host_key_policy: policy.clone(),
@@ -380,8 +499,7 @@ async fn connect_stream_with_fallback(
         Err(error) if should_retry_with_legacy(&error) => {
             eprintln!("[ssh] 目标主机现代算法协商失败，尝试兼容算法: {}", error);
             let channel = open_channel().await?;
-            let (legacy_forward_tx, legacy_forward_rx) =
-                tokio::sync::mpsc::unbounded_channel();
+            let (legacy_forward_tx, legacy_forward_rx) = tokio::sync::mpsc::unbounded_channel();
             let legacy_handler = ClientHandler {
                 forward_tx: Some(legacy_forward_tx),
                 host_key_policy: policy.clone(),
@@ -485,7 +603,7 @@ impl SshSession {
             sftp: Arc::new(Mutex::new(sftp)),
             pty_writer: Arc::new(Mutex::new(None)),
             pty_resize_tx: Arc::new(Mutex::new(None)),
-            log_file: Arc::new(Mutex::new(None)),
+            log_tx: Arc::new(Mutex::new(None)),
             forwards: Arc::new(Mutex::new(HashMap::new())),
             forward_rx: Arc::new(Mutex::new(Some(forward_rx))),
             _jump_handle: None,
@@ -566,7 +684,10 @@ impl SshSession {
         {
             Ok(Ok(sftp)) => Some(sftp),
             Ok(Err(e)) => {
-                eprintln!("[ssh] 目标主机 SFTP 子系统初始化失败，将使用 ls 回退: {}", e);
+                eprintln!(
+                    "[ssh] 目标主机 SFTP 子系统初始化失败，将使用 ls 回退: {}",
+                    e
+                );
                 None
             }
             Err(_) => {
@@ -589,7 +710,7 @@ impl SshSession {
             sftp: Arc::new(Mutex::new(sftp)),
             pty_writer: Arc::new(Mutex::new(None)),
             pty_resize_tx: Arc::new(Mutex::new(None)),
-            log_file: Arc::new(Mutex::new(None)),
+            log_tx: Arc::new(Mutex::new(None)),
             forwards: Arc::new(Mutex::new(HashMap::new())),
             forward_rx: Arc::new(Mutex::new(Some(target_forward_rx))),
             _jump_handle: Some(jump_handle),
@@ -610,7 +731,10 @@ impl SshSession {
     ///
     /// 打开通道后立即释放会话锁（读输出不再需要 handle），并对输出量与耗时设上限，
     /// 避免 `cat /dev/urandom` 这类命令把内存打满或让调用方永久挂起。
-    pub async fn execute(&self, command: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn execute(
+        &self,
+        command: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let channel = {
             let mut handle = self.handle.lock().await;
             let session = handle.as_mut().ok_or("会话已关闭")?;
@@ -851,7 +975,7 @@ impl SshSession {
                 chrono::Local::now().format("%Y%m%d_%H%M%S")
             );
             let log_path = log_dir.join(&log_filename);
-            let log_file = tokio::fs::OpenOptions::new()
+            let sink = tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&log_path)
@@ -863,50 +987,66 @@ impl SshSession {
                     redact: settings.log_redaction,
                 });
             // 日志记录的是终端原文, 即便已脱敏也只允许属主读（04 4.5）
-            if log_file.is_some() {
+            if sink.is_some() {
                 crate::config::restrict_private(&log_path);
             }
-            *self.log_file.lock().await = log_file;
+            if let Some(sink) = sink {
+                // 磁盘写交给独立 task：读循环只 send，慢盘不再拖住终端输出（T-3-2）。
+                // 关掉 session_log_async 时通道深度压到 1，退化为"写完上一块才收下一块"，
+                // 而不是另养一份同步实现。
+                let capacity = if settings.session_log_async {
+                    LOG_CHANNEL_CAPACITY
+                } else {
+                    1
+                };
+                let (log_tx, log_rx) = tokio::sync::mpsc::channel::<LogCommand>(capacity);
+                tokio::spawn(Self::run_log_writer(sink, log_rx));
+                *self.log_tx.lock().await = Some(log_tx);
+            }
         }
 
-        // 启动PTY事件循环：读取输出、写入数据、处理resize、写日志
+        // 启动PTY事件循环：读取输出、写入数据、处理resize、转交日志
         let read_app = app.clone();
         let read_session_id = session_id.clone();
-        let log_file_arc = self.log_file.clone();
+        // 取一份 Sender 副本，之后热路径里不再碰 Mutex
+        let log_tx = self.log_tx.lock().await.clone();
+        // 批处理窗口：窗口内的小块合并成一次 emit（T-3-1）；0 毫秒回退为逐块下发（§5.7）
+        let batch_window = std::time::Duration::from_millis(settings.pty_batch_window_ms);
+        let batching = !batch_window.is_zero();
+        let mut ticker = batching.then(|| {
+            let mut it = tokio::time::interval(batch_window);
+            // 卡顿时不补发积压的 tick，否则会一次性刷出多批、放大延迟
+            it.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            it
+        });
         tokio::spawn(async move {
+            let mut pending = String::new();
             loop {
                 tokio::select! {
                     msg = channel.wait() => {
                         match msg {
-                            Some(ChannelMsg::Data { ref data }) => {
-                                let output = String::from_utf8_lossy(data).to_string();
-                                let _ = read_app.emit(
-                                    "pty-output",
-                                    serde_json::json!({
-                                        "session_id": read_session_id,
-                                        "data": output,
-                                    }),
-                                );
-                                // 写入日志
-                                Self::write_log(&log_file_arc, &output).await;
-                            }
-                            Some(ChannelMsg::ExtendedData { ref data, .. }) => {
-                                let output = String::from_utf8_lossy(data).to_string();
-                                let _ = read_app.emit(
-                                    "pty-output",
-                                    serde_json::json!({
-                                        "session_id": read_session_id,
-                                        "data": output,
-                                    }),
-                                );
-                                // 写入日志
-                                Self::write_log(&log_file_arc, &output).await;
+                            Some(ChannelMsg::Data { ref data })
+                            | Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                                pending.push_str(&String::from_utf8_lossy(data));
+                                // 攒满一批立即刷出，不等窗口
+                                if Self::pty_batch_should_flush(batching, pending.len()) {
+                                    Self::flush_pty_batch(
+                                        &read_app,
+                                        &read_session_id,
+                                        &log_tx,
+                                        &mut pending,
+                                    )
+                                    .await;
+                                }
                             }
                             Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | None => {
+                                // 先刷出窗口里的输出，保证"会话已关闭"永远排在最后
+                                Self::flush_pty_batch(&read_app, &read_session_id, &log_tx, &mut pending)
+                                    .await;
                                 let _ = read_app.emit(
                                     "pty-output",
                                     serde_json::json!({
-                                        "session_id": read_session_id,
+                                        "session_id": &read_session_id,
                                         "data": "\r\n[会话已关闭]\r\n",
                                     }),
                                 );
@@ -914,23 +1054,18 @@ impl SshSession {
                                 let _ = read_app.emit(
                                     "pty-closed",
                                     serde_json::json!({
-                                        "session_id": read_session_id,
+                                        "session_id": &read_session_id,
                                     }),
                                 );
-                                // 关闭日志文件（先冲刷未换行的尾部）
-                                let mut lf = log_file_arc.lock().await;
-                                if let Some(mut sink) = lf.take() {
-                                    if sink.redact {
-                                        let tail = sink.redactor.flush();
-                                        if !tail.is_empty() {
-                                            let _ = sink.file.write_all(tail.as_bytes()).await;
-                                        }
-                                    }
-                                }
                                 break;
                             }
                             _ => {}
                         }
+                    }
+                    // 窗口到期：把攒下的输出一并下发；批处理关闭时这条分支永不就绪
+                    _ = Self::tick_or_sleep(&mut ticker) => {
+                        Self::flush_pty_batch(&read_app, &read_session_id, &log_tx, &mut pending)
+                            .await;
                     }
                     input = data_rx.recv() => {
                         match input {
@@ -952,35 +1087,74 @@ impl SshSession {
                     }
                 }
             }
+            // 从任意分支退出都要刷掉尾巴并收掉日志通道，不吞未下发的输出
+            Self::flush_pty_batch(&read_app, &read_session_id, &log_tx, &mut pending).await;
+            if let Some(tx) = &log_tx {
+                let _ = tx.send(LogCommand::Close).await;
+            }
         });
 
         Ok(())
     }
 
-    /// 写入日志(带时间戳, 默认经脱敏)
-    async fn write_log(
-        log_file: &Arc<Mutex<Option<SessionLogSink>>>,
-        data: &str,
+    /// 该批是否要立即刷出：关闭批处理时必须逐块下发，攒到上限则不必等窗口
+    fn pty_batch_should_flush(batching: bool, len: usize) -> bool {
+        !batching || len >= PTY_BATCH_MAX_BYTES
+    }
+
+    /// 读循环的 tick 分支：批处理关闭时返回一个永不完成的 future，让 select 忽略该分支
+    async fn tick_or_sleep(ticker: &mut Option<tokio::time::Interval>) {
+        match ticker {
+            Some(it) => {
+                it.tick().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    }
+
+    /// 刷出批处理窗口：一次 emit 推给前端，一次 send 转交日志 task
+    async fn flush_pty_batch(
+        app: &tauri::AppHandle,
+        session_id: &str,
+        log_tx: &Option<tokio::sync::mpsc::Sender<LogCommand>>,
+        pending: &mut String,
     ) {
-        let mut lf = log_file.lock().await;
-        let Some(sink) = lf.as_mut() else {
-            return;
-        };
-        let text = if sink.redact {
-            sink.redactor.push(data)
-        } else {
-            data.to_string()
-        };
-        if text.is_empty() {
+        if pending.is_empty() {
             return;
         }
-        let timestamp = chrono::Local::now().format("[%Y-%m-%d %H:%M:%S] ");
-        let log_line = format!("{}{}", timestamp, text);
-        let _ = sink.file.write_all(log_line.as_bytes()).await;
+        let data = std::mem::take(pending);
+        let _ = app.emit(
+            "pty-output",
+            serde_json::json!({
+                "session_id": session_id,
+                "data": &data,
+            }),
+        );
+        if let Some(tx) = log_tx {
+            // 通道满时在此等待日志 task 追上：宁可背压，也不静默丢掉审计行
+            let _ = tx.send(LogCommand::Chunk(data)).await;
+        }
+    }
+
+    /// 会话日志写入 task：按到达顺序脱敏落盘，退出前冲刷未换行的尾部
+    async fn run_log_writer(
+        mut sink: SessionLogSink,
+        mut rx: tokio::sync::mpsc::Receiver<LogCommand>,
+    ) {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                LogCommand::Chunk(data) => sink.append(&data).await,
+                LogCommand::Close => break,
+            }
+        }
+        sink.finish().await;
     }
 
     /// 向PTY写入数据
-    pub async fn pty_write(&self, data: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn pty_write(
+        &self,
+        data: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let writer = self.pty_writer.lock().await;
         if let Some(tx) = writer.as_ref() {
             tx.send(data.to_string())
@@ -1039,12 +1213,7 @@ impl SshSession {
                 };
 
                 let channel = match session
-                    .channel_open_direct_tcpip(
-                        &rh,
-                        remote_port as u32,
-                        &la,
-                        actual_port as u32,
-                    )
+                    .channel_open_direct_tcpip(&rh, remote_port as u32, &la, actual_port as u32)
                     .await
                 {
                     Ok(ch) => ch,
@@ -1055,8 +1224,7 @@ impl SshSession {
                 let channel_stream = channel.into_stream();
                 tokio::spawn(async move {
                     let (mut tcp_read, mut tcp_write) = tcp_stream.split();
-                    let (mut ssh_read, mut ssh_write) =
-                        tokio::io::split(channel_stream);
+                    let (mut ssh_read, mut ssh_write) = tokio::io::split(channel_stream);
                     let c2s = tokio::io::copy(&mut tcp_read, &mut ssh_write);
                     let s2c = tokio::io::copy(&mut ssh_read, &mut tcp_write);
                     let _ = tokio::try_join!(c2s, s2c);
@@ -1083,9 +1251,7 @@ impl SshSession {
         // 请求服务器监听远程端口
         let actual_port = {
             let mut h = self.handle.lock().await;
-            let session = h
-                .as_mut()
-                .ok_or("会话已关闭")?;
+            let session = h.as_mut().ok_or("会话已关闭")?;
             session
                 .tcpip_forward(remote_addr, remote_port as u32)
                 .await? as u16
@@ -1121,8 +1287,7 @@ impl SshSession {
                 let channel_stream = fwd_ch.channel.into_stream();
                 tokio::spawn(async move {
                     let (mut tcp_read, mut tcp_write) = tcp_stream.split();
-                    let (mut ssh_read, mut ssh_write) =
-                        tokio::io::split(channel_stream);
+                    let (mut ssh_read, mut ssh_write) = tokio::io::split(channel_stream);
                     let c2s = tokio::io::copy(&mut tcp_read, &mut ssh_write);
                     let s2c = tokio::io::copy(&mut ssh_read, &mut tcp_write);
                     let _ = tokio::try_join!(c2s, s2c);
@@ -1212,8 +1377,7 @@ impl SshSession {
                 let channel_stream = channel.into_stream();
                 tokio::spawn(async move {
                     let (mut tcp_read, mut tcp_write) = tcp_stream.split();
-                    let (mut ssh_read, mut ssh_write) =
-                        tokio::io::split(channel_stream);
+                    let (mut ssh_read, mut ssh_write) = tokio::io::split(channel_stream);
                     let c2s = tokio::io::copy(&mut tcp_read, &mut ssh_write);
                     let s2c = tokio::io::copy(&mut ssh_read, &mut tcp_write);
                     let _ = tokio::try_join!(c2s, s2c);
@@ -1259,9 +1423,9 @@ impl SshSession {
             let mut resize = self.pty_resize_tx.lock().await;
             resize.take();
         }
-        // 关闭日志文件
+        // 关闭日志通道：读循环退出时还会补一个 Close，这里只需放掉本会话持有的发送端
         {
-            let mut lf = self.log_file.lock().await;
+            let mut lf = self.log_tx.lock().await;
             lf.take();
         }
 
@@ -1274,7 +1438,9 @@ impl SshSession {
 
         let mut handle = self.handle.lock().await;
         if let Some(session) = handle.take() {
-            let _ = session.disconnect(Disconnect::ByApplication, "", "en").await;
+            let _ = session
+                .disconnect(Disconnect::ByApplication, "", "en")
+                .await;
         }
     }
 }
@@ -1370,4 +1536,147 @@ async fn socks5_read_connect(
     let port = u16::from_be_bytes(port_buf);
 
     Ok((host, port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_escape_keeps_payload_inside_quotes() {
+        assert_eq!(shell_escape("plain"), "'plain'");
+        assert_eq!(shell_escape(""), "''");
+        assert_eq!(shell_escape("a b/c"), "'a b/c'");
+        // 单引号必须展开成 '"'"'，否则会把外层引号闭合掉
+        assert_eq!(shell_escape("a'b"), "'a'\"'\"'b'");
+    }
+
+    /// P0-2 验收：转义后不得存在"裸露"的单引号，即无法从字符串里逃出来
+    #[test]
+    fn shell_escape_cannot_be_broken_out_of() {
+        for payload in [
+            "'; rm -rf / #",
+            "'\"'\"'; id; \"\"'",
+            "$(id)",
+            "`id`",
+            "a\nb",
+            "a|b",
+            "a && b",
+        ] {
+            let escaped = shell_escape(payload);
+            assert!(escaped.starts_with('\'') && escaped.ends_with('\''));
+            let inner = &escaped[1..escaped.len() - 1];
+            let without_wrapping = inner.replace("'\"'\"'", "");
+            assert!(
+                !without_wrapping.contains('\''),
+                "转义结果仍含未包裹的单引号: {:?}",
+                escaped
+            );
+        }
+    }
+
+    /// T-3-4 验收：达到上限后停止累积；超限的那一段既不能丢字符也不能越界
+    #[test]
+    fn append_capped_stops_at_limit_without_splitting_utf8() {
+        let mut ascii = String::new();
+        assert!(!append_capped(&mut ascii, "abcdef", 10));
+        assert!(!append_capped(&mut ascii, "ghij", 10), "刚好填满不算截断");
+        assert_eq!(ascii, "abcdefghij");
+        assert!(append_capped(&mut ascii, "k", 10), "已满要继续报截断");
+        assert_eq!(ascii, "abcdefghij", "已满之后不得再吞字节");
+
+        let mut half = String::from("abc");
+        assert!(append_capped(&mut half, "defghij", 6), "越过上限要报截断");
+        assert_eq!(half, "abcdef", "只收到上限为止");
+
+        // 剩余空间正好容纳一个汉字：按整字符对齐收下，不留半个字符
+        let mut partial = String::from("ab");
+        assert!(append_capped(&mut partial, "汉字测试", 5));
+        assert_eq!(partial, "ab汉");
+
+        // 剩余空间落在汉字中间：只能一个都不收，绝不能按字节切片 panic
+        let mut tight = String::from("ab");
+        assert!(append_capped(&mut tight, "汉字测试", 4));
+        assert_eq!(tight, "ab");
+        assert!(tight.is_char_boundary(tight.len()));
+    }
+
+    /// T-3-1 验收：批处理不能只看窗口——关闭时必须逐块下发，攒满上限要立刻刷出
+    #[test]
+    fn pty_batch_flushes_on_cap_or_when_disabled() {
+        assert!(!SshSession::pty_batch_should_flush(true, 0));
+        assert!(!SshSession::pty_batch_should_flush(
+            true,
+            PTY_BATCH_MAX_BYTES - 1
+        ));
+        assert!(SshSession::pty_batch_should_flush(
+            true,
+            PTY_BATCH_MAX_BYTES
+        ));
+        // 超长单块（一次到达 1MB）也要被判定为"该刷出"
+        assert!(SshSession::pty_batch_should_flush(
+            true,
+            PTY_BATCH_MAX_BYTES * 4
+        ));
+        // 回退开关：窗口=0 时每块都刷，行为与旧实现一致
+        for len in [0usize, 1, PTY_BATCH_MAX_BYTES * 10] {
+            assert!(SshSession::pty_batch_should_flush(false, len));
+        }
+    }
+
+    /// T-3-2 验收：日志改由独立 task 落盘后，顺序、脱敏状态、未换行尾部都不能丢
+    #[tokio::test]
+    async fn log_writer_redacts_across_chunks_and_flushes_tail() {
+        let dir = std::env::temp_dir().join(format!("zterm-log-writer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("创建临时日志目录失败");
+        let path = dir.join("session.log");
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+            .expect("打开临时日志失败");
+        let sink = SessionLogSink {
+            file,
+            redactor: crate::redact::LogRedactor::default(),
+            redact: true,
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<LogCommand>(LOG_CHANNEL_CAPACITY);
+        let writer = tokio::spawn(SshSession::run_log_writer(sink, rx));
+        // 私钥块刻意跨两条消息切开：脱敏状态必须跟着 sink 走，而不是每块独立判定
+        for chunk in [
+            "first-line\n",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nbG9yZWQtaXAtc2VjcmV0\n",
+            "bW9yZS1zZWNyZXQtYnl0ZXM-----END OPENSSH PRIVATE KEY-----\nlast-line\n",
+            // 没有换行的尾巴：只有 Close 时冲刷才会落盘
+            "tail-without-newline",
+        ] {
+            tx.send(LogCommand::Chunk(chunk.to_string()))
+                .await
+                .expect("日志通道应可写入");
+        }
+        tx.send(LogCommand::Close).await.expect("关闭日志通道失败");
+        drop(tx);
+        writer.await.expect("日志 task 应正常退出");
+
+        let content = std::fs::read_to_string(&path).expect("读取日志失败");
+        assert!(
+            !content.contains("bG9yZWQtaXAtc2VjcmV0")
+                && !content.contains("bW9yZS1zZWNyZXQtYnl0ZXM"),
+            "私钥正文不得落盘: {:?}",
+            content
+        );
+        let before = content.find("first-line").expect("首块未落盘");
+        let after = content.find("last-line").expect("尾块未落盘");
+        let tail = content
+            .find("tail-without-newline")
+            .expect("未换行的尾部未被冲刷");
+        assert!(
+            before < after && after < tail,
+            "日志顺序被打乱: {:?}",
+            content
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

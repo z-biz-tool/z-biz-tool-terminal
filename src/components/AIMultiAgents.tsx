@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Modal, Button, Typography, message, Progress, Card } from "antd";
+import { Modal, Button, Typography, message, Progress, Card, Input } from "antd";
 import { TeamOutlined } from "@ant-design/icons";
 import type { AIMessage } from "../types/ai";
 import { useAIStore } from "../stores/aiStore";
@@ -20,12 +20,13 @@ interface AgentTask {
 interface AIMultiAgentsProps {
   open: boolean;
   onClose: () => void;
-  task: string;
 }
 
-export default function AIMultiAgents({ open, onClose, task }: AIMultiAgentsProps) {
+export default function AIMultiAgents({ open, onClose }: AIMultiAgentsProps) {
   const { config } = useAIStore();
   const [loading, setLoading] = useState(false);
+  // 任务描述由面板自己收：以前从 App 传进来的是硬编码空串，"开始协作"永远点不动
+  const [task, setTask] = useState("");
   const [tasks, setTasks] = useState<AgentTask[]>([]);
   const [progress, setProgress] = useState(0);
 
@@ -137,11 +138,17 @@ export default function AIMultiAgents({ open, onClose, task }: AIMultiAgentsProp
           多个 AI 智能体并行协作，完成复杂的开发任务
         </Paragraph>
 
-        <div style={{ background: "#1e1e1e", padding: "16px", borderRadius: "8px", marginBottom: "24px" }}>
+        <div style={{ background: "#1e1e1e", padding: "16px", borderRadius: "8px", marginBottom: "24px", textAlign: "left" }}>
           <Title level={4} style={{ margin: "0 0 12px 0", fontSize: 14, color: "#722ed1" }}>
             📝 任务描述
           </Title>
-          <Text style={{ color: "#ccc", fontSize: 14 }}>{task || "（请输入任务描述）"}</Text>
+          <Input.TextArea
+            value={task}
+            onChange={(e) => setTask(e.target.value)}
+            placeholder="例如：为 SSH 连接模块补充超时与重试，并给出验证步骤"
+            autoSize={{ minRows: 3, maxRows: 8 }}
+            disabled={loading}
+          />
         </div>
 
         <div style={{ marginBottom: "24px" }}>

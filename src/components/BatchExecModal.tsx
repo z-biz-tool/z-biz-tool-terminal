@@ -2,8 +2,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Modal, Input, Checkbox, Button, Collapse, Space, Tag, message, theme } from "antd";
 import { PlayCircleOutlined, StopOutlined, CopyOutlined, TeamOutlined } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { subscribeAllPtyOutput } from "../services/ptyBus";
 import { useServerStore } from "../stores/serverStore";
+import { approveCommand } from "../services/commandGate";
 
 interface Props {
   open: boolean;
@@ -56,9 +57,8 @@ export default function BatchExecModal({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) return;
 
-    let unlisten: (() => void) | null = null;
-    listen<{ session_id: string; data: string }>("pty-output", (event) => {
-      const { session_id, data } = event.payload;
+    // 复用全应用唯一的 pty-output 监听，避免和终端面板各注册一份
+    const unsubscribe = subscribeAllPtyOutput((session_id, data) => {
       setOutputs((prev) => {
         const next = new Map(prev);
         // 找到对应的 serverId
@@ -75,12 +75,10 @@ export default function BatchExecModal({ open, onClose }: Props) {
         }
         return next;
       });
-    }).then((fn) => {
-      unlisten = fn;
     });
 
     return () => {
-      unlisten?.();
+      unsubscribe();
     };
   }, [open, tabs]);
 
@@ -124,6 +122,12 @@ export default function BatchExecModal({ open, onClose }: Props) {
       message.warning("请选择至少一个服务器");
       return;
     }
+
+    // 批量执行爆炸半径最大：一次确认并列出全部受影响主机（P-2）
+    const targets = connectedServers
+      .filter((s) => selectedIds.has(s.serverId))
+      .map((s) => ({ name: s.name, host: s.host || "未知主机" }));
+    if (!(await approveCommand(command, targets, "batch"))) return;
 
     // 初始化输出
     const newOutputs = new Map<string, ServerOutput>();

@@ -7,7 +7,7 @@
 
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { AIConfig } from '../types/ai';
+import type { AIConfig, AIProvider } from '../types/ai';
 
 export const DEFAULT_AI_CONFIG: AIConfig = {
   provider: 'openai',
@@ -17,6 +17,32 @@ export const DEFAULT_AI_CONFIG: AIConfig = {
   temperature: 0.7,
   maxTokens: 2048,
 };
+
+/** 各家 provider 的默认 endpoint 与模型；custom 不自带 baseUrl（用户必须填） */
+export const PROVIDER_PRESETS: Record<AIProvider, Partial<AIConfig>> = {
+  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  claude: { baseUrl: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-20240620' },
+  gemini: { baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-2.0-flash' },
+  ollama: { baseUrl: 'http://127.0.0.1:11434', model: 'llama3.2' },
+  custom: {},
+};
+
+/**
+ * 切换 provider 时一并换掉 baseUrl/model。
+ * 只改 provider 字段会让请求带着 openai 的 baseUrl/model 打到 claude 上, 必然失败；
+ * 用户手填过的非默认值则保留。
+ */
+export function withProvider(config: AIConfig, provider: AIProvider): AIConfig {
+  const preset = PROVIDER_PRESETS[provider];
+  const isPreset = (value: string | undefined, field: 'baseUrl' | 'model') =>
+    !value || Object.values(PROVIDER_PRESETS).some((p) => p[field] === value);
+  return {
+    ...config,
+    provider,
+    baseUrl: isPreset(config.baseUrl, 'baseUrl') ? preset.baseUrl ?? config.baseUrl : config.baseUrl,
+    model: isPreset(config.model, 'model') ? preset.model ?? config.model : config.model,
+  };
+}
 
 interface TerminalAIStore {
   config: AIConfig;

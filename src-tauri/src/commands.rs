@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::hostkeys::HostKeyPolicy;
-use crate::ssh::{shell_escape, SshSession, SftpEntry};
+use crate::ssh::{shell_escape, SftpEntry, SshSession};
 
 /// SSH会话存储: session_id -> SshSession
 ///
@@ -34,6 +34,12 @@ fn no_session(session_id: &str) -> String {
 ///
 /// 允许 IPv6 的 `:` 与 IPv4-mapped 的 `[...]`，其余只接受字母、数字、`.`、`-`、`_`。
 pub fn validate_host(host: &str) -> Result<(), String> {
+    // 控制字符必须在 trim 之前拒绝：`trim()` 会吃掉首尾的 \r \n，
+    // 于是 "ok\r" 校验通过、却以未裁剪的原值进入命令行/行格式文件。
+    // RFC 952/1123 主机名不含任何控制字符，这里直接 fail-closed。
+    if let Some(ch) = host.chars().find(|c| c.is_control()) {
+        return Err(format!("主机包含非法字符: {:?}", ch));
+    }
     let host = host.trim();
     if host.is_empty() {
         return Err("主机不能为空".into());
@@ -48,13 +54,9 @@ pub fn validate_host(host: &str) -> Result<(), String> {
     if body.is_empty() {
         return Err("主机不能为空".into());
     }
-    // IPv6 允许 :: 缩写，因此连续的 ':' 也要放行
-    if body.contains("::") && body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b':' || b == b'.')
-    {
-        return Ok(());
-    }
     for ch in body.chars() {
-        let ok = ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_');
+        // `:` 放行是给 IPv6 用的；它不构成 shell 元字符，也不会改变命令结构。
+        let ok = ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':');
         if !ok {
             return Err(format!("主机包含非法字符: {:?}", ch));
         }
@@ -131,7 +133,6 @@ pub struct ConnectViaJumpParams {
     pub connection_timeout: Option<u64>,
 }
 
-
 /// SSH连接结果
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectResult {
@@ -199,7 +200,7 @@ pub async fn ssh_connect(app: tauri::AppHandle, params: ConnectParams) -> Connec
         ),
     };
 
-    match session {
+    let result = match session {
         Ok(sess) => {
             let session_id = sess.id.clone();
             sessions()
@@ -218,7 +219,21 @@ pub async fn ssh_connect(app: tauri::AppHandle, params: ConnectParams) -> Connec
             session_id: None,
             error: Some(format!("连接 {}:{} 失败: {}", host, port, e)),
         },
-    }
+    };
+    // 凭证本身（password / private_key）绝不进审计，只记"谁连了哪台、成功没有"
+    crate::audit::record(
+        "ssh_connect",
+        serde_json::json!({
+            "host": host,
+            "port": port,
+            "username": params.username,
+            "auth_type": params.auth_type,
+            "success": result.success,
+            "session_id": result.session_id,
+            "error": result.error,
+        }),
+    );
+    result
 }
 
 /// 通过跳板机连接SSH服务器
@@ -257,14 +272,16 @@ pub async fn ssh_connect_via_jump(
     .await
     {
         Ok(result) => result,
-        Err(_) => Err::<SshSession, Box<dyn std::error::Error + Send + Sync>>(format!(
-            "跳板连接超时（{}秒）: {}:{} → {}:{}",
-            timeout_secs, jump_host, jump_port, target_host, target_port
-        )
-        .into()),
+        Err(_) => Err::<SshSession, Box<dyn std::error::Error + Send + Sync>>(
+            format!(
+                "跳板连接超时（{}秒）: {}:{} → {}:{}",
+                timeout_secs, jump_host, jump_port, target_host, target_port
+            )
+            .into(),
+        ),
     };
 
-    match session {
+    let result = match session {
         Ok(sess) => {
             let session_id = sess.id.clone();
             sessions()
@@ -286,7 +303,22 @@ pub async fn ssh_connect_via_jump(
                 jump_host, jump_port, target_host, target_port, e
             )),
         },
-    }
+    };
+    crate::audit::record(
+        "ssh_connect_via_jump",
+        serde_json::json!({
+            "jump_host": jump_host,
+            "jump_port": jump_port,
+            "jump_username": params.jump_username,
+            "target_host": target_host,
+            "target_port": target_port,
+            "target_username": params.target_username,
+            "success": result.success,
+            "session_id": result.session_id,
+            "error": result.error,
+        }),
+    );
+    result
 }
 
 /// 断开SSH连接
@@ -295,7 +327,16 @@ pub async fn ssh_disconnect(session_id: String) -> ConnectResult {
     // 写锁内只做移除，disconnect 的 IO 在无锁状态下进行
     let removed = sessions().await.write().await.remove(&session_id);
     if let Some(sess) = removed {
+        let (host, username) = (sess.host.clone(), sess.username.clone());
         sess.disconnect().await;
+        crate::audit::record(
+            "ssh_disconnect",
+            serde_json::json!({
+                "session_id": session_id,
+                "host": host,
+                "username": username,
+            }),
+        );
         ConnectResult {
             success: true,
             session_id: Some(session_id),
@@ -310,11 +351,34 @@ pub async fn ssh_disconnect(session_id: String) -> ConnectResult {
     }
 }
 
+/// 前端危险命令网关的下发结论（T-4-7 审计）。
+///
+/// 后端不重新判定命令危险级别（判定规则在前端 commandGuard，重复实现必然漂移），
+/// 只把它记下来。字段全部可选：网关被关闭、调用方未接网关、旧版前端都要能正常下发，
+/// 但缺失本身会在审计里留下 `gate_missing` / `guard_disabled` 这类可追查的痕记。
+#[derive(Debug, Deserialize, Serialize, Default)]
+pub struct GateVerdict {
+    /// 用户在二次确认框里的选择；block/取消不会走到下发，因此缺省即"未弹框"
+    pub confirmed: Option<bool>,
+    /// commandGuard 判定的级别：safe / warn / confirm / block
+    pub guard_level: Option<String>,
+    /// 命令来源：manual / paste / snippet / batch / ai
+    pub source: Option<String>,
+    /// 网关开关状态（§5.7 行为开关关闭时也要有记录）
+    pub guard_enabled: Option<bool>,
+}
+
 /// 执行命令
 #[tauri::command]
-pub async fn ssh_execute(session_id: String, command: String) -> ExecResult {
-    if let Some(sess) = get_session(&session_id).await {
-        match sess.execute(&command).await {
+pub async fn ssh_execute(
+    session_id: String,
+    command: String,
+    gate: Option<GateVerdict>,
+) -> ExecResult {
+    // 只查一次会话：执行和审计共用同一份主机信息（P-3 会话隔离）
+    let sess = get_session(&session_id).await;
+    let result = match &sess {
+        Some(sess) => match sess.execute(&command).await {
             Ok(output) => ExecResult {
                 success: true,
                 output,
@@ -325,14 +389,61 @@ pub async fn ssh_execute(session_id: String, command: String) -> ExecResult {
                 output: String::new(),
                 error: Some(e.to_string()),
             },
-        }
-    } else {
-        ExecResult {
+        },
+        None => ExecResult {
             success: false,
             output: String::new(),
             error: Some(no_session(&session_id)),
-        }
+        },
+    };
+    record_exec_audit(
+        &session_id,
+        sess.as_deref(),
+        &command,
+        gate.as_ref(),
+        &result,
+    );
+    result
+}
+
+/// 把一次命令下发写进审计日志。审计失败绝不改变执行结果（best-effort 在 audit 模块内部处理）。
+fn record_exec_audit(
+    session_id: &str,
+    sess: Option<&SshSession>,
+    command: &str,
+    gate: Option<&GateVerdict>,
+    result: &ExecResult,
+) {
+    let default = GateVerdict::default();
+    let gate = gate.unwrap_or(&default);
+    crate::audit::record(
+        "ssh_execute",
+        serde_json::json!({
+            "session_id": session_id,
+            "host": sess.map(|s| s.host.as_str()).unwrap_or(""),
+            "username": sess.map(|s| s.username.as_str()).unwrap_or(""),
+            "command": command,
+            "confirmed": gate.confirmed,
+            "guard_level": gate.guard_level,
+            "source": gate.source,
+            // 没带结论 = 调用方绕过了网关（或用了旧版前端）；旧版下不来的判定也要有痕记
+            "gate_missing": gate.confirmed.is_none() && gate.guard_level.is_none(),
+            "guard_disabled": gate.guard_enabled == Some(false),
+            "success": result.success,
+            "error": result.error,
+            "output_bytes": result.output.len(),
+        }),
+    );
+}
+
+/// 前端投递审计事件（危险命令判定、网关被关闭、导出配置等决策）
+#[tauri::command]
+pub async fn audit_event(action: String, detail: Option<serde_json::Value>) -> Result<(), String> {
+    if action.trim().is_empty() || action.len() > 64 {
+        return Err("审计动作名称非法".into());
     }
+    crate::audit::record(action.trim(), detail.unwrap_or(serde_json::Value::Null));
+    Ok(())
 }
 
 /// SSH密钥生成结果
@@ -701,11 +812,7 @@ pub async fn sftp_remove(session_id: String, path: String) -> ExecResult {
 
 /// SFTP 重命名
 #[tauri::command]
-pub async fn sftp_rename(
-    session_id: String,
-    old_path: String,
-    new_path: String,
-) -> ExecResult {
+pub async fn sftp_rename(session_id: String, old_path: String, new_path: String) -> ExecResult {
     if let Some(sess) = get_session(&session_id).await {
         match sess.sftp_rename(&old_path, &new_path).await {
             Ok(_) => ExecResult {
@@ -825,22 +932,26 @@ pub async fn get_temp_dir() -> Result<String, String> {
     Ok(std::env::temp_dir().to_string_lossy().to_string())
 }
 
-/// 使用系统默认应用打开文件
+/// 使用系统默认应用打开文件（路径必须落在 T-4-4 白名单内）
 #[tauri::command]
 pub async fn open_file_with_default_app(path: String) -> Result<(), String> {
+    // 这是"把本地路径交给外部程序"的口，未限定路径时等于让 WebView 决定打开什么
+    let target = crate::paths::resolve_existing_any(&path)?;
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
-        .arg(&path)
+        .arg(&target)
         .spawn()
         .map_err(|e| format!("打开失败: {}", e))?;
     #[cfg(target_os = "linux")]
     std::process::Command::new("xdg-open")
-        .arg(&path)
+        .arg(&target)
         .spawn()
         .map_err(|e| format!("打开失败: {}", e))?;
     #[cfg(target_os = "windows")]
-    std::process::Command::new("cmd")
-        .args(["/c", "start", &path])
+    // 旧实现走 `cmd /c start <path>`：路径里的引号与 `&` 会被 cmd 再解析一次。
+    // explorer.exe 直接收 argv，不过 shell。
+    std::process::Command::new("explorer.exe")
+        .arg(&target)
         .spawn()
         .map_err(|e| format!("打开失败: {}", e))?;
     Ok(())
@@ -849,24 +960,49 @@ pub async fn open_file_with_default_app(path: String) -> Result<(), String> {
 /// 获取文件的修改时间（Unix时间戳毫秒）
 #[tauri::command]
 pub async fn get_file_modified_time(path: String) -> Result<serde_json::Value, String> {
-    let path = std::path::PathBuf::from(&path);
+    let path = crate::paths::resolve_existing(&path)?;
     let metadata = std::fs::metadata(&path).map_err(|e| format!("获取文件信息失败: {}", e))?;
-    let modified = metadata.modified().map_err(|e| format!("获取修改时间失败: {}", e))?;
-    let duration = modified.duration_since(std::time::UNIX_EPOCH).map_err(|e| format!("时间转换失败: {}", e))?;
+    let modified = metadata
+        .modified()
+        .map_err(|e| format!("获取修改时间失败: {}", e))?;
+    let duration = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("时间转换失败: {}", e))?;
     Ok(serde_json::json!({ "modified": duration.as_millis() as u64 }))
 }
 
 /// 读取文件内容为字符串
 #[tauri::command]
 pub async fn read_file_content(path: String) -> Result<String, String> {
+    let path = crate::paths::resolve_existing(&path)?;
     std::fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {}", e))
 }
 
 /// 读取文件内容为Base64编码字符串
 #[tauri::command]
 pub async fn read_file_as_base64(path: String) -> Result<String, String> {
+    let path = crate::paths::resolve_existing(&path)?;
     let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败: {}", e))?;
     Ok(base64_encode(&bytes))
+}
+
+/// 把生成的密钥对写到本地文件，权限固定 0600（父目录按需建为 0700）
+///
+/// 前端不再拿 `fs:allow-write-file`：写盘统一走这一条带白名单校验的通道。
+#[tauri::command]
+pub async fn save_key_file(path: String, content: String) -> Result<String, String> {
+    // 私钥内容不进审计（P-4），只记落盘位置与字节数
+    let result = crate::paths::write_private_key(&path, &content);
+    crate::audit::record(
+        "save_key_file",
+        serde_json::json!({
+            "path": path,
+            "bytes": content.len(),
+            "success": result.is_ok(),
+            "error": result.as_ref().err(),
+        }),
+    );
+    result
 }
 
 /// 本地 TCP 连通性探测结果(无需 SSH 会话)
@@ -924,7 +1060,10 @@ pub async fn tcp_probe(host: String, port: u16, timeout_ms: Option<u64>) -> TcpP
             // 将常见错误翻译为更直观的提示
             let message = match e.kind() {
                 std::io::ErrorKind::ConnectionRefused => {
-                    format!("连接被拒绝: {}:{} 没有进程在监听(检查 sshd 是否启动 / 端口是否正确)", trimmed_host, port)
+                    format!(
+                        "连接被拒绝: {}:{} 没有进程在监听(检查 sshd 是否启动 / 端口是否正确)",
+                        trimmed_host, port
+                    )
                 }
                 std::io::ErrorKind::TimedOut => {
                     format!("连接超时: 网络不通或防火墙拦截")
@@ -1212,7 +1351,14 @@ fi
         }
     }
 
-    let take = |k: &str| values.get(k).cloned().unwrap_or_default().trim().to_string();
+    let take = |k: &str| {
+        values
+            .get(k)
+            .cloned()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
 
     info.hostname = take("HOSTNAME");
     info.os = take("OS");
@@ -1260,6 +1406,96 @@ fn base64_encode(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// T-1-2 / P0-2 验收：注入载荷必须 0 通过
+    #[test]
+    fn validate_host_rejects_every_shell_metacharacter() {
+        const INJECTIONS: &[&str] = &[
+            "ok; rm -rf /",
+            "ok && id",
+            "ok | nc host 4444",
+            "ok`id`",
+            "ok$(id)",
+            "ok > /tmp/x",
+            "ok < /etc/passwd",
+            "ok\ncd /",
+            "ok\r",
+            "ok'",
+            "ok\"",
+            "ok\\n",
+            "ok*",
+            "ok?",
+            "ok #comment",
+            "ok~",
+            "ok{}",
+            "ok()",
+            "ok<>",
+            "ok;",
+            "$(whoami).example.com",
+            "fe80::1%eth0",
+        ];
+        for host in INJECTIONS {
+            assert!(validate_host(host).is_err(), "应拒绝注入载荷: {:?}", host);
+        }
+    }
+
+    /// 控制字符不得靠 `trim()` 兜底：首尾位置的 \r \n \0 同样要拒
+    #[test]
+    fn validate_host_rejects_control_chars_at_any_position() {
+        for host in [
+            "ok\r",
+            "\rok",
+            "ok\r\n",
+            "ok\n",
+            "ok\t",
+            "ok\0",
+            "example.com\r rm -rf /",
+            "[::1]\r",
+        ] {
+            assert!(
+                validate_host(host).is_err(),
+                "应拒绝含控制字符的主机: {:?}",
+                host
+            );
+        }
+    }
+
+    /// 普通首尾空格仍要容忍（用户从文档里粘贴很常见），不能被新规则连带误伤
+    #[test]
+    fn validate_host_tolerates_surrounding_spaces() {
+        assert!(validate_host(" example.com ").is_ok());
+        assert!(validate_host("  10.0.0.1").is_ok());
+    }
+
+    #[test]
+    fn validate_host_accepts_normal_names_and_ipv6() {
+        const OK: &[&str] = &[
+            "example.com",
+            "10.0.0.1",
+            "db-01.internal",
+            "server_1",
+            "127.0.0.1",
+            "::1",
+            "2001:db8::1",
+            // 完整 IPv6 不含 "::"，同样要放行
+            "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+            "[2001:db8::1]",
+            "[::1]",
+        ];
+        for host in OK {
+            assert!(validate_host(host).is_ok(), "应接受合法主机: {:?}", host);
+        }
+    }
+
+    #[test]
+    fn validate_host_rejects_empty_and_oversized() {
+        assert!(validate_host("").is_err());
+        assert!(validate_host("   ").is_err());
+        assert!(validate_host("[]").is_err());
+        assert!(validate_host("[  ]").is_err());
+        assert!(validate_host(&"a".repeat(254)).is_err());
+        assert!(validate_host(&"a".repeat(253)).is_ok());
+    }
 
     #[test]
     fn connect_params_accepts_frontend_camel_case() {

@@ -326,7 +326,10 @@ mod tests {
             algo: public.name().to_string(),
             blob_b64: public.public_key_base64(),
         };
-        assert_eq!(verify(&[e.clone()], "[example.com]:2222", &public), Verdict::Trusted);
+        assert_eq!(
+            verify(&[e.clone()], "[example.com]:2222", &public),
+            Verdict::Trusted
+        );
         assert_eq!(
             verify(&[e], "example.com", &public),
             Verdict::Unknown {
@@ -346,7 +349,11 @@ mod tests {
             public.name(),
             &public.public_key_base64(),
         )];
-        match verify(&recorded, "example.com", &second.clone_public_key().unwrap()) {
+        match verify(
+            &recorded,
+            "example.com",
+            &second.clone_public_key().unwrap(),
+        ) {
             Verdict::Changed { .. } => {}
             other => panic!("expected Changed, got {:?}", other),
         }
@@ -361,7 +368,11 @@ mod tests {
             first.clone_public_key().unwrap().name(),
             &first.clone_public_key().unwrap().public_key_base64(),
         )];
-        match verify(&recorded, "example.com", &second.clone_public_key().unwrap()) {
+        match verify(
+            &recorded,
+            "example.com",
+            &second.clone_public_key().unwrap(),
+        ) {
             Verdict::Changed {
                 expected_fingerprint,
                 actual_fingerprint,

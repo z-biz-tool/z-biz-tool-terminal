@@ -11,6 +11,14 @@ import type {
   Snippet,
   ServerSystemInfo,
 } from "../types";
+// 与 commandGate 互相引用是安全的：两边都只在函数调用时读取对方，模块顶层无副作用
+import {
+  approveCommand,
+  decideCommand,
+  serverTargets,
+  type CommandSource,
+} from "../services/commandGate";
+import { attemptKey, backoffDelay, nextReconnectPlan } from "../utils/reconnectPolicy";
 
 /** 终端设置 */
 export interface TerminalSettings {
@@ -32,6 +40,20 @@ export interface TerminalSettings {
   ssh_agent_forward: boolean;
   background_image: string | null;
   custom_css: string | null;
+  /** 严格主机密钥校验：首次连接需确认、密钥变更拒绝连接（P0-1，关闭即回退旧行为） */
+  strict_host_key: boolean;
+  /** 会话日志开关 */
+  session_logging: boolean;
+  /** 会话日志脱敏（P-4） */
+  log_redaction: boolean;
+  /** 危险命令二次确认网关（P-2/P-1），关闭即回退为不拦截 */
+  dangerous_command_guard: boolean;
+  /** PTY 输出批处理窗口(ms)：窗口内的多个数据块合并成一次 IPC；0 = 逐块下发 */
+  pty_batch_window_ms: number;
+  /** 会话日志异步落盘（独立 task + 通道），关闭后退化为近同步写 */
+  session_log_async: boolean;
+  /** xterm WebGL 渲染器，关闭或加载失败即回退 DOM 渲染 */
+  webgl_renderer: boolean;
 }
 
 /** 持久化的分屏面板(只保存结构) */
@@ -113,8 +135,8 @@ interface ServerStore {
   setActiveTab: (tabId: string) => void;
   /** 关闭该服务器下所有 tab */
   disconnectServer: (serverId: string) => Promise<void>;
-  /** 在当前活动 tab 上执行命令 */
-  executeCommand: (serverId: string, command: string) => Promise<string>;
+  /** 在当前活动 tab 上执行命令（走 ssh_execute，结论会进后端审计） */
+  executeCommand: (serverId: string, command: string, source?: CommandSource) => Promise<string>;
 
   listSftp: (serverId: string, path: string) => Promise<void>;
   toggleSftp: (visible?: boolean) => void;
@@ -122,7 +144,7 @@ interface ServerStore {
   addSnippet: (snippet: Omit<Snippet, "id">) => void;
   updateSnippet: (id: string, snippet: Partial<Snippet>) => void;
   removeSnippet: (id: string) => void;
-  executeSnippet: (serverId: string, command: string) => void;
+  executeSnippet: (serverId: string, command: string) => Promise<void>;
   updateSettings: (settings: Partial<TerminalSettings>) => void;
   /** 分屏: 在指定 tab 中添加新面板(可指定连接其他服务器) */
   splitTab: (tabId: string, direction: SplitDirection, targetServerId?: string) => Promise<void>;
@@ -130,8 +152,8 @@ interface ServerStore {
   closePane: (tabId: string, paneId: string) => Promise<void>;
   /** 设置活动面板 */
   setActivePane: (tabId: string, paneId: string) => void;
-  /** 按面板重连指定服务器 */
-  reconnectPane: (tabId: string, paneId: string) => Promise<void>;
+  /** 按面板重连指定服务器；manual=true 表示用户主动点击，跳过退避并重置尝试次数 */
+  reconnectPane: (tabId: string, paneId: string, opts?: { manual?: boolean }) => Promise<void>;
   /** 自动重连某个 tab */
   reconnectTab: (tabId: string) => Promise<void>;
   /** 初始化 pty-closed 事件监听 */
@@ -150,6 +172,24 @@ interface ServerStore {
 
 function genId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+/** 每个面板累计的自动重连尝试次数；进程内状态，不进 config.json */
+const reconnectAttempts = new Map<string, number>();
+/** 排队中的自动重连定时器。closeTab/closePane 必须清掉，否则会往已销毁的面板重连 */
+const pendingReconnects = new Map<string, ReturnType<typeof setTimeout>>();
+
+function forgetReconnect(key: string) {
+  const timer = pendingReconnects.get(key);
+  if (timer !== undefined) clearTimeout(timer);
+  pendingReconnects.delete(key);
+  reconnectAttempts.delete(key);
+}
+
+/** 该 tab 下所有面板的重连状态（含已销毁面板的排队定时器） */
+function forgetTabReconnect(tabId: string) {
+  for (const key of [...pendingReconnects.keys()]) if (key.startsWith(`${tabId}:`)) forgetReconnect(key);
+  for (const key of [...reconnectAttempts.keys()]) if (key.startsWith(`${tabId}:`)) reconnectAttempts.delete(key);
 }
 
 /** 连接服务器的辅助函数，支持 ProxyJump */
@@ -215,6 +255,13 @@ const defaultSettings: TerminalSettings = {
   ssh_agent_forward: false,
   background_image: null,
   custom_css: null,
+  strict_host_key: true,
+  session_logging: true,
+  log_redaction: true,
+  dangerous_command_guard: true,
+  pty_batch_window_ms: 16,
+  session_log_async: true,
+  webgl_renderer: true,
 };
 
 export const useServerStore = create<ServerStore>((set, get) => ({
@@ -240,7 +287,8 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       config = await invoke<PersistConfig>("get_config");
       set({
         servers: config.servers || [],
-        settings: config.settings || defaultSettings,
+        // 逐字段兜底：旧配置文件/导入的半成品不会让新开关变成 undefined
+        settings: { ...defaultSettings, ...(config.settings || {}) },
         snippets: config.snippets || [],
         customGroups: config.custom_groups || [],
         loaded: true,
@@ -289,8 +337,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         set({ tabs: restoredTabs, activeTabId, activePaneId });
         // 自动重连所有恢复的 tab
         for (const tab of restoredTabs) {
-          const server = servers.find((s) => s.id === tab.serverId);
-          if (server) {
+          // 面板各自记 serverId：只要有一个面板的服务器还在就该重连
+          const alive = tab.panes.some((p) => servers.some((s) => s.id === p.serverId));
+          if (alive) {
             get().reconnectTab(tab.id);
           }
         }
@@ -498,13 +547,33 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     }
   },
 
-  reconnectPane: async (tabId, paneId) => {
+  reconnectPane: async (tabId, paneId, opts) => {
+    const key = attemptKey(tabId, paneId);
+    // 排队中的自动重试与本次合并：手动点重连时立刻执行，不要等两条并行
+    const queued = pendingReconnects.get(key);
+    if (queued !== undefined) {
+      clearTimeout(queued);
+      pendingReconnects.delete(key);
+    }
+
     const tab = get().tabs.find((t) => t.id === tabId);
     const pane = tab?.panes.find((p) => p.id === paneId);
     if (!tab || !pane || pane.state === "connecting") return;
 
+    const attempt = opts?.manual ? 1 : (reconnectAttempts.get(key) ?? 0) + 1;
+    reconnectAttempts.set(key, attempt);
+    const waitMs = opts?.manual ? 0 : backoffDelay(attempt);
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+    // 退避期间面板可能已被关掉/整个 tab 已关，必须重新确认再发连接
+    const stillTab = get().tabs.find((t) => t.id === tabId);
+    if (!stillTab?.panes.some((p) => p.id === paneId)) {
+      forgetReconnect(key);
+      return;
+    }
+
+    const isPrimary = stillTab.panes[0]?.id === paneId;
     const server = get().servers.find((s) => s.id === pane.serverId);
-    const isPrimary = tab.panes[0]?.id === paneId;
     if (!server) {
       set((state) => ({
         tabs: state.tabs.map((t) =>
@@ -544,9 +613,34 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       ),
     }));
 
+    // 失败后排一个退避重试；关掉自动重连或达到上限则清零，停在 error 态等用户
+    const planRetry = (failedAttempt: number) => {
+      const plan = nextReconnectPlan(failedAttempt);
+      if (!plan.retry || !get().settings.auto_reconnect) {
+        reconnectAttempts.delete(key);
+        return;
+      }
+      pendingReconnects.set(
+        key,
+        setTimeout(() => {
+          pendingReconnects.delete(key);
+          void get().reconnectPane(tabId, paneId);
+        }, plan.delayMs),
+      );
+    };
+
     try {
       const result = await connectToServer(server, get().settings, get().servers);
       if (result.success && result.session_id) {
+        // 连接期间面板被关掉：这条新会话没有归属，直接断开，不要留野会话（P-3）
+        if (!get().tabs.find((t) => t.id === tabId)?.panes.some((p) => p.id === paneId)) {
+          try {
+            await invoke("ssh_disconnect", { sessionId: result.session_id });
+          } catch {}
+          forgetReconnect(key);
+          return;
+        }
+        reconnectAttempts.delete(key);
         set((state) => ({
           tabs: state.tabs.map((t) =>
             t.id === tabId
@@ -582,6 +676,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
               : t
           ),
         }));
+        planRetry(attempt);
       }
     } catch (e) {
       const error = String(e);
@@ -601,6 +696,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
             : t
         ),
       }));
+      planRetry(attempt);
     } finally {
       get().persistTabs();
     }
@@ -619,7 +715,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         const retryPane =
           existing.panes.find((p) => p.state === "error" || p.state === "disconnected") ||
           firstPane;
-        if (retryPane) await get().reconnectPane(existing.id, retryPane.id);
+        if (retryPane) await get().reconnectPane(existing.id, retryPane.id, { manual: true });
         // 重连后从 tab 状态推断结果
         const refreshed = get().tabs.find((t) => t.id === existing.id);
         const refreshedPane = refreshed?.panes.find((p) => p.id === retryPane?.id);
@@ -653,6 +749,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   closeTab: async (tabId) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
+
+    // 先掐掉排队中的自动重连，否则关掉的 tab 会被定时器重新连回来
+    forgetTabReconnect(tabId);
 
     // 断开该 tab 全部面板的 SSH 会话
     for (const pane of tab.panes) {
@@ -697,14 +796,19 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   },
 
   disconnectServer: async (serverId) => {
-    // 关闭该服务器下所有 tab
-    const serverTabIds = get().tabs.filter((t) => t.serverId === serverId).map((t) => t.id);
-    for (const tid of serverTabIds) {
-      await get().closeTab(tid);
+    // 面板可以连到与 tab 顶层不同的服务器（分屏选目标机），按面板归属逐个关闭
+    for (const tab of [...get().tabs]) {
+      const mine = tab.panes.filter((p) => p.serverId === serverId);
+      if (mine.length === 0) continue;
+      if (mine.length === tab.panes.length) {
+        await get().closeTab(tab.id);
+      } else {
+        for (const p of mine) await get().closePane(tab.id, p.id);
+      }
     }
   },
 
-  executeCommand: async (serverId, command) => {
+  executeCommand: async (serverId, command, source) => {
     // 在该服务器的活动 tab 上执行 (优先 activeTab, 否则任意一个)
     const tab =
       get().tabs.find((t) => t.serverId === serverId && t.id === get().activeTabId) ||
@@ -712,9 +816,13 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     const activePane = tab?.panes.find((p) => p.id === get().activePaneId);
     const sessionId = activePane?.sessionId || tab?.sessionId;
     if (!sessionId) throw new Error("会话未连接");
+    // ssh_execute 同样是命令下发口，不能绕过网关（P-2）
+    const targets = serverTargets([activePane?.serverId ?? tab?.serverId ?? serverId]);
+    const { approved, gate } = await decideCommand(command, targets, source ?? "manual");
+    if (!approved) throw new Error("已取消");
     const result = await invoke<{ success: boolean; output: string; error?: string }>(
       "ssh_execute",
-      { sessionId, command }
+      { sessionId, command, gate }
     );
     if (!result.success) throw new Error(result.error || "命令执行失败");
     return result.output;
@@ -766,13 +874,16 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     get().persistSnippets();
   },
 
-  executeSnippet: (serverId, command) => {
+  executeSnippet: async (serverId, command) => {
     const tab =
       get().tabs.find((t) => t.serverId === serverId && t.id === get().activeTabId) ||
       get().tabs.find((t) => t.serverId === serverId);
     const activePane = tab?.panes.find((p) => p.id === get().activePaneId);
     const sessionId = activePane?.sessionId || tab?.sessionId;
     if (!sessionId) return;
+    // Snippet 同样是命令下发口，必须过同一道闸门（P-2）
+    const targets = serverTargets([activePane?.serverId ?? tab?.serverId ?? serverId]);
+    if (!(await approveCommand(command, targets, "snippet"))) return;
     invoke("ssh_pty_write", { sessionId, data: command + "\n" }).catch((e) => {
       console.error("执行快捷命令失败:", e);
     });
@@ -867,6 +978,8 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
 
+    forgetReconnect(attemptKey(tabId, paneId));
+
     const pane = tab.panes.find((p) => p.id === paneId);
     if (pane?.sessionId) {
       try {
@@ -916,95 +1029,19 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   reconnectTab: async (tabId) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
-    const server = get().servers.find((s) => s.id === tab.serverId);
-    if (!server) return;
 
     const { reconnectingTabs } = get();
     if (reconnectingTabs.has(tabId)) return;
 
     set({ reconnectingTabs: new Set([...reconnectingTabs, tabId]) });
-
-    // 标记 tab 为重连中
-    set((state) => ({
-      tabs: state.tabs.map((t) =>
-        t.id === tabId
-          ? {
-              ...t,
-              state: "connecting" as const,
-              error: undefined,
-              panes: t.panes.map((p) => ({
-                ...p,
-                state: "connecting" as const,
-                error: undefined,
-                sessionId: undefined,
-              })),
-            }
-          : t
-      ),
-    }));
-
-    // 等待 3 秒再重连
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-
     try {
-      const settings = get().settings;
-      const result = await connectToServer(server, settings, get().servers);
-
-      if (result.success && result.session_id) {
-        set((state) => ({
-          tabs: state.tabs.map((t) =>
-            t.id === tabId
-              ? {
-                  ...t,
-                  state: "connected" as const,
-                  sessionId: result.session_id,
-                  panes: t.panes.map((p, i) =>
-                    i === 0
-                      ? { ...p, state: "connected" as const, sessionId: result.session_id }
-                      : p
-                  ),
-                }
-              : t
-          ),
-          reconnectingTabs: new Set(
-            [...state.reconnectingTabs].filter((id) => id !== tabId)
-          ),
-        }));
-      } else {
-        set((state) => ({
-          tabs: state.tabs.map((t) =>
-            t.id === tabId
-              ? {
-                  ...t,
-                  state: "error" as const,
-                  error: result.error || "重连失败",
-                  panes: t.panes.map((p, i) =>
-                    i === 0
-                      ? { ...p, state: "error" as const, error: result.error || "重连失败" }
-                      : p
-                  ),
-                }
-              : t
-          ),
-          reconnectingTabs: new Set(
-            [...state.reconnectingTabs].filter((id) => id !== tabId)
-          ),
-        }));
-      }
-    } catch (e: any) {
+      // 逐面板重连：分屏面板可以连到不同服务器（pane.serverId），
+      // 旧实现只恢复 panes[0]，其余面板被永久留在 connecting 且 sessionId 已被清空。
+      await Promise.all(
+        tab.panes.map((p) => get().reconnectPane(tabId, p.id, { manual: true })),
+      );
+    } finally {
       set((state) => ({
-        tabs: state.tabs.map((t) =>
-          t.id === tabId
-            ? {
-                ...t,
-                state: "error" as const,
-                error: String(e),
-                panes: t.panes.map((p, i) =>
-                  i === 0 ? { ...p, state: "error" as const, error: String(e) } : p
-                ),
-              }
-            : t
-        ),
         reconnectingTabs: new Set(
           [...state.reconnectingTabs].filter((id) => id !== tabId)
         ),

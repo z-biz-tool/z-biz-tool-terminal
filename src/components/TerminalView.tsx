@@ -2,12 +2,18 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
 import type { ILinkProvider, ILink, IBufferRange, IBufferCellPosition } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useServerStore } from "../stores/serverStore";
 import { LoadingState, ErrorState } from "@/_shared";
 import TerminalSearch from "./TerminalSearch";
+import { LineInputGuard, type PushOptions } from "../utils/inputGuard";
+import { createBackpressuredWriter } from "../utils/terminalWriter";
+import { attachWebglRenderer } from "../utils/webglRenderer";
+import { ensurePtyListening, subscribePtyOutput } from "../services/ptyBus";
+import { approveCommand, guardEnabled, paneTargets } from "../services/commandGate";
+import { registerTerminal } from "../services/terminalFeeds";
 import ZmodemOverlay, { isZmodemHandshake, type ZmodemState, type ZmodemTransferType } from "./ZmodemOverlay";
 
 const THEMES: Record<string, {
@@ -119,7 +125,6 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  const unlistenRef = useRef<UnlistenFn | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [zmodemState, setZmodemState] = useState<ZmodemState>({
@@ -140,6 +145,14 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   const paneState = pane?.state;
   const paneSessionId = pane?.sessionId;
   const paneError = pane?.error;
+
+  // 确认弹窗要展示"影响哪台主机"，闭包里的 props 可能过期，这里始终取最新值
+  const paneIdsRef = useRef({ tabId, paneId });
+  paneIdsRef.current = { tabId, paneId };
+  /** 终端初始化时安装的"输入→PTY"闸门，粘贴路径复用它以保证同一套判断 */
+  const feedInputRef = useRef<((payload: string, opts?: PushOptions) => Promise<void>) | null>(
+    null,
+  );
 
   // 暴露给搜索组件的 buffer 访问函数
   const bufferApi = {
@@ -194,87 +207,141 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
     term.open(terminalRef.current);
     fitAddon.fit();
 
+    // WebGL 渲染（T-3-7）：刷屏时明显比 DOM 渲染省。装不上或中途丢上下文都会
+    // 自动退回 DOM 渲染器，因此这里只 warn，不让终端变成空白。
+    const renderer = attachWebglRenderer(
+      term,
+      {
+        enabled: settings.webgl_renderer !== false,
+        onFallback: (reason) => console.warn(`[terminal ${tabId}:${paneId ?? "main"}] ${reason}`),
+      },
+      () => new WebglAddon(),
+    );
+
     termRef.current = term;
     fitRef.current = fitAddon;
 
     const sessionId = paneSessionId!;
     const { cols, rows } = term;
+    // 输出统一经合并写入器进 xterm：一次 write 结束后才取下一批（T-3-3）
+    const writer = createBackpressuredWriter(term);
 
-    // Listen before starting PTY so the initial shell prompt is not lost.
-    const ptyOutputHandler = (event: any) => {
-      const payload = event.payload;
-      if (payload.session_id === sessionId) {
-        const data = payload.data as string;
+    // Subscribe before starting PTY so the initial shell prompt is not lost.
+    // 监听器全应用共用一个，按 session_id 本地分发，分屏不再各自反序列化同一条事件。
+    const ptyOutputHandler = (data: string) => {
+      // ZMODEM detection
+      if (isZmodemHandshake(data)) {
+        zmodemActiveRef.current = true;
+        zmodemBufferRef.current = data;
 
-        // ZMODEM detection
-        if (isZmodemHandshake(data)) {
-          zmodemActiveRef.current = true;
-          zmodemBufferRef.current = data;
+        // Determine transfer type based on the command context
+        // rz = upload (remote wants to receive), sz = download (remote wants to send)
+        // Check the buffer for hints
+        const isUpload = data.includes("rz") || !data.includes("000000000");
+        const transferType: ZmodemTransferType = isUpload ? "upload" : "download";
 
-          // Determine transfer type based on the command context
-          // rz = upload (remote wants to receive), sz = download (remote wants to send)
-          // Check the buffer for hints
-          const isUpload = data.includes("rz") || !data.includes("000000000");
-          const transferType: ZmodemTransferType = isUpload ? "upload" : "download";
+        setZmodemState({
+          active: true,
+          type: transferType,
+          filename: "",
+          progress: 0,
+          status: "detecting",
+        });
 
-          setZmodemState({
-            active: true,
-            type: transferType,
-            filename: "",
-            progress: 0,
-            status: "detecting",
-          });
-
-          // Don't write ZMODEM handshake bytes to terminal
-          return;
-        }
-
-        // If ZMODEM is active, buffer the data instead of writing to terminal
-        if (zmodemActiveRef.current) {
-          zmodemBufferRef.current += data;
-          // Check for ZMODEM end marker
-          if (data.includes("OO") || data.includes("\x18\x18\x18\x18")) {
-            zmodemActiveRef.current = false;
-            setZmodemState((prev) => ({
-              ...prev,
-              active: false,
-              status: "completed",
-            }));
-          }
-          return;
-        }
-
-        term.write(data);
+        // Don't write ZMODEM handshake bytes to terminal
+        return;
       }
+
+      // If ZMODEM is active, buffer the data instead of writing to terminal
+      if (zmodemActiveRef.current) {
+        zmodemBufferRef.current += data;
+        // Check for ZMODEM end marker
+        if (data.includes("OO") || data.includes("\x18\x18\x18\x18")) {
+          zmodemActiveRef.current = false;
+          setZmodemState((prev) => ({
+            ...prev,
+            active: false,
+            status: "completed",
+          }));
+        }
+        return;
+      }
+
+      writer.push(data);
     };
 
+    const unsubscribe = subscribePtyOutput(sessionId, ptyOutputHandler);
+
     let disposed = false;
-    listen("pty-output", ptyOutputHandler)
-      .then((unlisten) => {
-        if (disposed) {
-          unlisten();
-          return;
-        }
-        unlistenRef.current = unlisten;
-        return invoke<{ success: boolean; error?: string }>("ssh_start_pty", {
+    ensurePtyListening()
+      .then(() =>
+        invoke<{ success: boolean; error?: string }>("ssh_start_pty", {
           sessionId,
           cols,
           rows,
-        }).then((result) => {
-          if (!result.success && !disposed) {
-            term.write(`\r\n\x1b[31mPTY启动失败: ${result.error || "未知错误"}\x1b[0m\r\n`);
-          }
-        });
+        })
+      )
+      .then((result) => {
+        if (!result.success && !disposed) {
+          writer.push(`\r\n\x1b[31mPTY启动失败: ${result.error || "未知错误"}\x1b[0m\r\n`);
+        }
       })
       .catch((e) => {
         if (!disposed) {
-          term.write(`\r\n\x1b[31mPTY启动失败: ${String(e)}\x1b[0m\r\n`);
+          writer.push(`\r\n\x1b[31mPTY启动失败: ${String(e)}\x1b[0m\r\n`);
         }
       });
 
     // Send user input to PTY
+    // 手输路径也过危险命令网关（P-2）：按行缓冲，命中时扣下回车，确认后再补发。
+    const inputGuard = new LineInputGuard();
+    let unregisterFeed: (() => void) | null = null;
+    const writePty = (payload: string) => {
+      if (payload) invoke("ssh_pty_write", { sessionId, data: payload }).catch(() => {});
+    };
+    const feedInput = async (payload: string, opts: PushOptions = {}): Promise<void> => {
+      if (!payload) return;
+      // 备用屏里（vim/less/top）输入不是 shell 命令，拦截只会误伤
+      if (!guardEnabled() || term.buffer.active.type === "alternate") {
+        writePty(payload);
+        return;
+      }
+      const { forward, heldLine } = inputGuard.push(payload, opts);
+      writePty(forward);
+      if (!heldLine) return;
+      const aiSource = inputGuard.aiSourced;
+      const approved = await approveCommand(
+        heldLine,
+        paneTargets(paneIdsRef.current.tabId, paneIdsRef.current.paneId),
+        aiSource ? "ai" : opts.paste ? "paste" : "manual",
+      );
+      if (!approved) {
+        inputGuard.cancel();
+        return;
+      }
+      const { forward: enter, rest } = inputGuard.release();
+      writePty(enter);
+      if (rest) await feedInput(rest, opts);
+    };
     term.onData((data) => {
-      invoke("ssh_pty_write", { sessionId, data }).catch(() => {});
+      void feedInput(data);
+    });
+    feedInputRef.current = feedInput;
+    // AI 建议的命令只能填入命令行、不能自动执行（P-1）：复用同一条带网关的输入通道。
+    // 同时把"读"侧(选区/最近输出)暴露出去，供命令解释与错误分析取分析对象（T-2-3）。
+    unregisterFeed = registerTerminal(paneIdsRef.current.tabId, paneIdsRef.current.paneId, {
+      feed: (payload, o) => {
+        void feedInput(payload, o);
+      },
+      selection: () => term.getSelection(),
+      recentOutput: (lines) => {
+        const buf = term.buffer.active;
+        const bottom = buf.baseY + buf.cursorY;
+        const top = Math.max(0, bottom - lines + 1);
+        const out: string[] = [];
+        for (let y = top; y <= bottom; y++) out.push(buf.getLine(y)?.translateToString(true) ?? "");
+        return out.join("\n");
+      },
     });
 
     // Handle resize
@@ -295,13 +362,15 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
       disposed = true;
       ro.disconnect();
       resizeObserverRef.current = null;
-      if (unlistenRef.current) {
-        unlistenRef.current();
-        unlistenRef.current = null;
-      }
+      unsubscribe();
+      writer.dispose();
+      renderer.dispose();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      feedInputRef.current = null;
+      unregisterFeed?.();
+      unregisterFeed = null;
     };
   }, [paneState, paneSessionId]);
 
@@ -542,7 +611,8 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   }, [paneState, paneSessionId]);
 
   const handleRetry = () => {
-    if (pane) reconnectPane(tabId, pane.id);
+    // 用户点按钮 = 立刻重试，不吃退避延迟、也不被历史失败次数拖慢
+    if (pane) void reconnectPane(tabId, pane.id, { manual: true });
   };
 
   const handleFocus = () => {
@@ -614,9 +684,19 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
             e.preventDefault();
             if (!paneSessionId) return;
             navigator.clipboard.readText().then((text) => {
-              if (text) {
-                invoke("ssh_pty_write", { sessionId: paneSessionId, data: text }).catch(() => {});
+              if (!text) return;
+              // 走与键盘输入同一条闸门：多行粘贴会逐行判断，命中危险行就扣下回车
+              const feed = feedInputRef.current;
+              if (feed) {
+                void feed(text, { paste: true });
+                return;
               }
+              // 终端实例尚未就绪：至少把整段文本整体判一次再写
+              void approveCommand(text, paneTargets(tabId, paneId), "paste").then((ok) => {
+                if (ok) {
+                  invoke("ssh_pty_write", { sessionId: paneSessionId, data: text }).catch(() => {});
+                }
+              });
             }).catch(() => {});
           }}
         />
