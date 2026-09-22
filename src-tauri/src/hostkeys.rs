@@ -140,7 +140,9 @@ pub fn record(entry: &HostKeyEntry) -> Result<(), String> {
 
 pub fn record_at(path: &PathBuf, entry: &HostKeyEntry) -> Result<(), String> {
     let mut entries = read_entries_at(path);
-    entries.retain(|e| e.host != entry.host);
+    // 只替换"同主机 + 同算法"的旧记录。一台主机通常同时有 rsa 与 ed25519 两把
+    // host key，若按主机名整条覆盖，两次连接的算法协商一变就会反复要求确认指纹。
+    entries.retain(|e| !(e.host == entry.host && e.algo == entry.algo));
     entries.push(entry.clone());
 
     let mut buf = String::new();
@@ -198,13 +200,18 @@ pub fn verify(entries: &[HostKeyEntry], host_spec: &str, key: &PublicKey) -> Ver
     // 同算法不一致是典型的密钥被替换；仅算法不同则按未知处理（服务端升级了 host key 类型）。
     if let Some(same_algo) = matched.iter().find(|e| e.algo == current.algo) {
         return Verdict::Changed {
-            expected_fingerprint: format!("SHA256:{}", blob_fingerprint(&same_algo.blob_b64)),
+            expected_fingerprint: entry_fingerprint(same_algo),
             actual_fingerprint: fingerprint(key),
         };
     }
     Verdict::Unknown {
         fingerprint: fingerprint(key),
     }
+}
+
+/// 已存记录的指纹，界面展示与"密钥变更"提示共用同一口径
+pub fn entry_fingerprint(entry: &HostKeyEntry) -> String {
+    format!("SHA256:{}", blob_fingerprint(&entry.blob_b64))
 }
 
 /// 对已存的 base64 blob 求指纹，避免依赖反序列化实现
@@ -222,6 +229,107 @@ pub fn trust(host_spec: &str, key: &PublicKey) -> Result<(), String> {
     let mut entry = entry_of(key);
     entry.host = host_spec.to_string();
     record(&entry)
+}
+
+// ---------------------------------------------------------------------------
+// 界面用：查看 / 撤销已信任主机（T-5-3）
+// ---------------------------------------------------------------------------
+
+/// 一条可直接展示的信任记录
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostKeyView {
+    /// known_hosts 里的主机标识，形如 `example.com` 或 `[10.0.0.1]:2222`
+    pub host_spec: String,
+    /// 裸主机名（`[host]:port` 已去掉方括号与端口）
+    pub host: String,
+    /// 非 22 端口时给出端口，默认端口为 null
+    pub port: Option<u16>,
+    pub algo: String,
+    pub fingerprint: String,
+    /// SHA-1 签名的 `ssh-rsa` 与已淘汰的 DSA：界面据此给弱算法提示
+    pub weak_algo: bool,
+}
+
+/// 把 known_hosts 的主机标识还原成 (host, port)。端口只在 `[host]:port` 写法下存在。
+pub fn split_host_spec(host_spec: &str) -> (String, Option<u16>) {
+    let trimmed = host_spec.trim();
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some(close) = rest.find(']') {
+            let host = rest[..close].to_string();
+            let port_part = &rest[close + 1..];
+            let port = port_part
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok())
+                .filter(|p| *p != 0);
+            return (host, port);
+        }
+    }
+    (trimmed.to_string(), None)
+}
+
+fn is_weak_algo(algo: &str) -> bool {
+    // ssh-dss 已被 OpenSSH 默认禁用；ssh-rsa 走 SHA-1 签名，同样不再安全。
+    matches!(algo, "ssh-dss" | "ssh-rsa")
+}
+
+/// 供界面展示的全部信任记录（同一主机多算法会展开成多行）
+pub fn list_views() -> Vec<HostKeyView> {
+    load()
+        .iter()
+        .map(|e| {
+            let (host, port) = split_host_spec(&e.host);
+            HostKeyView {
+                fingerprint: entry_fingerprint(e),
+                weak_algo: is_weak_algo(&e.algo),
+                host_spec: e.host.clone(),
+                host,
+                port,
+                algo: e.algo.clone(),
+            }
+        })
+        .collect()
+}
+
+/// known_hosts 的主机标识只允许这些字符；控制字符与空白一律拒（避免写出畸形行）
+fn valid_host_spec(host_spec: &str) -> Result<(), String> {
+    let len = host_spec.trim().chars().count();
+    if len == 0 {
+        return Err("主机标识不能为空".into());
+    }
+    if len > 255 {
+        return Err("主机标识过长".into());
+    }
+    if host_spec.chars().any(|c| {
+        c.is_control()
+            || c.is_whitespace()
+            || matches!(c, '#' | '@' | '\n' | '\r' | '\\' | '"' | '\'')
+    }) {
+        return Err("主机标识含非法字符".into());
+    }
+    Ok(())
+}
+
+/// 列出已信任主机（设置页「主机信任」用）
+#[tauri::command]
+pub async fn known_hosts_list() -> Result<Vec<HostKeyView>, String> {
+    Ok(list_views())
+}
+
+/// 撤销对某主机的信任。下一次连接会重新按首次信任（TOFU）流程确认指纹。
+#[tauri::command]
+pub async fn known_hosts_remove(host_spec: String) -> Result<usize, String> {
+    let spec = host_spec.trim().to_string();
+    valid_host_spec(&spec)?;
+    let removed = remove(&spec);
+    crate::audit::record(
+        "known_hosts_revoke",
+        serde_json::json!({ "host_spec": &spec, "removed": removed }),
+    );
+    if removed == 0 {
+        return Err(format!("没有找到 {} 的信任记录", spec));
+    }
+    Ok(removed)
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +492,29 @@ mod tests {
         }
     }
 
+    /// 一台主机常同时有 rsa 与 ed25519 两把 host key：按算法分别保留，
+    /// 否则协商一变就要用户重新确认指纹（反复的"疑似中间人"误报）。
+    #[test]
+    fn different_algorithms_for_one_host_coexist() {
+        let path = temp_path("multi-algo");
+        record_at(&path, &entry("h", "ssh-ed25519", "AAAAed")).unwrap();
+        record_at(&path, &entry("h", "ssh-rsa", "AAAArg")).unwrap();
+        let all = read_entries_at(&path);
+        assert_eq!(all.len(), 2, "两种算法都该留下");
+
+        // 同算法换钥匙才是替换
+        record_at(&path, &entry("h", "ssh-rsa", "AAAROTATED")).unwrap();
+        let after = read_entries_at(&path);
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().any(|e| e.blob_b64 == "AAAROTATED"));
+        assert!(!after.iter().any(|e| e.blob_b64 == "AAAArg"));
+
+        // 撤销信任按主机走，一次清掉该主机的全部算法
+        assert_eq!(remove_at(&path, "h"), 2);
+        assert!(read_entries_at(&path).is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn record_then_remove_roundtrip() {
         let path = temp_path("roundtrip");
@@ -414,5 +545,111 @@ mod tests {
         register_request("req-2");
         drop_request("req-2");
         assert!(!resolve_request("req-2", true));
+    }
+
+    #[test]
+    fn splits_bracketed_host_spec_only() {
+        assert_eq!(split_host_spec("example.com"), ("example.com".into(), None));
+        assert_eq!(
+            split_host_spec("[10.0.0.1]:2222"),
+            ("10.0.0.1".into(), Some(2222))
+        );
+        // OpenSSH 只对非默认端口加方括号；裸 host:port 不是合法标识，原样留作主机名
+        assert_eq!(split_host_spec("host:2222"), ("host:2222".into(), None));
+        assert_eq!(split_host_spec("[only-host]"), ("only-host".into(), None));
+        // 端口写坏（0 或非数字）不能假装成默认端口之外的值
+        assert_eq!(split_host_spec("[h]:0"), ("h".into(), None));
+        assert_eq!(split_host_spec("[h]:abc"), ("h".into(), None));
+    }
+
+    #[test]
+    fn view_fingerprint_matches_connection_prompt() {
+        // 界面列出的指纹必须和首连弹窗/变更告警用同一口径，否则用户无法比对
+        let key = russh::keys::key::KeyPair::generate_ed25519().unwrap();
+        let public = key.clone_public_key().unwrap();
+        let e = entry("h1", public.name(), &public.public_key_base64());
+        assert_eq!(entry_fingerprint(&e), fingerprint(&public));
+    }
+
+    #[tokio::test]
+    async fn list_views_exposes_host_port_and_weak_algo() {
+        let _guard = crate::config::lock_config_dir_env();
+        let dir = std::env::temp_dir().join(format!("zterm-hostkeys-views-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("Z_TERMINAL_CONFIG_DIR", &dir);
+
+        let path = dir.join("known_hosts");
+        record_at(&path, &entry("[10.0.0.1]:2222", "ssh-ed25519", "AAAAed")).unwrap();
+        record_at(&path, &entry("legacy.example.com", "ssh-rsa", "AAAArg")).unwrap();
+        // 同一主机的多种算法应各占一行
+        record_at(&path, &entry("multi.example.com", "ssh-ed25519", "AAAAa")).unwrap();
+
+        let views = list_views();
+        assert_eq!(views.len(), 3, "每条 host/算法组合都应单独列出");
+        let first = &views[0];
+        assert_eq!(first.host, "10.0.0.1");
+        assert_eq!(first.port, Some(2222));
+        assert!(!first.weak_algo);
+        assert!(first.fingerprint.starts_with("SHA256:"));
+        assert!(
+            views[1].weak_algo,
+            "ssh-rsa 走 SHA-1 签名，界面要标成弱算法"
+        );
+        assert_eq!(views[1].port, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("Z_TERMINAL_CONFIG_DIR");
+    }
+
+    #[tokio::test]
+    async fn remove_revokes_only_the_named_host() {
+        let _guard = crate::config::lock_config_dir_env();
+        let dir =
+            std::env::temp_dir().join(format!("zterm-hostkeys-revoke-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("Z_TERMINAL_CONFIG_DIR", &dir);
+
+        let path = known_hosts_path();
+        record_at(&path, &entry("keep.example.com", "ssh-ed25519", "AAAAkeep")).unwrap();
+        record_at(&path, &entry("drop.example.com", "ssh-ed25519", "AAAAdrop")).unwrap();
+
+        assert_eq!(
+            known_hosts_remove("drop.example.com".into()).await.unwrap(),
+            1
+        );
+        let left: Vec<String> = read_entries_at(&path).into_iter().map(|e| e.host).collect();
+        assert_eq!(left, vec!["keep.example.com".to_string()]);
+
+        // 不存在的主机要如实报错，而不是回一个"成功删除 0 条"
+        assert!(known_hosts_remove("ghost.example.com".into())
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("Z_TERMINAL_CONFIG_DIR");
+    }
+
+    #[tokio::test]
+    async fn remove_rejects_malformed_host_spec() {
+        let _guard = crate::config::lock_config_dir_env();
+        for bad in [
+            "",
+            "   ",
+            "a\nb",
+            "host extra",
+            "host\r",
+            "@dangerous",
+            "#comment",
+            &"h".repeat(300),
+        ] {
+            assert!(
+                known_hosts_remove(bad.to_string()).await.is_err(),
+                "{} 不该被当成合法主机标识",
+                bad.escape_debug()
+            );
+        }
+        assert!(valid_host_spec("[10.0.0.1]:2222").is_ok());
+        assert!(valid_host_spec("example.com").is_ok());
     }
 }

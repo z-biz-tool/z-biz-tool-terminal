@@ -607,21 +607,6 @@ pub async fn save_ai_config(config: AiConfig) -> Result<(), String> {
     save_config(&app)
 }
 
-/// 列出已信任的主机密钥
-#[tauri::command]
-pub async fn list_host_keys() -> Result<Vec<crate::hostkeys::HostKeyEntry>, String> {
-    Ok(crate::hostkeys::load())
-}
-
-/// 删除某主机的信任记录（用于换钥匙 / 误信任后撤销）
-#[tauri::command]
-pub async fn remove_host_key(host_spec: String) -> Result<usize, String> {
-    if host_spec.trim().is_empty() {
-        return Err("host_spec 不能为空".into());
-    }
-    Ok(crate::hostkeys::remove(host_spec.trim()))
-}
-
 /// 导入配置
 #[tauri::command]
 pub async fn import_config(path: String) -> Result<AppConfig, String> {
