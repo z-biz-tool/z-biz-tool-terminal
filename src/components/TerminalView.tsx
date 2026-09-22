@@ -138,7 +138,8 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   const zmodemBufferRef = useRef<string>("");
   const zmodemActiveRef = useRef(false);
 
-  const { tabs, settings, setActivePane, reconnectPane } = useServerStore();
+  const { tabs, settings, setActivePane, reconnectPane, activeTabId, activePaneId } =
+    useServerStore();
   const tab = tabs.find((t) => t.id === tabId);
   // 优先按 paneId 找到对应 pane (split 时 pane 可能连的是其他 server),
   // 找不到时回落到 tab 的主面板(panes[0])
@@ -146,6 +147,8 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   const paneState = pane?.state;
   const paneSessionId = pane?.sessionId;
   const paneError = pane?.error;
+  const isActivePane =
+    !!tabId && tabId === activeTabId && !!pane && pane.id === activePaneId;
 
   // 确认弹窗要展示"影响哪台主机"，闭包里的 props 可能过期，这里始终取最新值
   const paneIdsRef = useRef({ tabId, paneId });
@@ -621,6 +624,12 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
       setActivePane(tab.id, paneId);
     }
   };
+
+  // store 里的"活跃面板"换了，xterm 那个隐藏 textarea 的 DOM 焦点不会跟过来：
+  // 之前只有鼠标点击会转移输入焦点，切标签或 ⌘⇧←/→ 换面板后敲字仍落在原面板。
+  useEffect(() => {
+    if (isActivePane) termRef.current?.focus();
+  }, [isActivePane]);
 
   // ZMODEM handlers
   const handleZmodemCancel = useCallback(() => {

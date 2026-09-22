@@ -189,14 +189,33 @@ function AppInner() {
       // Cmd/Ctrl + Shift + H - 水平分屏
       if (hit(e, "split-horizontal", mac)) {
         e.preventDefault();
-        if (activeTabId) splitTab(activeTabId, "horizontal");
+        // 必须现取：这个 effect 的依赖是 []，用渲染闭包里的 activeTabId 会永远停在首次渲染的值
+        const id = useServerStore.getState().activeTabId;
+        if (id) splitTab(id, "horizontal");
         return;
       }
 
       // Cmd/Ctrl + Shift + V - 垂直分屏
       if (hit(e, "split-vertical", mac)) {
         e.preventDefault();
-        if (activeTabId) splitTab(activeTabId, "vertical");
+        const id = useServerStore.getState().activeTabId;
+        if (id) splitTab(id, "vertical");
+        return;
+      }
+
+      // Cmd/Ctrl + Shift + ←/→ - 在分屏面板间移动输入焦点
+      const goNextPane = hit(e, "focus-next-pane", mac);
+      if (goNextPane || hit(e, "focus-prev-pane", mac)) {
+        const st = useServerStore.getState();
+        const tab = st.tabs.find((t) => t.id === st.activeTabId);
+        // 只有一个面板时绝不吞掉方向键：终端里 ←/→ 是行编辑的命脉
+        if (!tab || tab.panes.length < 2) return;
+        e.preventDefault();
+        const dir = goNextPane ? 1 : -1;
+        const found = tab.panes.findIndex((p) => p.id === st.activePaneId);
+        const idx = found < 0 ? 0 : found;
+        const next = tab.panes[(idx + dir + tab.panes.length) % tab.panes.length];
+        st.setActivePane(tab.id, next.id);
         return;
       }
 

@@ -141,6 +141,20 @@ const SHORTCUTS = [
     wiredIn: "src/App.tsx",
   },
   {
+    id: "focus-prev-pane",
+    group: "layout",
+    label: "聚焦上一个分屏面板",
+    combo: { key: "ArrowLeft", mod: true, shift: true },
+    wiredIn: "src/App.tsx",
+  },
+  {
+    id: "focus-next-pane",
+    group: "layout",
+    label: "聚焦下一个分屏面板",
+    combo: { key: "ArrowRight", mod: true, shift: true },
+    wiredIn: "src/App.tsx",
+  },
+  {
     id: "show-shortcuts",
     group: "layout",
     label: "显示快捷键",
@@ -250,9 +264,19 @@ export function comboKey(combo: Combo): string {
   return `ctrl${combo.shift ? "+shift" : ""}+${combo.key === "digit" ? "digit" : combo.key.toUpperCase()}`;
 }
 
+/** 命名键的展示形式：`ArrowRight` 这种全名放进键帽里读不动 */
+const NAME_CAP: Record<string, string> = {
+  ArrowLeft: "←",
+  ArrowRight: "→",
+  ArrowUp: "↑",
+  ArrowDown: "↓",
+  Tab: "Tab",
+};
+
 /** 键帽文本：单字符统一大写，`Tab` 这类命名键保留原样（大写成 TAB 会读成"按下 TAB 键"以外的意思） */
 function keyCap(combo: Combo): string {
   if (combo.key === "digit") return "1-9";
+  if (NAME_CAP[combo.key]) return NAME_CAP[combo.key];
   return combo.key.length === 1 ? combo.key.toUpperCase() : combo.key;
 }
 

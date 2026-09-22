@@ -167,16 +167,18 @@
 | `Ctrl+W` | 关闭当前标签 |
 | `Ctrl+Tab` | 切换到下一个标签 |
 | `Ctrl+1-9` | 切换到第 N 个标签 |
-| `Ctrl+Shift+E` | 切换 SFTP 面板 |
-| `Ctrl+Shift+S` | 切换命令片段面板 |
-| `Ctrl+Shift+H` | 水平分屏 |
-| `Ctrl+Shift+V` | 垂直分屏 |
-| `Ctrl+/` | 显示快捷键 |
 | `Ctrl+L` | 快速连接栏 |
 | `Ctrl+K` | 打开命令面板 |
 | `Ctrl+Shift+P` | 命令面板（VSCode 风格） |
 | `Ctrl+Shift+Y` | 命令历史检索（只填入、不执行） |
 | `Ctrl+F` | 在当前终端里搜索 |
+| `Ctrl+Shift+E` | 切换 SFTP 面板 |
+| `Ctrl+Shift+S` | 切换命令片段面板 |
+| `Ctrl+Shift+H` | 水平分屏 |
+| `Ctrl+Shift+V` | 垂直分屏 |
+| `Ctrl+Shift+←` | 聚焦上一个分屏面板 |
+| `Ctrl+Shift+→` | 聚焦下一个分屏面板 |
+| `Ctrl+/` | 显示快捷键 |
 | `Ctrl+Shift+I` | AI 聊天助手 |
 | `Ctrl+Shift+X` | AI 命令解释（分析选区） |
 | `Ctrl+Shift+A` | AI 错误分析 |

@@ -97,6 +97,25 @@ const K = (over: Partial<KeyLike> = {}): KeyLike => ({
   // 曾经的事故：没有修饰键的 Shift+3 会在终端里弹出 AI 面板
   eq("Shift+3 不再劫持", hit(K({ key: "#", shiftKey: true }), "ai-natural-language", false), false);
   eq("⌘⇧N 接管自然语言转命令", hit(K({ key: "N", metaKey: true, shiftKey: true }), "ai-natural-language", true), true);
+  // 分屏聚焦走方向键，但裸方向键必须原样留给终端（行编辑/历史命令）
+  eq("⌘⇧→ 命中", hit(K({ key: "ArrowRight", metaKey: true, shiftKey: true }), "focus-next-pane", true), true);
+  eq("⌘⇧← 命中", hit(K({ key: "ArrowLeft", ctrlKey: true, shiftKey: true }), "focus-prev-pane", false), true);
+  eq("⌘→（无 Shift）不命中", hit(K({ key: "ArrowRight", metaKey: true }), "focus-next-pane", true), false);
+  // 裸方向键（终端的行编辑与历史命令）不得命中任何绑定，也不得命中"带 Shift 的同名键"绑定
+  for (const k of ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]) {
+    eq(
+      `${k} 裸按不命中任何绑定`,
+      ALL_SHORTCUTS.filter((s) => matchesCombo(K({ key: k }), s.combo, false)).map((s) => s.id),
+      []
+    );
+    eq(
+      `${k} 带 Shift 裸按不命中任何绑定`,
+      ALL_SHORTCUTS.filter((s) => matchesCombo(K({ key: k, shiftKey: true }), s.combo, false)).map(
+        (s) => s.id
+      ),
+      []
+    );
+  }
   eq("matchesCombo 与 hit 同源", matchesCombo(K({ key: "l", ctrlKey: true }), shortcut("quick-connect").combo, false), true);
 }
 
@@ -117,9 +136,11 @@ const K = (over: Partial<KeyLike> = {}): KeyLike => ({
   eq("Win 组合标签", comboLabel("command-history", false), "Ctrl+Shift+Y");
   eq("Mac 数字范围", comboLabel("tab-index", true), "⌘1-9");
   eq("无 Shift 的符号键", comboLabel("show-shortcuts", false), "Ctrl+/");
-  // 命名键保留原样大小写，别渲染成 TAB
+  // 命名键不强制大写，方向键用箭头符号
   eq("命名键不强制大写", comboLabel("next-tab", false), "Ctrl+Tab");
   eq("命名键不强制大写（Mac）", comboLabel("next-tab", true), "⌘Tab");
+  eq("方向键用符号", comboLabel("focus-next-pane", false), "Ctrl+Shift+→");
+  eq("方向键用符号（Mac）", comboLabel("focus-prev-pane", true), "⌘⇧←");
   eq("键帽拆分", comboParts(shortcut("split-vertical").combo, true), ["⌘", "⇧", "V"]);
   eq("键帽拆分（无修饰）", comboParts(shortcut("close-tab").combo, false), ["Ctrl", "W"]);
 }
@@ -155,6 +176,33 @@ const K = (over: Partial<KeyLike> = {}): KeyLike => ({
     // tooltip 里的按键文案必须来自表（comboLabel），而不是又硬写一遍 Ctrl+…
     eq("App 的 tooltip 没有硬编码组合键", /title="[^"]*(Ctrl|⌘)\+?/.test(app), false);
   }
+}
+
+// 8. 闭包守卫：全局 handler 的依赖是 []，从渲染闭包里读 store 值一定会过期
+{
+  const app = readFileSync("src/App.tsx", "utf8");
+  const start = app.indexOf("const handler = (e: KeyboardEvent)");
+  const end = app.indexOf('document.addEventListener("keydown"');
+  ok("能定位到全局 handler 区间", start > 0 && end > start);
+  const body = app.slice(start, end);
+  // 前提：effect 依赖为空数组，所以闭包里的值就是首次渲染那一刻的
+  ok("全局快捷键 effect 依赖是 []", /addEventListener\("keydown", handler\)[\s\S]*?\}, \[\]\);/.test(app));
+  // 命中之后要看"当前标签页"的分支，只能现取 getState()，不能读渲染闭包
+  const staleLines = body
+    .split("\n")
+    .map((l) => l.replace(/\/\/.*$/, ""))
+    .filter((l) => /(^|[^.\w$])activeTabId\b/.test(l) && !l.includes("getState("));
+  eq("handler 里没有读渲染闭包的 activeTabId", staleLines, []);
+  // 单面板时 ⌘⇧←/→ 绝不能吞掉方向键（终端里 ←/→ 是行编辑的命脉）
+  const guardAt = body.indexOf("panes.length < 2");
+  const preventAt = body.indexOf("const dir");
+  ok("面板循环有单面板护栏", guardAt > 0);
+  ok("护栏在移动焦点之前生效", preventAt > guardAt);
+
+  const term = readFileSync("src/components/TerminalView.tsx", "utf8");
+  // 每个面板挂一个 TerminalView，store 换了活跃面板时 xterm 的隐藏 textarea 不会自己跟上
+  ok("TerminalView 把 DOM 焦点跟着活跃面板走", /if \(isActivePane\) termRef\.current\?\.focus\(\);/.test(term));
+  eq("focus() 只在活跃性变化时跑", (term.match(/termRef\.current\?\.focus\(\)/g) || []).length, 1);
 }
 
 console.log(`PASS ${pass} / FAIL ${fail}`);
