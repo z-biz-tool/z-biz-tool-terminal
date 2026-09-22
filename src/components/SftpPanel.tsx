@@ -78,6 +78,24 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
   const [dragDownloadEntry, setDragDownloadEntry] = useState<SftpEntry | null>(null);
   const [dropZoneActive, setDropZoneActive] = useState(false);
   const tableRef = useRef<HTMLDivElement>(null);
+  // 编辑监听器的登记表：卸载清理必须走 ref，不能读 editingFiles —— `[]` 依赖的 effect
+  // 闭包里那份数组永远是挂载时的空表，后来开的监听器一个都关不掉（3 s 一次 IPC，命中还会往远端上传）。
+  const watchersRef = useRef<number[]>([]);
+
+  const stopWatching = useCallback((id: number) => {
+    clearInterval(id);
+    // 原地增删：卸载清理捕获的是同一个数组对象，换成 filter 后的新数组它就过期了
+    const at = watchersRef.current.indexOf(id);
+    if (at >= 0) watchersRef.current.splice(at, 1);
+  }, []);
+
+  useEffect(() => {
+    const watchers = watchersRef.current;
+    return () => {
+      watchers.forEach((id) => clearInterval(id));
+      watchers.length = 0;
+    };
+  }, []);
 
   useEffect(() => {
     setPathInput(sftpPath);
@@ -583,7 +601,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
             if (currentStat.modified && currentStat.modified > lastModified) {
               const currentSessionId = getSessionId();
               if (!currentSessionId) {
-                clearInterval(watcherId);
+                stopWatching(watcherId);
                 return;
               }
               try {
@@ -615,25 +633,17 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
           lastModified,
           watcher: watcherId,
         };
+        watchersRef.current.push(watcherId);
         setEditingFiles((prev) => [...prev, editEntry]);
       } catch (e) {
         setTransfer(null);
         message.error(`编辑文件失败: ${String(e)}`);
       }
     },
-    [sftpPath, getSessionId, editingFiles, navigateTo]
+    [sftpPath, getSessionId, editingFiles, navigateTo, stopWatching]
   );
 
-  // Cleanup watchers on unmount
-  useEffect(() => {
-    return () => {
-      editingFiles.forEach((f) => {
-        if (f.watcher !== null) {
-          clearInterval(f.watcher);
-        }
-      });
-    };
-  }, []);
+  // 卸载清理见 watchersRef 那个 effect
 
   const handleOpen = useCallback(
     (entry: SftpEntry) => {
@@ -1343,7 +1353,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
               color="blue"
               closable
               onClose={() => {
-                if (f.watcher !== null) clearInterval(f.watcher);
+                if (f.watcher !== null) stopWatching(f.watcher);
                 setEditingFiles((prev) => prev.filter((ef) => ef.remotePath !== f.remotePath));
               }}
               style={{ fontSize: 11 }}
