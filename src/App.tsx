@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useAIStore } from "./stores/aiStore";
 import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message } from "antd";
 import type { MenuProps } from "antd";
-import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined, DatabaseOutlined } from "@ant-design/icons";
+import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined, DatabaseOutlined, FieldTimeOutlined } from "@ant-design/icons";
 import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
@@ -23,6 +23,7 @@ import AICommandExplanation from "./components/AICommandExplanation";
 import AIErrorAnalysis from "./components/AIErrorAnalysis";
 import AINaturalLanguageCommand from "./components/AINaturalLanguageCommand";
 import DangerConfirmHost from "./components/DangerConfirm";
+import CommandHistoryModal from "./components/CommandHistoryModal";
 import HostKeyPrompt from "./components/HostKeyPrompt";
 import { activeRecentOutput, activeSelection, feedActiveTerminal } from "./services/terminalFeeds";
 import AICodeEditor from "./components/AICodeEditor";
@@ -83,6 +84,7 @@ function AppInner() {
   const [portForwardOpen, setPortForwardOpen] = useState(false);
   const [keyGenOpen, setKeyGenOpen] = useState(false);
   const [batchExecOpen, setBatchExecOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [diagnosticOpen, setDiagnosticOpen] = useState(false);
   const [aiChatOpen, setAiChatOpen] = useState(false);
   const [aiCommandExpOpen, setAiCommandExpOpen] = useState(false);
@@ -302,6 +304,13 @@ function AppInner() {
       if (modKey && e.shiftKey && (e.key === "P" || e.key === "p")) {
         e.preventDefault();
         setPaletteOpen(true);
+        return;
+      }
+
+      // Cmd/Ctrl + Shift + Y - 命令历史检索（填入不执行，P-1）
+      if (modKey && e.shiftKey && (e.key === "Y" || e.key === "y")) {
+        e.preventDefault();
+        setHistoryOpen(true);
         return;
       }
     };
@@ -608,6 +617,16 @@ function AppInner() {
         >
           命令
         </Button>
+      )}
+      {activeTabId && (
+        <Tooltip title="命令历史 (Ctrl+Shift+Y)">
+          <Button
+            size="small"
+            type={historyOpen ? "primary" : "text"}
+            icon={<FieldTimeOutlined />}
+            onClick={() => setHistoryOpen(true)}
+          />
+        </Tooltip>
       )}
       {tabs.filter((t) => t.state === "connected").length >= 2 && (
         <Tooltip title="批量执行">
@@ -1014,6 +1033,7 @@ function AppInner() {
       <PortForwardModal open={portForwardOpen} onClose={() => setPortForwardOpen(false)} />
       <KeyGenModal open={keyGenOpen} onClose={() => setKeyGenOpen(false)} />
       <BatchExecModal open={batchExecOpen} onClose={() => setBatchExecOpen(false)} />
+      <CommandHistoryModal open={historyOpen} onClose={() => setHistoryOpen(false)} />
       <DiagnosticModal open={diagnosticOpen} onClose={() => setDiagnosticOpen(false)} />
       <CommandPalette
         open={paletteOpen}

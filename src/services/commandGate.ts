@@ -11,6 +11,7 @@ import { useServerStore } from "../stores/serverStore";
 import { confirmDangerousCommand, type GuardTarget } from "../components/DangerConfirm";
 import { commandGuard, requiresConfirmation } from "../utils/commandGuard";
 import { envListPrefix } from "../utils/environment";
+import { recordCommand } from "../utils/commandHistory";
 import { auditEvent } from "./auditLog";
 import type { ServerConfig } from "../types";
 
@@ -39,6 +40,11 @@ function hostList(targets: GuardTarget[]): string[] {
 /** 网关是否启用；老配置没有这个字段时按开启处理 */
 export function guardEnabled(): boolean {
   return useServerStore.getState().settings.dangerous_command_guard !== false;
+}
+
+/** 本机命令历史是否记录；老配置缺字段同样按开启处理（§5.7） */
+export function historyEnabled(): boolean {
+  return useServerStore.getState().settings.command_history !== false;
 }
 
 function serverToTarget(server: ServerConfig): GuardTarget {
@@ -142,6 +148,11 @@ export async function decideCommand(
       approved,
       hosts: hostList(targets),
     });
+  }
+
+  // 五条下发口都从这里过，所以"记一次历史"只需要挂在这一个点上；被拒的命令不进历史
+  if (approved && historyEnabled()) {
+    recordCommand({ command, targets, source, level: verdict.level });
   }
 
   return {

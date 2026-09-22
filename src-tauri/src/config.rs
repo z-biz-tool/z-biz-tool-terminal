@@ -169,6 +169,10 @@ pub struct TerminalSettings {
     /// 危险命令二次确认网关（P-2/P-1）。关闭后命令将不再拦截，仅作回退用途。
     #[serde(default = "default_true")]
     pub dangerous_command_guard: bool,
+    /// 本机命令历史（T-5-5）。命令在写入本地历史前一律脱敏（P-4），
+    /// 这个开关只管"还不记"，关掉不会留住旧数据（旧数据由前端"清空历史"处置）。
+    #[serde(default = "default_true")]
+    pub command_history: bool,
     /// PTY 输出批处理窗口(毫秒)：窗口内的多个数据块合并成一次 IPC。
     /// 设 0 回退为逐块下发（§5.7 回退开关），代价是高频 IPC/渲染。
     #[serde(default = "default_pty_batch_window_ms")]
@@ -238,6 +242,7 @@ impl Default for TerminalSettings {
             session_logging: true,
             log_redaction: true,
             dangerous_command_guard: true,
+            command_history: true,
             pty_batch_window_ms: 16,
             session_log_async: true,
             webgl_renderer: true,
@@ -848,6 +853,7 @@ mod tests {
         assert!(settings.webgl_renderer);
         assert!(settings.strict_host_key);
         assert!(settings.dangerous_command_guard);
+        assert!(settings.command_history);
     }
 
     #[test]

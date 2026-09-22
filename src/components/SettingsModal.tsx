@@ -329,6 +329,15 @@ export default function SettingsModal({ open, onClose }: Props) {
                   />
                 </Form.Item>
                 <Form.Item
+                  label="本机命令历史"
+                  extra="记录真的落地过 PTY 的命令，供 Ctrl+Shift+Y 检索与填入。口令类参数（--password、PGPASSWORD=、URL 内嵌凭据等）写盘前一律替换为 ****，这一层不能关。关闭只停止新记录，已有历史需到命令历史里手动清空"
+                >
+                  <Switch
+                    checked={settings.command_history !== false}
+                    onChange={(v) => updateSettings({ command_history: v })}
+                  />
+                </Form.Item>
+                <Form.Item
                   label="严格主机密钥校验"
                   extra="首次连接需确认指纹，指纹变化直接拒绝，防中间人。关闭即回退为自动接受"
                 >

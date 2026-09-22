@@ -48,6 +48,8 @@ export interface TerminalSettings {
   log_redaction: boolean;
   /** 危险命令二次确认网关（P-2/P-1），关闭即回退为不拦截 */
   dangerous_command_guard: boolean;
+  /** 本机命令历史（T-5-5）：落盘前一律脱敏（P-4），关闭即不再记录（已有的历史需手动清空） */
+  command_history: boolean;
   /** PTY 输出批处理窗口(ms)：窗口内的多个数据块合并成一次 IPC；0 = 逐块下发 */
   pty_batch_window_ms: number;
   /** 会话日志异步落盘（独立 task + 通道），关闭后退化为近同步写 */
@@ -259,6 +261,7 @@ const defaultSettings: TerminalSettings = {
   session_logging: true,
   log_redaction: true,
   dangerous_command_guard: true,
+  command_history: true,
   pty_batch_window_ms: 16,
   session_log_async: true,
   webgl_renderer: true,
