@@ -4,16 +4,7 @@ import { SwapOutlined, StopOutlined, PlayCircleOutlined } from "@ant-design/icon
 import { invoke } from "@tauri-apps/api/core";
 import { useServerStore } from "../stores/serverStore";
 import { pickActiveSession } from "../utils/session";
-
-interface ActiveForward {
-  forwardId: string;
-  forwardType: "local" | "remote" | "dynamic";
-  localAddr: string;
-  localPort: number;
-  remoteHost?: string;
-  remotePort?: number;
-  remoteAddr?: string;
-}
+import { describeForward, parseForwardList, type ForwardRow } from "../utils/forwards";
 
 interface Props {
   open: boolean;
@@ -22,13 +13,13 @@ interface Props {
 
 const FORWARD_TYPE_MAP: Record<string, { label: string; color: string }> = {
   local: { label: "本地", color: "blue" },
-  remote: { label: "remote", color: "green" },
+  remote: { label: "远程", color: "green" },
   dynamic: { label: "SOCKS5", color: "purple" },
 };
 
 export default function PortForwardModal({ open, onClose }: Props) {
   const { token } = theme.useToken();
-  const [activeForwards, setActiveForwards] = useState<ActiveForward[]>([]);
+  const [activeForwards, setActiveForwards] = useState<ForwardRow[]>([]);
   const [activeTab, setActiveTab] = useState("local");
   const [starting, setStarting] = useState(false);
 
@@ -53,10 +44,20 @@ export default function PortForwardModal({ open, onClose }: Props) {
     []
   );
 
-  const refreshForwards = useCallback(() => {
-    // Currently we track forwards in component state only
-    // In the future, we could invoke a command to list active forwards from backend
-  }, []);
+  // 列表以后端为真源：转发跟着 SSH 会话活，面板关掉仍在跑，重开必须看得见（否则端口还开着却显示"没有"）
+  const refreshForwards = useCallback(async () => {
+    const sessionId = getSessionId();
+    if (!sessionId) {
+      setActiveForwards([]);
+      return;
+    }
+    try {
+      const res = await invoke<unknown>("ssh_list_forwards", { sessionId });
+      setActiveForwards(parseForwardList(res));
+    } catch (e) {
+      console.error("读取端口转发列表失败:", e);
+    }
+  }, [getSessionId]);
 
   useEffect(() => {
     if (open) {
@@ -91,19 +92,11 @@ export default function PortForwardModal({ open, onClose }: Props) {
           remotePort,
         },
       });
-      if (result.success && result.forward_id) {
-        setActiveForwards((prev) => [
-          ...prev,
-          {
-            forwardId: result.forward_id!,
-            forwardType: "local",
-            localAddr,
-            localPort: result.actual_port ?? localPort,
-            remoteHost,
-            remotePort,
-          },
-        ]);
-        message.success(`本地转发已启动: ${localAddr}:${result.actual_port ?? localPort} → ${remoteHost}:${remotePort}`);
+      if (result.success) {
+        await refreshForwards();
+        message.success(
+          `本地转发已启动: ${localAddr}:${result.actual_port ?? localPort} → ${remoteHost}:${remotePort}`
+        );
       } else {
         message.error(result.error || "启动转发失败");
       }
@@ -141,20 +134,11 @@ export default function PortForwardModal({ open, onClose }: Props) {
           remotePort: remotePortR,
         },
       });
-      if (result.success && result.forward_id) {
-        setActiveForwards((prev) => [
-          ...prev,
-          {
-            forwardId: result.forward_id!,
-            forwardType: "remote",
-            localAddr: localAddrR,
-            localPort: localPortR,
-            remoteHost: remoteAddr,
-            remotePort: remotePortR,
-            remoteAddr,
-          },
-        ]);
-        message.success(`远程转发已启动: ${remoteAddr}:${remotePortR} → ${localAddrR}:${localPortR}`);
+      if (result.success) {
+        await refreshForwards();
+        message.success(
+          `远程转发已启动: ${remoteAddr}:${result.actual_port ?? remotePortR} → ${localAddrR}:${localPortR}`
+        );
       } else {
         message.error(result.error || "启动转发失败");
       }
@@ -190,16 +174,8 @@ export default function PortForwardModal({ open, onClose }: Props) {
           localPort: dynLocalPort,
         },
       });
-      if (result.success && result.forward_id) {
-        setActiveForwards((prev) => [
-          ...prev,
-          {
-            forwardId: result.forward_id!,
-            forwardType: "dynamic",
-            localAddr: dynLocalAddr,
-            localPort: result.actual_port ?? dynLocalPort,
-          },
-        ]);
+      if (result.success) {
+        await refreshForwards();
         message.success(`动态转发(SOCKS5)已启动: ${dynLocalAddr}:${result.actual_port ?? dynLocalPort}`);
       } else {
         message.error(result.error || "启动转发失败");
@@ -211,7 +187,7 @@ export default function PortForwardModal({ open, onClose }: Props) {
     }
   };
 
-  const handleStop = async (forward: ActiveForward) => {
+  const handleStop = async (forward: ForwardRow) => {
     const sessionId = getSessionId();
     if (!sessionId) {
       message.error("没有活动的SSH会话");
@@ -223,7 +199,7 @@ export default function PortForwardModal({ open, onClose }: Props) {
         error?: string;
       }>("ssh_stop_forward", { sessionId, forwardId: forward.forwardId });
       if (result.success) {
-        setActiveForwards((prev) => prev.filter((f) => f.forwardId !== forward.forwardId));
+        await refreshForwards();
         message.success("转发已停止");
       } else {
         message.error(result.error || "停止转发失败");
@@ -231,13 +207,6 @@ export default function PortForwardModal({ open, onClose }: Props) {
     } catch (e) {
       message.error(`停止转发失败: ${e}`);
     }
-  };
-
-  const renderForwardDesc = (f: ActiveForward) => {
-    if (f.forwardType === "dynamic") {
-      return `${f.localAddr}:${f.localPort} (SOCKS5)`;
-    }
-    return `${f.localAddr}:${f.localPort} → ${f.remoteHost || f.remoteAddr}:${f.remotePort}`;
   };
 
   const columns = [
@@ -254,13 +223,18 @@ export default function PortForwardModal({ open, onClose }: Props) {
     {
       title: "转发",
       key: "desc",
-      render: (_: unknown, record: ActiveForward) => renderForwardDesc(record),
+      render: (_: unknown, record: ForwardRow) => (
+        <Space size={4}>
+          <span>{describeForward(record)}</span>
+          {!record.alive && <Tag color="orange">已结束</Tag>}
+        </Space>
+      ),
     },
     {
       title: "操作",
       key: "action",
       width: 80,
-      render: (_: unknown, record: ActiveForward) => (
+      render: (_: unknown, record: ForwardRow) => (
         <Button
           size="small"
           type="link"
@@ -360,21 +334,20 @@ export default function PortForwardModal({ open, onClose }: Props) {
         size="small"
       />
 
-      {activeForwards.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <div style={{ marginBottom: 8, fontWeight: 500, color: token.colorTextSecondary }}>
-            活动转发
-          </div>
-          <Table
-            dataSource={activeForwards}
-            columns={columns}
-            rowKey="forwardId"
-            size="small"
-            pagination={false}
-            locale={{ emptyText: "暂无活动转发" }}
-          />
+      {/* 不以"有没有行"为条件：空表也要看得见，用户才能区分"会话里确实没转发"和"这个面板根本没读会话" */}
+      <div style={{ marginTop: 16 }}>
+        <div style={{ marginBottom: 8, fontWeight: 500, color: token.colorTextSecondary }}>
+          活动转发
         </div>
-      )}
+        <Table
+          dataSource={activeForwards}
+          columns={columns}
+          rowKey="forwardId"
+          size="small"
+          pagination={false}
+          locale={{ emptyText: "暂无活动转发" }}
+        />
+      </div>
     </Modal>
   );
 }

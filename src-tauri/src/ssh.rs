@@ -94,8 +94,8 @@ pub struct SshSession {
     pty_resize_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<(u32, u32)>>>>,
     /// 会话日志写入通道：真正的磁盘写由独立 task 承担（T-3-2）
     log_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<LogCommand>>>>,
-    /// 活跃的端口转发任务: forward_id -> JoinHandle
-    forwards: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// 活跃的端口转发任务: forward_id -> (JoinHandle, 描述)
+    forwards: Arc<Mutex<HashMap<String, ForwardTask>>>,
     /// 远程转发通道接收器
     forward_rx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ForwardedChannel>>>>,
     /// 跳板机会话句柄(ProxyJump时保持跳板机连接存活)
@@ -117,6 +117,29 @@ pub struct ForwardedChannel {
     pub connected_port: u32,
     pub originator_address: String,
     pub originator_port: u32,
+}
+
+/// 一条端口转发的静态描述。
+///
+/// 存在后端而不是只留在前端：转发生命周期跟着 SSH 会话，面板关掉之后仍然在跑；
+/// 前端重新打开时必须能从会话本身读回真实列表（否则"看起来没有转发"而端口其实还开着）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardSpec {
+    /// "local" | "remote" | "dynamic"
+    pub kind: String,
+    /// 监听侧：local/dynamic 是本机，remote 是远端
+    pub listen_addr: String,
+    pub listen_port: u16,
+    /// 目标侧：local 是远端服务，remote 是本地服务，dynamic（SOCKS5）没有固定目标
+    pub target_addr: Option<String>,
+    pub target_port: Option<u16>,
+}
+
+/// 转发任务 = 后台 accept 循环 + 它的静态描述，两者同生同死，避免两份登记表漂移
+pub struct ForwardTask {
+    join: tokio::task::JoinHandle<()>,
+    pub spec: ForwardSpec,
 }
 
 #[async_trait::async_trait]
@@ -1234,7 +1257,19 @@ impl SshSession {
             fwd_map.lock().await.remove(&fid);
         });
 
-        self.forwards.lock().await.insert(forward_id.clone(), join);
+        self.forwards.lock().await.insert(
+            forward_id.clone(),
+            ForwardTask {
+                join,
+                spec: ForwardSpec {
+                    kind: "local".into(),
+                    listen_addr: local_addr.to_string(),
+                    listen_port: actual_port,
+                    target_addr: Some(remote_host.to_string()),
+                    target_port: Some(remote_port),
+                },
+            },
+        );
         Ok((forward_id, actual_port))
     }
 
@@ -1297,7 +1332,20 @@ impl SshSession {
             fwd_map.lock().await.remove(&fid);
         });
 
-        self.forwards.lock().await.insert(forward_id.clone(), join);
+        self.forwards.lock().await.insert(
+            forward_id.clone(),
+            ForwardTask {
+                join,
+                spec: ForwardSpec {
+                    // remote 的监听侧在远端，目标侧才是本地服务
+                    kind: "remote".into(),
+                    listen_addr: remote_addr.to_string(),
+                    listen_port: actual_port,
+                    target_addr: Some(local_host.to_string()),
+                    target_port: Some(local_port),
+                },
+            },
+        );
         Ok((forward_id, actual_port))
     }
 
@@ -1387,8 +1435,36 @@ impl SshSession {
             fwd_map.lock().await.remove(&fid);
         });
 
-        self.forwards.lock().await.insert(forward_id.clone(), join);
+        self.forwards.lock().await.insert(
+            forward_id.clone(),
+            ForwardTask {
+                join,
+                spec: ForwardSpec {
+                    // SOCKS5 的目标由每个连接在握手时决定，没有固定目标
+                    kind: "dynamic".into(),
+                    listen_addr: local_addr.to_string(),
+                    listen_port: actual_port,
+                    target_addr: None,
+                    target_port: None,
+                },
+            },
+        );
         Ok((forward_id, actual_port))
+    }
+
+    /// 列出本会话当前仍在跑的端口转发（`false` 表示后台任务已退出但还没来自我清理）
+    pub async fn list_forwards(&self) -> Vec<(String, ForwardSpec, bool)> {
+        let map = self.forwards.lock().await;
+        let mut out: Vec<(String, ForwardSpec, bool)> = map
+            .iter()
+            .map(|(id, t)| (id.clone(), t.spec.clone(), !t.join.is_finished()))
+            .collect();
+        out.sort_by(|a, b| {
+            (a.1.kind.as_str(), a.1.listen_port)
+                .cmp(&(b.1.kind.as_str(), b.1.listen_port))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        out
     }
 
     /// 停止端口转发
@@ -1397,8 +1473,8 @@ impl SshSession {
         forward_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut map = self.forwards.lock().await;
-        if let Some(handle) = map.remove(forward_id) {
-            handle.abort();
+        if let Some(task) = map.remove(forward_id) {
+            task.join.abort();
             Ok(())
         } else {
             Err(format!("转发任务 {} 不存在", forward_id).into())
@@ -1410,8 +1486,8 @@ impl SshSession {
         // 先终止端口转发任务，否则 JoinHandle 要等底层 accept 出错才退出
         {
             let mut map = self.forwards.lock().await;
-            for (_, join) in map.drain() {
-                join.abort();
+            for (_, task) in map.drain() {
+                task.join.abort();
             }
         }
         // 关闭PTY通道

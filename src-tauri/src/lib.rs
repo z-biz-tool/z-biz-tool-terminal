@@ -27,6 +27,7 @@ pub fn run() {
             commands::ssh_pty_resize,
             commands::ssh_start_forward,
             commands::ssh_stop_forward,
+            commands::ssh_list_forwards,
             commands::sftp_list,
             commands::sftp_upload,
             commands::sftp_download,

@@ -677,6 +677,55 @@ pub async fn ssh_stop_forward(session_id: String, forward_id: String) -> PortFor
     }
 }
 
+/// 一条运行中的端口转发。转发生命周期跟着 SSH 会话，面板关掉仍在跑，
+/// 所以列表以会话（后端）为真源，前端只负责显示。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardInfo {
+    pub forward_id: String,
+    #[serde(flatten)]
+    pub spec: crate::ssh::ForwardSpec,
+    /// 后台任务已退出（accept 循环出错）但尚未自我清理时为 false
+    pub alive: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardListResult {
+    pub success: bool,
+    pub forwards: Vec<ForwardInfo>,
+    pub error: Option<String>,
+}
+
+/// 列出当前会话仍在运行的端口转发
+#[tauri::command]
+pub async fn ssh_list_forwards(session_id: String) -> ForwardListResult {
+    match get_session(&session_id).await {
+        Some(sess) => {
+            let forwards = sess
+                .list_forwards()
+                .await
+                .into_iter()
+                .map(|(forward_id, spec, alive)| ForwardInfo {
+                    forward_id,
+                    spec,
+                    alive,
+                })
+                .collect();
+            ForwardListResult {
+                success: true,
+                forwards,
+                error: None,
+            }
+        }
+        None => ForwardListResult {
+            success: false,
+            forwards: Vec::new(),
+            error: Some(no_session(&session_id)),
+        },
+    }
+}
+
 /// SFTP文件列表
 #[tauri::command]
 pub async fn sftp_list(session_id: String, path: String) -> SftpListResult {
@@ -1562,5 +1611,51 @@ mod tests {
             "错误信息应包含中文提示, 实际: {}",
             result.message
         );
+    }
+
+    /// 前端 `parseForwardList` 读的就是这套 camelCase 键名，改名等于悄悄把列表读空
+    #[test]
+    fn forward_info_serializes_with_the_keys_frontend_reads() {
+        let info = ForwardInfo {
+            forward_id: "f-1".into(),
+            spec: crate::ssh::ForwardSpec {
+                kind: "local".into(),
+                listen_addr: "127.0.0.1".into(),
+                listen_port: 15432,
+                target_addr: Some("10.0.0.9".into()),
+                target_port: Some(5432),
+            },
+            alive: true,
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["forwardId"], "f-1");
+        assert_eq!(v["kind"], "local");
+        assert_eq!(v["listenAddr"], "127.0.0.1");
+        assert_eq!(v["listenPort"], 15432);
+        assert_eq!(v["targetAddr"], "10.0.0.9");
+        assert_eq!(v["targetPort"], 5432);
+        assert_eq!(v["alive"], true);
+        // flatten 之后不得再套一层 spec，否则前端整表读不出来
+        assert!(v.get("spec").is_none());
+    }
+
+    /// SOCKS5 没有固定目标；前端按"没有目标"渲染，缺字段不能变成 0 端口
+    #[test]
+    fn dynamic_forward_keeps_target_absent() {
+        let info = ForwardInfo {
+            forward_id: "f-2".into(),
+            spec: crate::ssh::ForwardSpec {
+                kind: "dynamic".into(),
+                listen_addr: "127.0.0.1".into(),
+                listen_port: 1080,
+                target_addr: None,
+                target_port: None,
+            },
+            alive: false,
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert!(v["targetAddr"].is_null());
+        assert!(v["targetPort"].is_null());
+        assert_eq!(v["alive"], false);
     }
 }
