@@ -794,9 +794,22 @@ pub async fn sftp_download(
     local_path: String,
     transfer_id: u64,
 ) -> ExecResult {
+    // 落盘位置由"远端递来的文件名 + 前端拼的字符串"决定，必须先过写侧白名单再把父目录备出来：
+    // 不校验则 `..` 能逃出临时目录，只校验不建目录则"下载到一个还不存在的临时子目录"必然失败。
+    let target = match crate::paths::prepare_write(&local_path) {
+        Ok(p) => p,
+        Err(e) => {
+            return ExecResult {
+                success: false,
+                output: String::new(),
+                error: Some(e),
+            }
+        }
+    };
+    let target_str = target.to_string_lossy().to_string();
     if let Some(sess) = get_session(&session_id).await {
         match sess
-            .sftp_download(&remote_path, &local_path, transfer_id, &app)
+            .sftp_download(&remote_path, &target_str, transfer_id, &app)
             .await
         {
             Ok(_) => ExecResult {

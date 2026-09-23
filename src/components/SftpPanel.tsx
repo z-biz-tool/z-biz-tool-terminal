@@ -54,6 +54,7 @@ import {
   type Transfer,
   type TransferKind,
 } from "../utils/sftpTransfer";
+import { editLocalPath } from "../utils/sftpEditPath";
 
 interface SftpPanelProps {
   serverId: string;
@@ -652,8 +653,8 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
 
       try {
         const tempDir = await invoke<string>("get_temp_dir");
-        const editDir = `${tempDir}/z-terminal-edit`;
-        const localPath = `${editDir}/${entry.name}`;
+        // 目录名里那份身份不能少：远端文件名可控，且同名不同路径的两份副本会互相顶掉
+        const localPath = editLocalPath(tempDir, sessionId, remotePath, entry.name);
 
         const pulled = await runTransfer("download", entry.name, sessionId, (transferId) =>
           invoke("sftp_download", { sessionId, remotePath, localPath, transferId })
