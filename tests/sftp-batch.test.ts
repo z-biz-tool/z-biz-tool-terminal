@@ -290,6 +290,23 @@ ok("条目在点选后被刷掉要记成失败，不能静默少做",
 eq("上传那条不猜总字节（本地文件大小这里拿不到）",
   /beginBatch\("upload", plans\.length\)/.test(panel), true);
 
+// ---- 11. 面板卸载：批次就地收手，也不再弹没人看的提示 ----
+
+{
+  const unmountAt = panel.indexOf("aliveRef.current = false;");
+  ok("卸载时先立 alive=false", unmountAt > 0);
+  ok("卸载时把整批标记为取消（剩下没开始的不再开始）",
+     /if \(batchRef\.current\) batchRef\.current = requestCancel\(batchRef\.current\)/.test(panel));
+  // 五处收手点：下载循环顶部 + 下载汇总前 + 上传循环顶部 + 上传汇总前 + 进度条收尾定时器
+  eq("卸载后的批次一律就地收手（五处守卫）", (panel.match(/if \(!aliveRef\.current\) return;/g) || []).length, 5);
+  ok("进度条的收尾定时器不在卸载后 setState",
+     /if \(!aliveRef\.current\) return;\s*\n\s*setTransfer\(\(prev\) => clearFinished\(prev, id\)\)/.test(panel));
+  ok("上传后的目录刷新只在面板还在时做", /if \(aliveRef\.current\) navigateTo\(sftpPath\)/.test(panel));
+  ok("重新挂载要把 alive 复位（同一组件实例会被复用）", /aliveRef\.current = true;/.test(panel));
+  // 收手不等于"假装传完了"：正在传的那条仍然让它传完（后端没有中断单条的能力）
+  eq("没有偷偷加「取消在传的那条」的假承诺", /sftp_cancel/.test(panel), false);
+}
+
 console.log(`\n[SftpBatch] PASS ${pass} / FAIL ${fail}`);
 if (fail) {
   for (const f of fails) console.log("  ✗ " + f);

@@ -318,7 +318,9 @@ const panel = readFileSync("src/components/SftpPanel.tsx", "utf8");
   eq("每条传输都走 runTransfer", (panel.match(/await runTransfer\(/g) || []).length, 5);
   eq("进度更新只有一处（订阅回调里）", (panel.match(/applyProgress\(prev, ev\)/g) || []).length, 1);
   eq("结算只有一处（runTransfer 里）", (panel.match(/settleTransfer\(prev, id/g) || []).length, 1);
-  eq("清除只有一处（按 id 核对）", (panel.match(/setTimeout\(\(\) => setTransfer\(/g) || []).length, 1);
+  eq("清除只有一处（按 id 核对）", (panel.match(/clearFinished\(prev, id\)/g) || []).length, 1);
+  // §7.39 起外面多了一层"面板还活着"的判断（卸载后不再 setState），入口仍只有一个
+  eq("收尾定时器只有一处且带存活判断", (panel.match(/window\.setTimeout\(\(\) => \{\s*if \(!aliveRef\.current\) return;/g) || []).length, 1);
   ok("订阅按会话挂", /return subscribeSftpProgress\(activeSessionId,/.test(panel));
   // 成功只能来自后端：单文件那两条走 `if (error === null) message.success`，
   // 批量那条先把结果分进 outcome.saved，再由 summarizeBatch 决定这一句是不是 success。

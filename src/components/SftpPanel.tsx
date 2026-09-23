@@ -231,6 +231,11 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
   // 编辑监听器的登记表：卸载清理必须走 ref，不能读 editingFiles —— `[]` 依赖的 effect
   // 闭包里那份数组永远是挂载时的空表，后来开的监听器一个都关不掉（3 s 一次 IPC，命中还会往远端上传）。
   const watchersRef = useRef<number[]>([]);
+  /**
+   * 面板还在不在。批量传输的循环、进度条的收尾定时器都会跨越卸载活下来：
+   * 实测旧行为是"关掉面板 → 剩下两个文件照传 → 弹一条没有人看的汇总提示"。
+   */
+  const aliveRef = useRef(true);
 
   const applyBatch = useCallback((next: Batch | null) => {
     batchRef.current = next;
@@ -246,9 +251,13 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
 
   useEffect(() => {
     const watchers = watchersRef.current;
+    aliveRef.current = true;
     return () => {
+      aliveRef.current = false;
       watchers.forEach((id) => clearInterval(id));
       watchers.length = 0;
+      // 卸载 = 用户不要这批了：剩下没开始的不再开始（正在传的那条后端没给中断手段，只能让它传完）
+      if (batchRef.current) batchRef.current = requestCancel(batchRef.current);
     };
   }, []);
 
@@ -333,7 +342,10 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         error = String(e);
       }
       setTransfer((prev) => settleTransfer(prev, id, error === null, error ?? undefined, Date.now()));
-      setTimeout(() => setTransfer((prev) => clearFinished(prev, id)), TRANSFER_HOLD_MS);
+      window.setTimeout(() => {
+        if (!aliveRef.current) return;
+        setTransfer((prev) => clearFinished(prev, id));
+      }, TRANSFER_HOLD_MS);
       return error;
     },
     [nextTransferId]
@@ -601,6 +613,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       const outcome: BatchOutcome = { saved: [], existing: [], failed: [], notStarted: [] };
       applyBatch(beginBatch("upload", plans.length));
       for (const [i, plan] of plans.entries()) {
+        if (!aliveRef.current) return;
         const localPath = filePaths[i];
         const cur = batchRef.current;
         if (cur?.cancelled) {
@@ -616,6 +629,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         else outcome.failed.push({ plan, reason: error });
         applyBatch(finishItem(batchRef.current!));
       }
+      if (!aliveRef.current) return;
       const done = batchRef.current;
       applyBatch(null);
       // 单个文件不刷屏（一条汇总对单条来说反而罗嗦），保持原来的一句式反馈
@@ -628,7 +642,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         if (summary.kind === "success") message.success(summary.text);
         else message.warning(summary.text);
       }
-      navigateTo(sftpPath);
+      if (aliveRef.current) navigateTo(sftpPath);
     },
     [sftpPath, getSessionId, navigateTo, runTransfer, applyBatch]
   );
@@ -712,6 +726,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
     const bytesTotal = allSizesKnown ? sizes.reduce((a, n) => a + n, 0) : 0;
     applyBatch(beginBatch("download", plans.length, { bytesTotal, startedAt: Date.now() }));
     for (const plan of plans) {
+      if (!aliveRef.current) return; // 面板已关：整批就地收手，也不再弹提示
       const cur = batchRef.current;
       if (cur?.cancelled) {
         outcome.notStarted!.push(plan);
@@ -756,6 +771,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       else outcome.failed.push({ plan, reason: error });
       applyBatch(finishItem(batchRef.current!));
     }
+    if (!aliveRef.current) return;
     applyBatch(null);
 
     const summary = summarizeBatch(outcome, targetDir);
