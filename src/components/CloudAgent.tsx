@@ -7,7 +7,8 @@
  */
 
 import { useState, useEffect } from "react";
-import { Modal, Alert, Typography, List, Button, message, Popconfirm } from "antd";
+import { Modal, Alert, Typography, Button, message, Popconfirm } from "antd";
+import { ItemList, ItemRow } from "../_shared/ItemRows";
 import { DatabaseOutlined, DeleteOutlined } from "@ant-design/icons";
 
 const { Text, Paragraph } = Typography;
@@ -70,51 +71,47 @@ export default function CloudAgent({ open, onClose }: Props) {
         description="下列数据只存在你这台机器的本地存储里，不会上传到任何服务器；应用内也没有任何「同步到云端」的能力。需要迁移请用「设置 → 备份与恢复」。"
       />
       {datasets.length > 0 ? (
-        <List
-          dataSource={datasets}
-          renderItem={(item) => (
-            <List.Item
-              actions={[
+        <ItemList ariaLabel="本机已保存的 AI 数据">
+          {datasets.map((item) => (
+            <ItemRow
+              key={item.key}
+              avatar={
+                <div
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 8,
+                    background: "rgba(127,127,127,0.12)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <DatabaseOutlined />
+                </div>
+              }
+              title={<Text strong>{item.title}</Text>}
+              description={
+                <Text type="secondary" style={{ fontSize: 13 }}>
+                  {item.detail} · {(item.bytes / 1024).toFixed(1)} KB · 键名 {item.key}
+                </Text>
+              }
+              actions={
                 <Popconfirm
-                  key="del"
                   title="删除本机保存的这份数据？"
                   description="删除后不可恢复"
                   okText="删除"
                   cancelText="取消"
                   onConfirm={() => removeDataset(item.key)}
                 >
-                  <Button size="small" type="text" danger icon={<DeleteOutlined />}>
+                  <Button size="small" type="text" danger aria-label={`删除 ${item.title}`} icon={<DeleteOutlined />}>
                     删除
                   </Button>
-                </Popconfirm>,
-              ]}
-            >
-              <List.Item.Meta
-                avatar={
-                  <div
-                    style={{
-                      width: 40,
-                      height: 40,
-                      borderRadius: 8,
-                      background: "rgba(127,127,127,0.12)",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <DatabaseOutlined />
-                  </div>
-                }
-                title={<Text strong>{item.title}</Text>}
-                description={
-                  <Text type="secondary" style={{ fontSize: 13 }}>
-                    {item.detail} · {(item.bytes / 1024).toFixed(1)} KB · 键名 {item.key}
-                  </Text>
-                }
-              />
-            </List.Item>
-          )}
-        />
+                </Popconfirm>
+              }
+            />
+          ))}
+        </ItemList>
       ) : (
         <div style={{ textAlign: "center", padding: "32px 0", color: "#999" }}>
           <Paragraph type="secondary" style={{ margin: 0 }}>

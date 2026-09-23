@@ -54,6 +54,8 @@ const DEPRECATED: [string, RegExp][] = [
   ["Modal visible（应为 open）", /\bvisible=\{/],
   ["Spin tip", /<Spin[^>]*\btip=/s],
   ["Space direction", /<Space[^>]*\bdirection=/s],
+  ["List（v6 已废弃，行列表用 _shared/ItemRows）", /<List[\s.]/],
+  ["Divider type（应为 orientation）", /<Divider[^>]*\btype=/],
   ["Alert message（应为 title）", /<Alert[^>]*?\bmessage=/s],
   ["Tabs onPrevClick/onNextClick", /\b(onPrevClick|onNextClick)=/],
 ];
@@ -74,13 +76,24 @@ eq("Alert 用 title", (all.match(/<Alert[\s\S]{0,400}?\btitle=/g) || []).length,
 ok("Space 用 orientation 且两个方向都有",
   /<Space orientation="vertical"/.test(all) && /<Space orientation="horizontal"/.test(all));
 
-// 已知未偿的债：antd v6 把整个 `List` 组件标了 deprecated（下一 major 移除），换成普通
-// 映射列表要动三处结构（命令面板 / 云代理 / 最近连接），其中命令面板那处还压着
-// "键盘顺序 = 视觉顺序"的 6801 例不变量，所以本轮不动它 —— 但数量必须钉住，不许悄悄增多。
-const listFiles = sources.filter((s) => /from "antd"/.test(s.src) && /<List[\s.]/.test(s.src)).map((s) => s.f).sort();
-eq("仍在使用 antd List 的文件数（已知债，见 §7.33 遗留）", listFiles.length, 3);
-ok("债的清单就是这三个（新增必须先记账）",
-  JSON.stringify(listFiles) === JSON.stringify(["src/components/CloudAgent.tsx", "src/components/CommandPalette.tsx", "src/components/RecentConnections.tsx"]));
+// §7.33 钉过这笔债（当时 3 个文件在用 `List`），§7.38 偿清：三处都换成
+// `_shared/ItemRows`（ItemList = `<ul role=listbox>`，ItemRow = `<li role=option>`）。
+// 规矩从"名单不许扩大"收紧成"一个都不许再用"。
+const listFiles = sources.filter((s) => /<List[\s.]/.test(stripComments(s.src))).map((s) => s.f);
+eq("没有任何文件再用 antd List", listFiles.length, 0);
+// 必须剥注释再断言：ItemRows 的文档注释里就写着 `<li role=option>`，
+// 把属性删掉而注释留着，上一条断言照样绿（这条是变异臂 R1 真测出来的假绿）
+const rows = stripComments(readFileSync("src/_shared/ItemRows.tsx", "utf8"));
+ok("ItemRows 用 listbox 容器", /^\s+role="listbox"$/m.test(rows));
+ok("ItemRows 每行是 option", /^\s+role="option"$/m.test(rows));
+ok("选中态交给 aria-selected", /^\s+aria-selected=\{active \? true : false\}$/m.test(rows));
+ok("高亮行能把节点交回调用方（滚动要用）", /rowRef\?: \(el: HTMLLIElement \| null\) => void/.test(rows));
+for (const f of ["src/components/CommandPalette.tsx", "src/components/CloudAgent.tsx", "src/components/RecentConnections.tsx"]) {
+  const src = readFileSync(f, "utf8");
+  ok(`${f} 用上了 ItemList/ItemRow 并给出列表名`, /<ItemList ariaLabel=/.test(src) && /<ItemRow/.test(src));
+}
+// 高亮行 ref 收窄回 HTMLLIElement（List.Item 当年标的是 HTMLDivElement，与运行时的 <li> 不符）
+ok("命令面板高亮行 ref 类型收窄", /useRef<HTMLLIElement \| null>/.test(readFileSync("src/components/CommandPalette.tsx", "utf8")));
 
 // 危险确认框的"点外面不算确认"必须还在（P-2：误触不得等同于批准）
 const danger = stripComments(readFileSync("src/components/DangerConfirm.tsx", "utf8"));

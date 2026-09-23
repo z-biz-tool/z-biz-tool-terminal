@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Popover, List, Button, Empty, theme, Typography, message } from "antd";
+import { Popover, Button, Empty, theme, Typography, message } from "antd";
+import { ItemList, ItemRow } from "../_shared/ItemRows";
 import { HistoryOutlined, DeleteOutlined, LinkOutlined } from "@ant-design/icons";
 import { useServerStore } from "../stores/serverStore";
 import type { ServerConfig } from "../types";
@@ -118,40 +119,26 @@ const RecentConnections: React.FC<RecentConnectionsProps> = ({ open, onClose, ch
         />
       ) : (
         <>
-          <List
-            size="small"
-            dataSource={entries}
-            renderItem={(item) => (
-              <List.Item
-                style={{
-                  padding: "6px 8px",
-                  cursor: "pointer",
-                  borderRadius: 4,
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLElement).style.background = token.colorBgTextHover;
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLElement).style.background = "transparent";
-                }}
+          <ItemList ariaLabel="最近连接">
+            {entries.map((item) => (
+              <ItemRow
+                key={`${item.host}:${item.port}:${item.username}`}
+                avatar={<LinkOutlined style={{ color: token.colorTextSecondary, marginTop: 4 }} />}
+                title={
+                  <Typography.Text style={{ fontSize: 13 }}>
+                    {item.username}@{item.host}:{item.port}
+                  </Typography.Text>
+                }
+                description={
+                  <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                    {timeAgo(item.lastConnected)}
+                  </Typography.Text>
+                }
                 onClick={() => handleConnect(item)}
-              >
-                <List.Item.Meta
-                  avatar={<LinkOutlined style={{ color: token.colorTextSecondary, marginTop: 4 }} />}
-                  title={
-                    <Typography.Text style={{ fontSize: 13 }}>
-                      {item.username}@{item.host}:{item.port}
-                    </Typography.Text>
-                  }
-                  description={
-                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                      {timeAgo(item.lastConnected)}
-                    </Typography.Text>
-                  }
-                />
-              </List.Item>
-            )}
-          />
+                style={{ cursor: "pointer", padding: "6px 8px", borderRadius: 4 }}
+              />
+            ))}
+          </ItemList>
           <div style={{ textAlign: "center", padding: "8px 0 4px" }}>
             <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={handleClear}>
               清空记录

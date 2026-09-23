@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { Modal, Input, List, Tag, Space, Typography, Empty, message } from "antd";
+import { Modal, Input, Tag, Space, Typography, Empty, message } from "antd";
 import {
   DesktopOutlined,
   FolderOpenOutlined,
@@ -14,6 +14,7 @@ import {
   LinkOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
+import { ItemList, ItemRow } from "../_shared/ItemRows";
 import { useServerStore } from "../stores/serverStore";
 import { describeSnippetRun } from "../utils/snippetRun";
 import { paletteSequence } from "../utils/paletteOrder";
@@ -310,8 +311,7 @@ export default function CommandPalette({
   const indexById = useMemo(() => new Map(visible.map((it, i) => [it.id, i] as const)), [visible]);
 
   /** ↑↓ 走到哪一行，那一行就得在窗口里：靠滚动容器把高亮行带进视野 */
-  // antd 把 List.Item 的 ref 标成 HTMLDivElement，运行时给的却是 <li>，所以按共同父类型存
-  const activeRowRef = useRef<HTMLElement | null>(null);
+  const activeRowRef = useRef<HTMLLIElement | null>(null);
   useEffect(() => {
     activeRowRef.current?.scrollIntoView({ block: "nearest" });
   }, [activeIndex, query]);
@@ -322,9 +322,10 @@ export default function CommandPalette({
     const current = isCurrentTab(item, activeTabId);
     const [stateLabel, showState] = stateHint(item.tabState);
     return (
-      <List.Item
+      <ItemRow
         key={item.id}
-        ref={
+        active={isActive}
+        rowRef={
           isActive
             ? (node) => {
                 activeRowRef.current = node;
@@ -333,17 +334,9 @@ export default function CommandPalette({
         }
         onMouseEnter={() => setActiveIndex(idx)}
         onClick={() => runItem(item)}
-        style={{
-          padding: "8px 12px",
-          cursor: "pointer",
-          background: isActive ? "var(--ant-color-primary-bg, #e6f4ff)" : "transparent",
-          borderRadius: 6,
-          margin: "2px 0",
-        }}
-      >
-        <List.Item.Meta
-          avatar={item.icon}
-          title={
+        style={{ cursor: "pointer", margin: "2px 0" }}
+        avatar={item.icon}
+        title={
             <Space>
               <span>{item.label}</span>
               {current && (
@@ -358,13 +351,12 @@ export default function CommandPalette({
               )}
             </Space>
           }
-          description={
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {item.description}
-            </Text>
-          }
-        />
-      </List.Item>
+        description={
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {item.description}
+          </Text>
+        }
+      />
     );
   };
 
@@ -409,7 +401,7 @@ export default function CommandPalette({
               >
                 {group.title} · {group.items.length}
               </Text>
-              <List size="small" dataSource={group.items} renderItem={renderItem} />
+              <ItemList ariaLabel={group.title}>{group.items.map((it) => renderItem(it))}</ItemList>
             </div>
           ))
         )}

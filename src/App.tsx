@@ -751,7 +751,7 @@ function AppInner() {
           </Button>
         </Tooltip>
       )}
-      <Divider type="vertical" style={{ margin: "0 4px" }} />
+      <Divider orientation="vertical" style={{ margin: "0 4px" }} />
       <Tooltip title={`AI 聊天助手 ${comboLabel("ai-chat")}`}>
         <Button
           size="small"
