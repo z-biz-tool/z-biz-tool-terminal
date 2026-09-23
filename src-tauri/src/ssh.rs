@@ -55,6 +55,59 @@ fn base_name(path: &str) -> String {
     }
 }
 
+/// 用户请求中断的传输 id 集合。复制循环每读一块前查一次；命令结束时清掉，
+/// 免得标记一直挂着。锁只保护这个集合本身、跨 `.await` 时绝不持有，所以用 `std::sync::Mutex`
+/// 就够；中毒也不 panic —— 传输路径上炸一次会把整个会话带走。
+static CANCELLATIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+    std::sync::OnceLock::new();
+
+fn cancellations() -> &'static std::sync::Mutex<std::collections::HashSet<u64>> {
+    CANCELLATIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+pub fn request_transfer_cancel(transfer_id: u64) {
+    if let Ok(mut set) = cancellations().lock() {
+        set.insert(transfer_id);
+    }
+}
+
+pub fn transfer_cancel_requested(transfer_id: u64) -> bool {
+    match cancellations().lock() {
+        Ok(set) => set.contains(&transfer_id),
+        Err(_) => false,
+    }
+}
+
+pub fn clear_transfer_cancel(transfer_id: u64) {
+    if let Ok(mut set) = cancellations().lock() {
+        set.remove(&transfer_id);
+    }
+}
+
+/// 下载的临时落点：与目标同目录、加 `.part` 后缀。
+///
+/// 有了它，"取消"和"传一半失败"才不会留下一个看起来像完整文件的半截文件 —— 否则用户下一次
+/// 重试会被 §7.30 那道"已存在即拒写"的闸挡住，而屏幕上什么都没有。
+pub fn part_path_for(target: &std::path::Path, transfer_id: u64) -> std::path::PathBuf {
+    let stem = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let name = format!("{}.{}.part", stem, transfer_id);
+    target.with_file_name(name)
+}
+
+/// 把临时分片提升到正式路径：同目录 `rename`，POSIX 上是原子的 —— 用户要么看到完整的
+/// 文件，要么什么都看不到，不会看到半截。
+pub async fn commit_part(part: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    tokio::fs::rename(part, target).await
+}
+
+/// 丢掉半截分片。本来就没建出来（例如刚取消）也算成功，不因此报错。
+pub async fn discard_part(part: &std::path::Path) {
+    let _ = tokio::fs::remove_file(part).await;
+}
+
 /// 把一次 SFTP 传输进度推给前端。事件名与载荷键是跨语言契约，
 /// `tests/sftp-progress.test.ts` 会拿这里与前端读取处逐键对账。
 ///
@@ -946,29 +999,38 @@ impl SshSession {
         let mut transferred: u64 = 0;
         let started = std::time::Instant::now();
         let mut last_emit: Option<u64> = None;
-        loop {
-            let n = reader.read(&mut buf).await?;
-            if n == 0 {
-                break;
+        // 用 async 块包住整个搬运，"取消/出错也要清标记"就只有一条出口
+        let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
+            loop {
+                if transfer_cancel_requested(transfer_id) {
+                    return Err("已取消".into());
+                }
+                let n = reader.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                writer.write_all(&buf[..n]).await?;
+                transferred += n as u64;
+                let now_ms = started.elapsed().as_millis() as u64;
+                if should_emit_progress(now_ms, last_emit, transferred, total) {
+                    last_emit = Some(now_ms);
+                    emit_sftp_progress(
+                        app,
+                        &self.id,
+                        kind,
+                        filename,
+                        transfer_id,
+                        transferred,
+                        total,
+                    );
+                }
             }
-            writer.write_all(&buf[..n]).await?;
-            transferred += n as u64;
-            let now_ms = started.elapsed().as_millis() as u64;
-            if should_emit_progress(now_ms, last_emit, transferred, total) {
-                last_emit = Some(now_ms);
-                emit_sftp_progress(
-                    app,
-                    &self.id,
-                    kind,
-                    filename,
-                    transfer_id,
-                    transferred,
-                    total,
-                );
-            }
+            writer.flush().await?;
+            Ok(())
         }
-        writer.flush().await?;
-        Ok(())
+        .await;
+        clear_transfer_cancel(transfer_id);
+        result
     }
 
     /// SFTP 上传文件
@@ -1017,17 +1079,30 @@ impl SshSession {
                 .map(|m| m.size.unwrap_or(0))
                 .unwrap_or(0);
             let remote_file = sftp.open(remote_path).await?;
-            let local_file = tokio::fs::File::create(local_path).await?;
-            self.pump_with_progress(
-                app,
-                "download",
-                &base_name(remote_path),
-                transfer_id,
-                remote_file,
-                local_file,
-                total,
-            )
-            .await
+            // 先写 .part，成功才 rename：半截文件不会冒充已完成的一次下载
+            let part = part_path_for(std::path::Path::new(local_path), transfer_id);
+            let local_file = tokio::fs::File::create(&part).await?;
+            match self
+                .pump_with_progress(
+                    app,
+                    "download",
+                    &base_name(remote_path),
+                    transfer_id,
+                    remote_file,
+                    local_file,
+                    total,
+                )
+                .await
+            {
+                Ok(()) => {
+                    commit_part(&part, std::path::Path::new(local_path)).await?;
+                    Ok(())
+                }
+                Err(e) => {
+                    discard_part(&part).await;
+                    Err(e)
+                }
+            }
         } else {
             Err("SFTP 子系统未初始化".into())
         }
@@ -1854,6 +1929,75 @@ mod tests {
     }
 
     /// T-3-2 验收：日志改由独立 task 落盘后，顺序、脱敏状态、未换行尾部都不能丢
+    #[test]
+    fn cancellations_are_isolated_per_transfer_id() {
+        // 全局登记表在测试进程里是共享的：用进程号 + 计数造出唯一 id，避免互相干扰
+        fn unique() -> u64 {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            (std::process::id() as u64) << 24 | SEQ.fetch_add(1, Ordering::Relaxed)
+        }
+        let a = unique();
+        let b = unique();
+        assert!(!transfer_cancel_requested(a), "没请求过就不该是取消");
+        request_transfer_cancel(a);
+        assert!(transfer_cancel_requested(a), "按 id 取消应当生效");
+        assert!(
+            !transfer_cancel_requested(b),
+            "不得牵连别的传输（同一次批量里其它文件还在传）"
+        );
+        clear_transfer_cancel(a);
+        assert!(!transfer_cancel_requested(a), "取消标记用完要清掉");
+        clear_transfer_cancel(b);
+    }
+
+    #[test]
+    fn part_path_stays_beside_its_target() {
+        let target = std::path::Path::new("/tmp/zterm-dl/app.jar");
+        let part = part_path_for(target, 7);
+        assert_eq!(
+            part.parent(),
+            target.parent(),
+            "分片必须留在同一个目录（白名单是按目录判的）"
+        );
+        assert_eq!(
+            part.file_name().unwrap().to_string_lossy(),
+            "app.jar.7.part",
+            "带上 transfer_id，两个并发同名下载不能抢同一个分片"
+        );
+        assert_ne!(part, target);
+        let root = part_path_for(std::path::Path::new("/"), 1);
+        assert!(
+            root.to_string_lossy().ends_with(".part"),
+            "拿不到文件名时也要给出可用路径"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_and_discard_keep_download_atomic() {
+        let dir = std::env::temp_dir().join(format!("zterm-part-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target = dir.join("big.bin");
+        let part = part_path_for(&target, 3);
+
+        // 取消/失败：分片丢掉，正式路径根本不该出现
+        tokio::fs::write(&part, b"half").await.unwrap();
+        discard_part(&part).await;
+        assert!(!part.exists(), "分片要被丢掉");
+        assert!(!target.exists(), "绝不能留下冒充已完成的半截文件");
+
+        // 成功：分片提升为正式文件，内容一字不差
+        tokio::fs::write(&part, b"whole-content").await.unwrap();
+        commit_part(&part, &target).await.unwrap();
+        assert!(!part.exists(), "提升后不该再有分片残留");
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"whole-content");
+
+        // 再次丢弃不存在的路径不应报错
+        discard_part(&part).await;
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
     #[tokio::test]
     async fn log_writer_redacts_across_chunks_and_flushes_tail() {
         let dir = std::env::temp_dir().join(format!("zterm-log-writer-{}", std::process::id()));

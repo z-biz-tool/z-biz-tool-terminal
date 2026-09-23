@@ -203,6 +203,26 @@ ok("拒绝时报错点名「目标已存在」", /目标已存在/.test(paths));
 eq("编辑副本那条路径不受影响（仍走 prepare_write）",
   /prepare_write\(&local_path\)/.test(commands), true);
 
+// ---- 5b. 「中断当前」这一档：措辞按方向分开，且不算成功 ----
+
+{
+  const aborted = [plan("big.iso")];
+  const dl = summarizeBatch({ saved: [plan("a.txt")], existing: [], failed: [], aborted }, "/D");
+  eq("下载有中断不能算 success", dl.kind, "warning");
+  ok("下载说清半截分片已丢弃", dl.text.includes("已中断 1 个（半截分片已丢弃，未写出目标文件）：big.iso"));
+  ok("下载不扯远端截断这种不相干的话", !dl.text.includes("远端已写入部分"));
+  const up = summarizeBatch({ saved: [], existing: [], failed: [], aborted }, "/up", "上传");
+  ok("上传说清远端可能留半截、需重传",
+    up.text.includes("远端已写入部分可能不完整，需重传覆盖") && up.text.includes("big.iso"));
+  // 用户自己按的取消不该报成红色"出错"：只有真失败才升级成 error
+  eq("全中断（没有任何真失败）⇒ warning，不是 error", up.kind, "warning");
+  const realFail = summarizeBatch({ saved: [], existing: [], failed: [{ plan: plan("x"), reason: "会话已断开" }], aborted }, "/up", "上传");
+  eq("有真失败且零成功 ⇒ error", realFail.kind, "error");
+  ok("两种桶在一条汇总里分开列", realFail.text.includes("已中断 1 个") && realFail.text.includes("失败 1 个"));
+  const none = summarizeBatch({ saved: [plan("a.txt")], existing: [], failed: [], aborted: [] }, "/D");
+  eq("空 aborted 不影响文案", none, { kind: "success", text: "已下载 1 个文件到 /D" });
+}
+
 console.log(`[SftpDownloadPlan] PASS ${pass} / FAIL ${fail}`);
 if (fail) {
   for (const f of fails) console.error("✗ " + f);

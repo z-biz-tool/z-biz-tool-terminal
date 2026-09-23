@@ -57,6 +57,8 @@ export interface BatchOutcome {
   failed: { plan: PlannedDownload; reason: string }[];
   /** 请求过取消之后，**根本没开始**的那些（正在传的那条不会被打断） */
   notStarted?: PlannedDownload[];
+  /** 用户按了「中断当前」而停下来的那一条（半截的算什么，见 summarizeBatch 的措辞） */
+  aborted?: PlannedDownload[];
 }
 
 const NAME_CAP = 6;
@@ -85,21 +87,43 @@ export function summarizeBatch(
     parts.push(`已${action} ${o.saved.length} 个文件到 ${dir}`);
     if (renamed.length > 0) {
       // 两种原因都会改名（远端名字不安全 / 同一批里两个名字撞成一个），措辞里不猜原因，只点名结果
-      parts.push(`其中 ${nameList(renamed.map((p) => `${p.remoteName}→${p.localName}`))} 已改名以免互相覆盖`);
+      parts.push(
+        `其中 ${nameList(renamed.map((p) => `${p.remoteName}→${p.localName}`))} 已改名以免互相覆盖`
+      );
     }
   }
   if (o.existing.length > 0) {
-    parts.push(`跳过 ${o.existing.length} 个（本地已存在，未覆盖）：${nameList(o.existing.map((p) => p.remoteName))}`);
+    parts.push(
+      `跳过 ${o.existing.length} 个（本地已存在，未覆盖）：${nameList(o.existing.map((p) => p.remoteName))}`
+    );
   }
   if (o.notStarted && o.notStarted.length > 0) {
-    parts.push(`已取消 ${o.notStarted.length} 个（未开始）：${nameList(o.notStarted.map((p) => p.remoteName))}`);
+    parts.push(
+      `已取消 ${o.notStarted.length} 个（未开始）：${nameList(o.notStarted.map((p) => p.remoteName))}`
+    );
+  }
+  if (o.aborted && o.aborted.length > 0) {
+    // 两种方向的"剩下什么"不一样，措辞必须分开：下载写的是临时分片（已丢弃），
+    // 上传则是远端被截断的文件（要重传覆盖），说成"已丢弃"就是假承诺
+    parts.push(
+      action === "下载"
+        ? `已中断 ${o.aborted.length} 个（半截分片已丢弃，未写出目标文件）：${nameList(o.aborted.map((p) => p.remoteName))}`
+        : `已中断 ${o.aborted.length} 个（远端已写入部分可能不完整，需重传覆盖）：${nameList(o.aborted.map((p) => p.remoteName))}`
+    );
   }
   if (o.failed.length > 0) {
-    parts.push(`失败 ${o.failed.length} 个：${nameList(o.failed.map((p) => `${p.plan.remoteName}: ${p.reason}`))}`);
+    parts.push(
+      `失败 ${o.failed.length} 个：${nameList(o.failed.map((p) => `${p.plan.remoteName}: ${p.reason}`))}`
+    );
   }
   const text = parts.join("；");
   if (o.failed.length > 0 && o.saved.length === 0) return { kind: "error", text };
-  if (o.failed.length > 0 || o.existing.length > 0 || (o.notStarted?.length ?? 0) > 0) {
+  if (
+    o.failed.length > 0 ||
+    o.existing.length > 0 ||
+    (o.notStarted?.length ?? 0) > 0 ||
+    (o.aborted?.length ?? 0) > 0
+  ) {
     return { kind: "warning", text };
   }
   return { kind: "success", text };

@@ -839,6 +839,25 @@ pub async fn sftp_download(
     }
 }
 
+/// 请求中断一条正在进行的传输（按 `transfer_id`）。
+///
+/// 这只影响"当前这一条"：复制循环每读一块前查一次标记，查到就停止搬运并按失败返回
+/// （下载会丢掉半截的 `.part` 文件，不会留下冒充已完成的残件）。
+/// 取消是尽力而为：已经读完的块不会回滚，因此调用方要如实报告"中断"，不能说成"已删除"。
+#[tauri::command]
+pub async fn sftp_cancel_transfer(transfer_id: u64) -> ExecResult {
+    crate::ssh::request_transfer_cancel(transfer_id);
+    crate::audit::record(
+        "sftp_cancel_transfer",
+        serde_json::json!({ "transfer_id": transfer_id }),
+    );
+    ExecResult {
+        success: true,
+        output: "已请求中断".into(),
+        error: None,
+    }
+}
+
 /// SFTP 创建目录
 #[tauri::command]
 pub async fn sftp_mkdir(session_id: String, path: String) -> ExecResult {

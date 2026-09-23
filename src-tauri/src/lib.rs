@@ -31,6 +31,7 @@ pub fn run() {
             commands::sftp_list,
             commands::sftp_upload,
             commands::sftp_download,
+            commands::sftp_cancel_transfer,
             commands::sftp_mkdir,
             commands::sftp_remove,
             commands::sftp_rename,

@@ -359,8 +359,9 @@ const util = readFileSync("src/utils/sftpTransfer.ts", "utf8");
   ok("面板自己不许 listen（必须走总线）", !/from "@tauri-apps\/api\/event"/.test(panel));
   ok("sftp-progress 字面量只出现在总线里", (srcFiles.match(/"sftp-progress"/g) || []).length === 1);
   ok("节流间隔只在后端一份", /const SFTP_PROGRESS_INTERVAL_MS: u64 = 250;/.test(rust));
-  ok("命令层把 transfer_id 透传到会话", (commands.match(/transfer_id: u64/g) || []).length === 2);
-  ok("会话层两条路径共用同一个 pump", (rust.match(/self\.pump_with_progress\(/g) || []).length === 2);
+  // 两条传输命令 + 新增的取消命令，都按同一个 transfer_id 说话
+  ok("命令层把 transfer_id 透传到会话", (commands.match(/transfer_id: u64/g) || []).length === 3);
+  ok("会话层两条路径共用同一个 pump", (rust.match(/\.pump_with_progress\(/g) || []).length === 2);
   const upBody = rust.slice(rust.indexOf("pub async fn sftp_upload"), rust.indexOf("pub async fn sftp_download"));
   ok("上传大小取不到时报 0，交给前端说「大小未知」", upBody.includes(".unwrap_or(0)"));
   ok(

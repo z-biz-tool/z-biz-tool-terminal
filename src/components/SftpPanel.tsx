@@ -92,7 +92,14 @@ const TRANSFER_HOLD_MS = 800;
  * 那条既不知道文件多大也不知道传了多久，任何一次传输都只会在结束时瞬间满格。
  * 大小取不到时不画条（只显示已传字节 + "大小未知"），宁可少说也不猜一个百分比。
  */
-function TransferBanner({ transfer }: { transfer: Transfer }) {
+function TransferBanner({
+  transfer,
+  onCancelTransfer,
+}: {
+  transfer: Transfer;
+  /** 传进来才显示「中断当前」；单条传输与批量进行中的那一条共用这个入口 */
+  onCancelTransfer?: () => void;
+}) {
   const { token } = theme.useToken();
   const pct = percentOf(transfer);
   const failed = transfer.phase === "failed";
@@ -145,7 +152,20 @@ function TransferBanner({ transfer }: { transfer: Transfer }) {
           color: failed ? token.colorError : token.colorTextSecondary,
         }}
       >
-        {describeTransfer(transfer, Date.now())}
+        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          {describeTransfer(transfer, Date.now())}
+          {onCancelTransfer && transfer.phase === "running" && (
+            <Button
+              size="small"
+              type="text"
+              aria-label="中断当前传输"
+              style={{ fontSize: 11, height: 20, padding: "0 4px" }}
+              onClick={onCancelTransfer}
+            >
+              中断当前
+            </Button>
+          )}
+        </span>
       </span>
     </div>
   );
@@ -215,6 +235,12 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
   // ref 与 state 同步写：循环里要读的是"此刻有没有人按过取消"，state 那份是渲染快照，会旧。
   const [batch, setBatch] = useState<Batch | null>(null);
   const batchRef = useRef<Batch | null>(null);
+  /**
+   * 当前这条传输的取消令牌。循环与「中断当前」按钮共享同一个对象：按下去就把
+   * `cancelled` 置真，循环结束后据此把这一条分进 aborted 而不是 failed
+   * —— "用户取消"和"传失败"在汇总里不是一回事。
+   */
+  const tokenRef = useRef<{ cancelled: boolean } | null>(null);
   const [selectedEntries, setSelectedEntries] = useState<Set<string>>(new Set());
   const [lastClickedName, setLastClickedName] = useState<string | null>(null);
   const [focusedIndex, setFocusedIndex] = useState(-1);
@@ -236,6 +262,13 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
    * 实测旧行为是"关掉面板 → 剩下两个文件照传 → 弹一条没有人看的汇总提示"。
    */
   const aliveRef = useRef(true);
+
+  const cancelCurrentTransfer = useCallback(() => {
+    if (!transfer || transfer.phase !== "running") return;
+    if (tokenRef.current) tokenRef.current.cancelled = true;
+    // "取消剩余"挡后面，"中断当前"停手上这条 —— 两件事，按钮也分开
+    void invoke("sftp_cancel_transfer", { transferId: transfer.id });
+  }, [transfer]);
 
   const applyBatch = useCallback((next: Batch | null) => {
     batchRef.current = next;
@@ -277,10 +310,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
 
   // 动作发生那一刻再取一次身份：渲染到点击之间人可能已经切了标签页/面板，
   // 用渲染期的 `activeSessionId` 会把上一条操作发到一个已经不显示的会话上。
-  const getSessionId = useCallback(
-    () => pickTabSession(useServerStore.getState(), tabId),
-    [tabId]
-  );
+  const getSessionId = useCallback(() => pickTabSession(useServerStore.getState(), tabId), [tabId]);
 
   // 整批的百分比/约剩由"已完成条目 + 当前条目实时字节"推出 ⇒ 卡住时这一行也得自己走
   const [, setBatchTick] = useState(0);
@@ -331,9 +361,12 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       kind: TransferKind,
       filename: string,
       sessionId: string,
-      call: (transferId: number) => Promise<unknown>
+      call: (transferId: number) => Promise<unknown>,
+      // 必传（不给默认值）：漏传不会静默把"用户中断"报成"传输失败"，而是直接编译不过
+      token: { cancelled: boolean }
     ): Promise<string | null> => {
       const id = nextTransferId();
+      tokenRef.current = token;
       setTransfer(beginTransfer(id, sessionId, kind, filename, Date.now()));
       let error: string | null = null;
       try {
@@ -341,7 +374,10 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       } catch (e) {
         error = String(e);
       }
-      setTransfer((prev) => settleTransfer(prev, id, error === null, error ?? undefined, Date.now()));
+      setTransfer((prev) =>
+        settleTransfer(prev, id, error === null, error ?? undefined, Date.now())
+      );
+      if (tokenRef.current === token) tokenRef.current = null;
       window.setTimeout(() => {
         if (!aliveRef.current) return;
         setTransfer((prev) => clearFinished(prev, id));
@@ -475,7 +511,9 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
 
       // Normal click: single select or navigate
       if (entry.is_dir) {
-        const newPath = sftpPath.endsWith("/") ? sftpPath + entry.name : sftpPath + "/" + entry.name;
+        const newPath = sftpPath.endsWith("/")
+          ? sftpPath + entry.name
+          : sftpPath + "/" + entry.name;
         navigateTo(newPath);
       } else {
         setSelectedEntries(new Set([entryName]));
@@ -584,7 +622,15 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         }
       }
     },
-    [pathInput, navigateTo, sortedEntries, focusedIndex, selectedEntries.size, handleSelectAll, handleGoUp]
+    [
+      pathInput,
+      navigateTo,
+      sortedEntries,
+      focusedIndex,
+      selectedEntries.size,
+      handleSelectAll,
+      handleGoUp,
+    ]
   );
 
   // ---- File operations ----
@@ -610,7 +656,13 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       // 落点名照样要过一遍净化 + 批内去重：`~/a/x.txt` 与 `~/b/x.txt` 选进同一批时，
       // 旧写法两个都报「上传成功」，实际后一个把前一个覆盖掉了。
       const plans = planDownloads(filePaths.map(basenameOf));
-      const outcome: BatchOutcome = { saved: [], existing: [], failed: [], notStarted: [] };
+      const outcome: BatchOutcome = {
+        saved: [],
+        existing: [],
+        failed: [],
+        notStarted: [],
+        aborted: [],
+      };
       applyBatch(beginBatch("upload", plans.length));
       for (const [i, plan] of plans.entries()) {
         if (!aliveRef.current) return;
@@ -621,11 +673,19 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
           continue;
         }
         applyBatch(startItem(cur!, plan.remoteName));
-        const remotePath = sftpPath.endsWith("/") ? sftpPath + plan.localName : sftpPath + "/" + plan.localName;
-        const error = await runTransfer("upload", plan.remoteName, sessionId, (transferId) =>
-          invoke("sftp_upload", { sessionId, localPath, remotePath, transferId })
+        const remotePath = sftpPath.endsWith("/")
+          ? sftpPath + plan.localName
+          : sftpPath + "/" + plan.localName;
+        const token = { cancelled: false };
+        const error = await runTransfer(
+          "upload",
+          plan.remoteName,
+          sessionId,
+          (transferId) => invoke("sftp_upload", { sessionId, localPath, remotePath, transferId }),
+          token
         );
         if (error === null) outcome.saved.push(plan);
+        else if (token.cancelled) outcome.aborted!.push(plan);
         else outcome.failed.push({ plan, reason: error });
         applyBatch(finishItem(batchRef.current!));
       }
@@ -633,7 +693,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       const done = batchRef.current;
       applyBatch(null);
       // 单个文件不刷屏（一条汇总对单条来说反而罗嗦），保持原来的一句式反馈
-      if (plans.length === 1 && !done?.cancelled) {
+      if (plans.length === 1 && !done?.cancelled && (outcome.aborted?.length ?? 0) === 0) {
         const only = outcome.failed[0];
         if (only) message.error(`上传失败: ${only.plan.remoteName}: ${only.reason}`);
         else message.success(`上传成功: ${plans[0].remoteName}`);
@@ -671,12 +731,26 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       });
       if (!localPath) return;
 
-      const error = await runTransfer("download", target.name, sessionId, (transferId) =>
-        // overwrite:true = 覆盖的决定已经由原生保存框问过了（它会就"替换吗"单独确认），
-        // 这里不再让后端重复拦一道；批量那条路径没有这道框，所以传的是 false。
-        invoke("sftp_download", { sessionId, remotePath, localPath, transferId, overwrite: true })
+      const token = { cancelled: false };
+      const error = await runTransfer(
+        "download",
+        target.name,
+        sessionId,
+        (transferId) =>
+          // overwrite:true = 覆盖的决定已经由原生保存框问过了（它会就"替换吗"单独确认），
+          // 这里不再让后端重复拦一道；批量那条路径没有这道框，所以传的是 false。
+          invoke("sftp_download", {
+            sessionId,
+            remotePath,
+            localPath,
+            transferId,
+            overwrite: true,
+          }),
+        token
       );
       if (error === null) message.success(`下载成功: ${target.name}`);
+      // 用户按的"中断"不能报成"失败"：分片已经丢掉，目标文件根本没被写过
+      else if (token.cancelled) message.warning(`已中断下载: ${target.name}（半截分片已丢弃）`);
       else message.error(`下载失败: ${target.name}: ${error}`);
     },
     [sftpPath, getSessionId, runTransfer]
@@ -700,7 +774,9 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
     const files = entries.filter((e) => !e.is_dir);
 
     if (dirs.length > 0) {
-      message.warning(`跳过 ${dirs.length} 个目录（不支持下载目录）: ${dirs.map((d) => d.name).join(", ")}`);
+      message.warning(
+        `跳过 ${dirs.length} 个目录（不支持下载目录）: ${dirs.map((d) => d.name).join(", ")}`
+      );
     }
 
     if (files.length === 0) {
@@ -717,7 +793,13 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
     if (!dir) return;
     const targetDir = String(dir);
 
-    const outcome: BatchOutcome = { saved: [], existing: [], failed: [], notStarted: [] };
+    const outcome: BatchOutcome = {
+      saved: [],
+      existing: [],
+      failed: [],
+      notStarted: [],
+      aborted: [],
+    };
     const plans = planDownloads(files.map((e) => e.name));
     // 只要有一条大小未知（远端 ls 没给、或给的是 -1/NaN），整批就不给百分比 ——
     // 拿"知道的那几条"加总当总数，会画出一个偏小的假进度
@@ -744,6 +826,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         ? sftpPath + entry.name
         : sftpPath + "/" + entry.name;
       const localPath = joinDownloadTarget(targetDir, plan.localName);
+      const token = { cancelled: false };
 
       // 探测只为把"跳过"说清楚；真正的不覆盖兜底在后端（prepare_write_new），
       // 因为探测与写入之间文件可能刚被别的东西建出来。
@@ -758,16 +841,22 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         continue;
       }
 
-      const error = await runTransfer("download", plan.remoteName, sessionId, (transferId) =>
-        invoke("sftp_download", {
-          sessionId,
-          remotePath,
-          localPath,
-          transferId,
-          overwrite: false,
-        })
+      const error = await runTransfer(
+        "download",
+        plan.remoteName,
+        sessionId,
+        (transferId) =>
+          invoke("sftp_download", {
+            sessionId,
+            remotePath,
+            localPath,
+            transferId,
+            overwrite: false,
+          }),
+        token
       );
       if (error === null) outcome.saved.push(plan);
+      else if (token.cancelled) outcome.aborted!.push(plan);
       else outcome.failed.push({ plan, reason: error });
       applyBatch(finishItem(batchRef.current!));
     }
@@ -806,7 +895,14 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       content: (
         <div>
           <p>{contentText}</p>
-          <div style={{ maxHeight: 120, overflow: "auto", fontSize: 12, color: token.colorTextSecondary }}>
+          <div
+            style={{
+              maxHeight: 120,
+              overflow: "auto",
+              fontSize: 12,
+              color: token.colorTextSecondary,
+            }}
+          >
             {entries.map((e) => (
               <div key={e.name}>
                 {e.is_dir ? "📁 " : "📄 "}
@@ -835,13 +931,22 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
           }
         }
         if (successCount > 0) {
-          message.success(`成功删除 ${successCount} 项${failCount > 0 ? `，${failCount} 项失败` : ""}`);
+          message.success(
+            `成功删除 ${successCount} 项${failCount > 0 ? `，${failCount} 项失败` : ""}`
+          );
         }
         setSelectedEntries(new Set());
         navigateTo(sftpPath);
       },
     });
-  }, [sftpPath, selectedEntries, sortedEntries, getSessionId, navigateTo, token.colorTextSecondary]);
+  }, [
+    sftpPath,
+    selectedEntries,
+    sortedEntries,
+    getSessionId,
+    navigateTo,
+    token.colorTextSecondary,
+  ]);
 
   const handleBatchCopyPath = useCallback(async () => {
     const selectedNames = Array.from(selectedEntries);
@@ -894,8 +999,13 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         // 目录名里那份身份不能少：远端文件名可控，且同名不同路径的两份副本会互相顶掉
         const localPath = editLocalPath(tempDir, sessionId, remotePath, entry.name);
 
-        const pulled = await runTransfer("download", entry.name, sessionId, (transferId) =>
-          invoke("sftp_download", { sessionId, remotePath, localPath, transferId })
+        const pulled = await runTransfer(
+          "download",
+          entry.name,
+          sessionId,
+          (transferId) => invoke("sftp_download", { sessionId, remotePath, localPath, transferId }),
+          // 编辑拉取不提供中断：半截副本会直接被下一次拉取覆盖，没有"冒充完成"的风险
+          { cancelled: false }
         );
         // 拉不下来就别打开编辑器：编辑一份不存在（或是上一次残留）的本地文件，
         // 保存回去会覆盖远端内容
@@ -904,7 +1014,9 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
           return;
         }
 
-        const statResult = await invoke<{ modified: number }>("get_file_modified_time", { path: localPath }).catch(() => ({ modified: Date.now() }));
+        const statResult = await invoke<{ modified: number }>("get_file_modified_time", {
+          path: localPath,
+        }).catch(() => ({ modified: Date.now() }));
         const lastModified = statResult.modified || Date.now();
 
         await invoke("open_file_with_default_app", { path: localPath });
@@ -920,7 +1032,9 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         const watcherId = window.setInterval(async () => {
           if (pushing) return;
           try {
-            const currentStat = await invoke<{ modified: number }>("get_file_modified_time", { path: localPath }).catch(() => ({ modified: 0 }));
+            const currentStat = await invoke<{ modified: number }>("get_file_modified_time", {
+              path: localPath,
+            }).catch(() => ({ modified: 0 }));
             if (!currentStat.modified || currentStat.modified <= pushedModified) return;
             pushing = true;
             try {
@@ -931,8 +1045,14 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
                 message.warning(`${entry.name} 的编辑监听已停止：该会话已断开，改动不会自动回传`);
                 return;
               }
-              const pushed = await runTransfer("upload", entry.name, sessionId, (transferId) =>
-                invoke("sftp_upload", { sessionId, localPath, remotePath, transferId })
+              const pushed = await runTransfer(
+                "upload",
+                entry.name,
+                sessionId,
+                (transferId) =>
+                  invoke("sftp_upload", { sessionId, localPath, remotePath, transferId }),
+                // 自动回传不提供中断：这条是监听器代发的一次性上传，中断它只会让远端停在旧内容
+                { cancelled: false }
               );
               // 失败不能推进基准：推进了就再也不会重试，远端却还拿着旧内容
               if (pushed !== null) {
@@ -988,7 +1108,9 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
   const handleOpen = useCallback(
     (entry: SftpEntry) => {
       if (entry.is_dir) {
-        const newPath = sftpPath.endsWith("/") ? sftpPath + entry.name : sftpPath + "/" + entry.name;
+        const newPath = sftpPath.endsWith("/")
+          ? sftpPath + entry.name
+          : sftpPath + "/" + entry.name;
         navigateTo(newPath);
       } else {
         handleEditFile(entry);
@@ -1120,9 +1242,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
 
   const handleCopyPath = useCallback(
     async (entry: SftpEntry) => {
-      const fullPath = sftpPath.endsWith("/")
-        ? sftpPath + entry.name
-        : sftpPath + "/" + entry.name;
+      const fullPath = sftpPath.endsWith("/") ? sftpPath + entry.name : sftpPath + "/" + entry.name;
       try {
         await writeText(fullPath);
         message.success(`已复制路径: ${fullPath}`);
@@ -1229,7 +1349,19 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         onClick: () => handleCopyPath(entry),
       },
     ];
-  }, [contextMenuEntry, selectedEntries, handleOpen, handleDownload, handleEditFile, handleRename, handleDelete, handleCopyPath, handleBatchDownload, handleBatchCopyPath, handleBatchDelete]);
+  }, [
+    contextMenuEntry,
+    selectedEntries,
+    handleOpen,
+    handleDownload,
+    handleEditFile,
+    handleRename,
+    handleDelete,
+    handleCopyPath,
+    handleBatchDownload,
+    handleBatchCopyPath,
+    handleBatchDelete,
+  ]);
 
   // ---- Drag and drop (upload) ----
 
@@ -1273,23 +1405,21 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
 
   // ---- Drag to download ----
 
-  const handleRowDragStart = useCallback(
-    (e: React.DragEvent, entry: SftpEntry) => {
-      setDragDownloadEntry(entry);
-      // Set transfer data for the drag
-      e.dataTransfer.setData("text/plain", entry.name);
-      e.dataTransfer.effectAllowed = "copy";
-      // Add a drag image
-      const dragEl = document.createElement("div");
-      dragEl.style.cssText = "position:absolute;top:-9999px;left:-9999px;padding:4px 12px;background:#1677ff;color:#fff;border-radius:4px;font-size:12px;white-space:nowrap;";
-      dragEl.textContent = entry.is_dir ? `📁 ${entry.name}` : `📄 ${entry.name}`;
-      document.body.appendChild(dragEl);
-      e.dataTransfer.setDragImage(dragEl, 0, 0);
-      // Clean up after a tick
-      requestAnimationFrame(() => document.body.removeChild(dragEl));
-    },
-    []
-  );
+  const handleRowDragStart = useCallback((e: React.DragEvent, entry: SftpEntry) => {
+    setDragDownloadEntry(entry);
+    // Set transfer data for the drag
+    e.dataTransfer.setData("text/plain", entry.name);
+    e.dataTransfer.effectAllowed = "copy";
+    // Add a drag image
+    const dragEl = document.createElement("div");
+    dragEl.style.cssText =
+      "position:absolute;top:-9999px;left:-9999px;padding:4px 12px;background:#1677ff;color:#fff;border-radius:4px;font-size:12px;white-space:nowrap;";
+    dragEl.textContent = entry.is_dir ? `📁 ${entry.name}` : `📄 ${entry.name}`;
+    document.body.appendChild(dragEl);
+    e.dataTransfer.setDragImage(dragEl, 0, 0);
+    // Clean up after a tick
+    requestAnimationFrame(() => document.body.removeChild(dragEl));
+  }, []);
 
   const handleRowDragEnd = useCallback(() => {
     // If the drag ended outside the app (dropZone wasn't activated), we can't detect
@@ -1334,14 +1464,11 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
 
   // ---- Empty area context menu ----
 
-  const handleEmptyContextMenu = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      setContextMenuPos({ x: e.clientX, y: e.clientY });
-      setContextMenuEntry({ name: "__empty__", is_dir: true, size: 0 } as SftpEntry);
-    },
-    []
-  );
+  const handleEmptyContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenuPos({ x: e.clientX, y: e.clientY });
+    setContextMenuEntry({ name: "__empty__", is_dir: true, size: 0 } as SftpEntry);
+  }, []);
 
   const getEmptyAreaContextMenuItems = useCallback((): MenuProps["items"] => {
     return [
@@ -1407,10 +1534,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
   const columns = [
     {
       title: (
-        <span
-          style={{ cursor: "pointer", userSelect: "none" }}
-          onClick={() => handleSort("name")}
-        >
+        <span style={{ cursor: "pointer", userSelect: "none" }} onClick={() => handleSort("name")}>
           名称 {renderSortIcon("name")}
         </span>
       ),
@@ -1434,10 +1558,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
     },
     {
       title: (
-        <span
-          style={{ cursor: "pointer", userSelect: "none" }}
-          onClick={() => handleSort("size")}
-        >
+        <span style={{ cursor: "pointer", userSelect: "none" }} onClick={() => handleSort("size")}>
           大小 {renderSortIcon("size")}
         </span>
       ),
@@ -1538,10 +1659,20 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       >
         <Space size="small">
           <Tooltip title="回到用户主目录">
-            <Button size="small" aria-label="回到用户主目录" icon={<HomeOutlined />} onClick={handleGoHome} />
+            <Button
+              size="small"
+              aria-label="回到用户主目录"
+              icon={<HomeOutlined />}
+              onClick={handleGoHome}
+            />
           </Tooltip>
           <Tooltip title="上一级目录（Backspace）">
-            <Button size="small" aria-label="上一级目录" icon={<ArrowLeftOutlined />} onClick={handleGoUp} />
+            <Button
+              size="small"
+              aria-label="上一级目录"
+              icon={<ArrowLeftOutlined />}
+              onClick={handleGoUp}
+            />
           </Tooltip>
           <Tooltip title="重新列出当前目录">
             <Button
@@ -1568,30 +1699,17 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
                 已选 {selectedEntries.size} 项
               </Tag>
               <Tooltip title="批量下载选中文件">
-                <Button
-                  size="small"
-                  icon={<DownloadOutlined />}
-                  onClick={handleBatchDownload}
-                >
+                <Button size="small" icon={<DownloadOutlined />} onClick={handleBatchDownload}>
                   批量下载
                 </Button>
               </Tooltip>
               <Tooltip title="批量删除选中项">
-                <Button
-                  size="small"
-                  icon={<DeleteOutlined />}
-                  danger
-                  onClick={handleBatchDelete}
-                >
+                <Button size="small" icon={<DeleteOutlined />} danger onClick={handleBatchDelete}>
                   批量删除
                 </Button>
               </Tooltip>
               <Tooltip title="批量复制路径">
-                <Button
-                  size="small"
-                  icon={<CopyOutlined />}
-                  onClick={handleBatchCopyPath}
-                >
+                <Button size="small" icon={<CopyOutlined />} onClick={handleBatchCopyPath}>
                   复制路径
                 </Button>
               </Tooltip>
@@ -1614,7 +1732,11 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
             </Button>
           </Tooltip>
           <Tooltip
-            title={singleSelected && !singleSelected.is_dir ? `下载 ${singleSelected.name}` : "请先选择文件"}
+            title={
+              singleSelected && !singleSelected.is_dir
+                ? `下载 ${singleSelected.name}`
+                : "请先选择文件"
+            }
           >
             <Button
               size="small"
@@ -1692,7 +1814,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       )}
 
       {/* 传输进度指示器 */}
-      {transfer && <TransferBanner transfer={transfer} />}
+      {transfer && <TransferBanner transfer={transfer} onCancelTransfer={cancelCurrentTransfer} />}
 
       {/* 编辑中的文件指示器 */}
       {editingFiles.length > 0 && (
@@ -1725,7 +1847,9 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
                 onClose={() => {
                   if (f.watcher !== null) stopWatching(f.watcher);
                   setEditingFiles((prev) =>
-                    prev.filter((ef) => !(ef.sessionId === f.sessionId && ef.remotePath === f.remotePath))
+                    prev.filter(
+                      (ef) => !(ef.sessionId === f.sessionId && ef.remotePath === f.remotePath)
+                    )
                   );
                 }}
                 title={foreign ? `${f.remotePath}（不在当前会话）` : f.remotePath}
@@ -1770,9 +1894,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
           >
             <Space orientation="vertical" align="center">
               <UploadOutlined style={{ fontSize: 32, color: token.colorPrimary }} />
-              <span style={{ color: token.colorPrimary, fontWeight: 500 }}>
-                拖放文件到此处上传
-              </span>
+              <span style={{ color: token.colorPrimary, fontWeight: 500 }}>拖放文件到此处上传</span>
             </Space>
           </div>
         )}
@@ -1831,9 +1953,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
               },
               style: {
                 cursor: "pointer",
-                background: selectedEntries.has(record.name)
-                  ? token.colorPrimaryBg
-                  : undefined,
+                background: selectedEntries.has(record.name) ? token.colorPrimaryBg : undefined,
                 outline: focusedIndex === index ? `2px solid ${token.colorPrimary}` : "none",
                 outlineOffset: -2,
               },
@@ -1857,8 +1977,15 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
           onDrop={handleDropZoneDrop}
         >
           <Space>
-            <DragOutlined style={{ color: dropZoneActive ? token.colorPrimary : token.colorTextSecondary }} />
-            <span style={{ fontSize: 12, color: dropZoneActive ? token.colorPrimary : token.colorTextSecondary }}>
+            <DragOutlined
+              style={{ color: dropZoneActive ? token.colorPrimary : token.colorTextSecondary }}
+            />
+            <span
+              style={{
+                fontSize: 12,
+                color: dropZoneActive ? token.colorPrimary : token.colorTextSecondary,
+              }}
+            >
               {dropZoneActive ? "释放以下载" : "拖拽下载区域 — 将文件拖到此处下载"}
             </span>
           </Space>

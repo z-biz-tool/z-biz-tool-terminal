@@ -193,8 +193,18 @@ function eq(name: string, got: unknown, want: unknown) {
   ok("只新建的那道闸内部仍走 prepare_write（没有第二套白名单）",
     /pub fn prepare_write_new[\s\S]{0,160}let target = prepare_write\(path\)\?;/.test(shipped));
   const rs = readFileSync("src-tauri/src/ssh.rs", "utf8");
-  ok("会话层不再自己 create 落盘路径之外的东西", !/tokio::fs::create_dir/.test(rs));
-  ok("下载仍由会话层写文件（闸只在命令层）", /tokio::fs::File::create\(local_path\)/.test(rs));
+  // 只看生产代码：测试模块里为了造临时目录会 create_dir_all，那不算旁路
+  const rsShipped = rs.split("#[cfg(test)]")[0];
+  ok("会话层不再自己 create 落盘路径之外的东西", !/tokio::fs::create_dir/.test(rsShipped));
+  // §7.41 起下载先写同目录的 .part、成功再 rename：会话层仍然自己开文件，但开的是分片，
+  // 目标路径依旧是命令层那道闸校验过的同一个目录
+  ok("下载仍由会话层写文件（闸只在命令层）",
+    /tokio::fs::File::create\(&part\)/.test(rs) &&
+    /part_path_for\(std::path::Path::new\(local_path\), transfer_id\)/.test(rs));
+  ok("分片与目标同目录（否则白名单校验就管不到落盘点）",
+    /target\.with_file_name\(name\)/.test(rs) || /part\.parent\(\) == target\.parent\(\)/.test(rs));
+  ok("成功才提升、失败或取消就丢分片",
+    /commit_part\(&part,/.test(rs) && /discard_part\(&part\)\.await/.test(rs));
   eq("建目录的实现只有 paths.rs 一份（两个 cfg 分支）", (rs.match(/fn ensure_parent_dir/g) || []).length + (commands.match(/fn ensure_parent_dir/g) || []).length, 0);
 }
 
