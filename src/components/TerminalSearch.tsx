@@ -6,128 +6,121 @@ import {
   ArrowUpOutlined,
   ArrowDownOutlined,
 } from "@ant-design/icons";
-
-interface Match {
-  /** buffer 索引（累计） */
-  index: number;
-  /** 行号（0-based） */
-  line: number;
-  /** 在该行中的字符起始位置 */
-  startCol: number;
-  /** 匹配文本长度 */
-  length: number;
-  /** 匹配文本 */
-  text: string;
-}
+import {
+  describeSearch,
+  findMatches,
+  initialIndex,
+  stepIndex,
+  type SearchMatch,
+  type SearchResult,
+} from "../utils/terminalSearch";
 
 interface Props {
   /** 触发显示 */
   open: boolean;
   /** 关闭回调 */
   onClose: () => void;
-  /** 获取 xterm buffer 行的方法 */
+  /** 取 xterm buffer 行，line=0 是最底下（最新）那一行 */
   getLine: (line: number) => string | null;
   /** 当前可视总行数（含 scrollback） */
   getLineCount: () => number;
-  /** 滚动 buffer，使指定行可见 */
-  scrollToLine: (line: number) => void;
+  /** 滚到某条匹配并把它选中 —— 选中块就是用户看到的"当前这一条" */
+  revealMatch: (match: SearchMatch) => void;
+  /** 抹掉搜索留下的选中块 */
+  clearHighlight: () => void;
+  /** 关闭搜索后把键盘焦点还给终端 */
+  returnFocus: () => void;
 }
 
 const { Text } = Typography;
 
+const EMPTY: SearchResult = { matches: [], truncated: false };
+
 /**
- * 极简终端内文本搜索。
- * 由于 xterm.js 的 buffer 不暴露通用搜索 API，这里实现基于 buffer 行的字符串扫描，
- * 并通过 highlight 整行的方式做"伪高亮"。
+ * 终端内文本搜索：xterm.js 没有通用搜索 API，这里按 buffer 行扫描（判定在
+ * `utils/terminalSearch`），定位靠 xterm 自己的选中 —— 只有数字没有选中块的话，
+ * "3 / 12" 说的到底是屏幕上哪一块没人知道。
  */
 export default function TerminalSearch({
   open,
   onClose,
   getLine,
   getLineCount,
-  scrollToLine,
+  revealMatch,
+  clearHighlight,
+  returnFocus,
 }: Props) {
   const [query, setQuery] = useState("");
-  const [matches, setMatches] = useState<Match[]>([]);
+  const [result, setResult] = useState<SearchResult>(EMPTY);
   const [current, setCurrent] = useState(0);
   const [caseSensitive, setCaseSensitive] = useState(false);
   const inputRef = useRef<any>(null);
+  // 本组件每个面板一个实例且常驻挂载，首帧 open 就是 false：不记这一次过渡的话，
+  // 挂载时那趟"关焦点还给终端"会把用户正在打字的面板顶掉。
+  const wasOpenRef = useRef(false);
 
   useEffect(() => {
     if (open) {
-      setTimeout(() => inputRef.current?.focus?.(), 50);
-    } else {
-      setQuery("");
-      setMatches([]);
-      setCurrent(0);
+      wasOpenRef.current = true;
+      const timer = setTimeout(() => inputRef.current?.focus?.(), 50);
+      return () => clearTimeout(timer);
     }
-  }, [open]);
+    if (!wasOpenRef.current) return;
+    wasOpenRef.current = false;
+    setQuery("");
+    setResult(EMPTY);
+    setCurrent(0);
+    clearHighlight();
+    returnFocus();
+  }, [open, clearHighlight, returnFocus]);
 
   const runSearch = useCallback(
     (q: string) => {
       if (!q) {
-        setMatches([]);
+        setResult(EMPTY);
         setCurrent(0);
+        clearHighlight();
         return;
       }
-      const needle = caseSensitive ? q : q.toLowerCase();
-      const results: Match[] = [];
-      const count = getLineCount();
-      let cumulative = 0;
-      for (let i = 0; i < count; i++) {
-        const raw = getLine(i);
-        if (raw == null) break;
-        const hay = caseSensitive ? raw : raw.toLowerCase();
-        let idx = hay.indexOf(needle);
-        while (idx >= 0) {
-          results.push({
-            index: cumulative + idx,
-            line: i,
-            startCol: idx,
-            length: q.length,
-            text: raw.substr(idx, q.length),
-          });
-          idx = hay.indexOf(needle, idx + Math.max(1, q.length));
-        }
-        cumulative += raw.length + 1;
-        // 安全限制
-        if (results.length > 5000) break;
+      const next = findMatches({
+        getLine,
+        lineCount: getLineCount(),
+        query: q,
+        caseSensitive,
+      });
+      setResult(next);
+      if (!next.matches.length) {
+        setCurrent(0);
+        clearHighlight();
+        return;
       }
-      setMatches(results);
-      setCurrent(0);
-      if (results.length > 0) {
-        scrollToLine(results[0].line);
-      }
+      const at = initialIndex(next.matches.length);
+      setCurrent(at);
+      revealMatch(next.matches[at]);
     },
-    [caseSensitive, getLine, getLineCount, scrollToLine],
+    [caseSensitive, clearHighlight, getLine, getLineCount, revealMatch],
   );
 
   useEffect(() => {
     runSearch(query);
-  }, [query, caseSensitive, runSearch]);
+  }, [query, runSearch]);
 
-  const goNext = () => {
-    if (matches.length === 0) return;
-    const next = (current + 1) % matches.length;
+  const go = (delta: number) => {
+    const matches = result.matches;
+    if (!matches.length) return;
+    const next = stepIndex(current, matches.length, delta);
     setCurrent(next);
-    scrollToLine(matches[next].line);
-  };
-
-  const goPrev = () => {
-    if (matches.length === 0) return;
-    const prev = (current - 1 + matches.length) % matches.length;
-    setCurrent(prev);
-    scrollToLine(matches[prev].line);
+    revealMatch(matches[next]);
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
+      e.stopPropagation();
       onClose();
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (e.shiftKey) goPrev();
-      else goNext();
+      go(e.shiftKey ? -1 : 1);
     }
   };
 
@@ -135,6 +128,7 @@ export default function TerminalSearch({
 
   return (
     <div
+      data-search-panel
       style={{
         position: "absolute",
         top: 8,
@@ -170,19 +164,41 @@ export default function TerminalSearch({
             Aa
           </Button>
         </Tooltip>
-        <Tooltip title="上一个 (Shift+Enter)">
-          <Button size="small" icon={<ArrowUpOutlined />} onClick={goPrev} disabled={matches.length === 0} />
+        <Tooltip title="上一条 (Shift+Enter)">
+          <Button
+            size="small"
+            icon={<ArrowUpOutlined />}
+            onClick={() => go(-1)}
+            disabled={result.matches.length === 0}
+          />
         </Tooltip>
-        <Tooltip title="下一个 (Enter)">
-          <Button size="small" icon={<ArrowDownOutlined />} onClick={goNext} disabled={matches.length === 0} />
+        <Tooltip title="下一条 (Enter)">
+          <Button
+            size="small"
+            icon={<ArrowDownOutlined />}
+            onClick={() => go(1)}
+            disabled={result.matches.length === 0}
+          />
         </Tooltip>
         <Tooltip title="关闭 (Esc)">
           <Button size="small" icon={<CloseOutlined />} onClick={onClose} />
         </Tooltip>
       </Space.Compact>
-      <div style={{ marginTop: 4, fontSize: 11, textAlign: "right", color: "var(--ant-color-text-tertiary)" }}>
-        <Text type="secondary">
-          {query ? (matches.length === 0 ? "无匹配" : `${current + 1} / ${matches.length}`) : "输入关键字以搜索"}
+      <div
+        style={{
+          marginTop: 4,
+          fontSize: 11,
+          textAlign: "right",
+          color: "var(--ant-color-text-tertiary)",
+        }}
+      >
+        <Text type="secondary" data-search-status>
+          {describeSearch({
+            query,
+            total: result.matches.length,
+            truncated: result.truncated,
+            current,
+          })}
         </Text>
       </div>
     </div>

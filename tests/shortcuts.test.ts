@@ -233,8 +233,52 @@ const K = (over: Partial<KeyLike> = {}): KeyLike => ({
 
   const term = readFileSync("src/components/TerminalView.tsx", "utf8");
   // 每个面板挂一个 TerminalView，store 换了活跃面板时 xterm 的隐藏 textarea 不会自己跟上
-  ok("TerminalView 把 DOM 焦点跟着活跃面板走", /if \(isActivePane\) termRef\.current\?\.focus\(\);/.test(term));
-  eq("focus() 只在活跃性变化时跑", (term.match(/termRef\.current\?\.focus\(\)/g) || []).length, 1);
+  ok(
+    "TerminalView 把 DOM 焦点跟着活跃面板走",
+    /if \(isActivePane\) termRef\.current\?\.focus\(\);/.test(term),
+  );
+  // 焦点调用只许这两种来源：store 活跃面板变了要跟上，搜索栏关要把焦点交回终端。
+  // 第三处（散在回调里的即席 focus()）才是真正会抢用户输入的漂移。
+  const focusCalls = term.match(/termRef\.current\??\.\s*focus\(\)/g) || [];
+  eq("终端焦点调用只有两处", focusCalls.length, 2);
+  ok(
+    "交还焦点那条是搜索栏专用的具名出口，不掺进活跃性那条",
+    /returnFocus: \(\) => termRef\.current\?\.focus\(\)/.test(term),
+  );
+}
+
+// 9. README 的快捷键表自称"由 src/utils/shortcuts.ts 生成、同源"，那就得真的同源
+{
+  const readme = readFileSync("README.md", "utf8");
+  const start = readme.indexOf("## ⌨️ 快捷键");
+  const end = readme.indexOf("\n---", start);
+  ok("能定位到 README 的快捷键表", start > 0 && end > start);
+  // 只截这张表：正文别处（功能清单、说明段落）的措辞不算数
+  const rows = readme
+    .slice(start, end)
+    .split("\n")
+    .filter((l) => l.startsWith("|"))
+    .map((l) => {
+      const cols = l.split("|");
+      return [(cols[1] || "").trim(), (cols[2] || "").trim()] as [string, string];
+    })
+    .filter(([k, v]) => k && v && v !== "功能");
+  const cells = rows.map(([, v]) => v);
+  const known = ALL_SHORTCUTS.map((s) => s.label);
+  const missing = ALL_SHORTCUTS.filter((s) => !cells.includes(s.label)).map((s) => `${s.id} → ${s.label}`);
+  eq("注册表里每条绑定都在 README 表里逐字出现", missing, []);
+  const dupInTable = cells.filter((c) => known.filter((k) => k === c).length && cells.filter((v) => v === c).length > 1);
+  eq("README 表里没有重复的说明行", Array.from(new Set(dupInTable)), []);
+  // 单向是故意的：`Esc` 这类不走注册表的行仍归各组件自己处理，所以只查"同一个组合键配了两套说法"，
+  // 不查"表里多出一行"。注册表条目漏进文档由上面那条红兜住。
+  const byCombo = new Map(ALL_SHORTCUTS.map((s) => [comboLabel(s.id, false), s.label]));
+  const cloned = rows
+    .map(([combo, desc]) => {
+      const label = byCombo.get(combo.replace(/`/g, "").split("（")[0].trim());
+      return label && label !== desc ? `${combo} : 表里写「${desc}」/ 真源是「${label}」` : "";
+    })
+    .filter(Boolean);
+  eq("README 里没有'看着像注册表条目'的手写副本", cloned, []);
 }
 
 console.log(`PASS ${pass} / FAIL ${fail}`);

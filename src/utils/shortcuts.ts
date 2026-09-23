@@ -10,6 +10,7 @@
  * 分工：App.tsx / TerminalView.tsx 用 hit() 匹配事件，ShortcutsModal 与工具栏 tooltip 用
  * comboLabel() 显示，tests/shortcuts.test.ts 反向核对"表里声明的都真的接了线"。
  */
+import { FONT_SIZE_DEFAULT } from "./fontZoom";
 
 /** 参与匹配的最小事件形状：真实 KeyboardEvent 与测试里的构造对象都能塞进来 */
 export interface KeyLike {
@@ -113,7 +114,7 @@ const SHORTCUTS = [
   {
     id: "terminal-search",
     group: "input",
-    label: "在当前终端里搜索",
+    label: "在当前终端里搜索（栏内 Enter 下一条 / Shift+Enter 上一条）",
     combo: { key: "F", mod: true },
     wiredIn: "src/components/TerminalView.tsx",
   },
@@ -177,7 +178,7 @@ const SHORTCUTS = [
   {
     id: "zoom-reset",
     group: "layout",
-    label: "还原终端字号",
+    label: `还原终端字号到默认 ${FONT_SIZE_DEFAULT}`,
     combo: { key: "0", mod: true },
     wiredIn: "src/App.tsx",
   },

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
 import type { ILinkProvider, ILink, IBufferRange, IBufferCellPosition } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -9,6 +9,7 @@ import { useServerStore } from "../stores/serverStore";
 import { LoadingState, ErrorState } from "@/_shared";
 import { attemptKey } from "../utils/reconnectPolicy";
 import { describeReconnect, isCountingDown } from "../utils/reconnectProgress";
+import { coveredRowsOf, revealScrollTarget, type SearchMatch } from "../utils/terminalSearch";
 import { useNow } from "../utils/useNow";
 import TerminalSearch from "./TerminalSearch";
 import { LineInputGuard, type PushOptions } from "../utils/inputGuard";
@@ -174,29 +175,58 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
     null,
   );
 
-  // 暴露给搜索组件的 buffer 访问函数
-  const bufferApi = {
-    getLine: (line: number): string | null => {
-      const term = termRef.current;
-      if (!term) return null;
-      const buffer = term.buffer.active;
-      const targetLine = buffer.length - 1 - line;
-      if (targetLine < 0 || targetLine >= buffer.length) return null;
-      const lineObj = buffer.getLine(targetLine);
-      return lineObj ? lineObj.translateToString(true) : "";
-    },
-    getLineCount: (): number => {
-      const term = termRef.current;
-      if (!term) return 0;
-      return term.buffer.active.length;
-    },
-    scrollToLine: (line: number) => {
-      const term = termRef.current;
-      if (!term) return;
-      const targetLine = term.buffer.active.length - 1 - line;
-      term.scrollToLine(targetLine);
-    },
-  };
+  // 暴露给搜索组件的 buffer 访问函数。
+  // 身份必须稳定：TerminalSearch 把它们放进 effect 依赖，每渲染换一次身份等于每渲染
+  // 重搜一遍并把指针弹回最新一条。这里只关 termRef（ref 永远新鲜），所以空依赖不读到旧终端。
+  const bufferApi = useMemo(
+    () => ({
+      getLine: (line: number): string | null => {
+        const term = termRef.current;
+        if (!term) return null;
+        const buffer = term.buffer.active;
+        const targetLine = buffer.length - 1 - line;
+        if (targetLine < 0 || targetLine >= buffer.length) return null;
+        const lineObj = buffer.getLine(targetLine);
+        return lineObj ? lineObj.translateToString(true) : "";
+      },
+      getLineCount: (): number => {
+        const term = termRef.current;
+        if (!term) return 0;
+        return term.buffer.active.length;
+      },
+      revealMatch: (match: SearchMatch) => {
+        const term = termRef.current;
+        if (!term) return;
+        const buffer = term.buffer.active;
+        const absolute = buffer.length - 1 - match.line;
+        if (absolute < 0) return;
+        // 搜索框浮在终端上（绝对定位，与 terminal-container 同宿主），它盖住的那几行不算可视区。
+        // 行数按实测几何算：字号一改，写死的留白行数就不对了。
+        const host = terminalRef.current?.parentElement;
+        const panel = host?.querySelector("[data-search-panel]") as HTMLElement | null;
+        const coveredRows = coveredRowsOf({
+          overlayTop: panel?.offsetTop ?? 0,
+          overlayHeight: panel?.offsetHeight ?? 0,
+          containerHeight: host?.clientHeight ?? 0,
+          viewportRows: term.rows,
+        });
+        // 先选中再滚：滚动只是把已有选中推进视口，反过来会把"看不见的高亮"留在原地
+        term.select(match.startCol, absolute, match.length);
+        term.scrollToLine(
+          revealScrollTarget({
+            bufferLength: buffer.length,
+            viewportRows: term.rows,
+            absoluteRow: absolute,
+            currentTop: buffer.viewportY,
+            coveredRows,
+          }),
+        );
+      },
+      clearHighlight: () => termRef.current?.clearSelection(),
+      returnFocus: () => termRef.current?.focus(),
+    }),
+    [],
+  );
 
   useEffect(() => {
     if (paneState !== "connected") return;
@@ -758,7 +788,9 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
           onClose={() => setSearchOpen(false)}
           getLine={bufferApi.getLine}
           getLineCount={bufferApi.getLineCount}
-          scrollToLine={bufferApi.scrollToLine}
+          revealMatch={bufferApi.revealMatch}
+          clearHighlight={bufferApi.clearHighlight}
+          returnFocus={bufferApi.returnFocus}
         />
         {paneState === "connecting" && (
           <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: bgWithAlpha }}>

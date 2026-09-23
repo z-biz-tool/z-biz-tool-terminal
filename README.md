@@ -37,7 +37,7 @@
 |------|------|
 | 10 种主题 | Dark、Light、Dracula、Solarized、TokyoNight、Nord、One Dark、Monokai、Ayu、Gruvbox |
 | 终端分屏 | 水平/垂直分屏，可拖拽调整比例 (Cmd+Shift+H/V) |
-| 终端内搜索 | 基于 buffer 扫描的全文搜索，大小写切换 (Cmd/Ctrl+F) |
+| 终端内搜索 | 基于 buffer 扫描的全文搜索，大小写切换 (Cmd/Ctrl+F)；命中用终端原生**选中**高亮（不是"整行变色"的假高亮），Enter / Shift+Enter 向下 / 向上走位，跳到的行不会被搜索框盖住（留白按实测字号几何算），命中超过 5000 条时如实写「已到扫描上限，更早的匹配未计入」，Esc 关掉即清高亮并把焦点交回终端 |
 | URL / 路径自动检测 | 终端输出中的 URL 可点击打开浏览器，IP:Port 和文件路径可点击复制 |
 | 光标样式 | Block / Underline / Bar 三种光标样式可选 |
 | 字体连字 | 可选开启编程字体连字 (Ligatures) |
@@ -173,7 +173,7 @@
 | `Ctrl+K` | 打开命令面板 |
 | `Ctrl+Shift+P` | 命令面板（VSCode 风格） |
 | `Ctrl+Shift+Y` | 命令历史检索（只填入、不执行） |
-| `Ctrl+F` | 在当前终端里搜索 |
+| `Ctrl+F` | 在当前终端里搜索（栏内 Enter 下一条 / Shift+Enter 上一条） |
 | `Ctrl+Shift+E` | 切换 SFTP 面板 |
 | `Ctrl+Shift+S` | 切换命令片段面板 |
 | `Ctrl+Shift+H` | 水平分屏 |
@@ -192,9 +192,9 @@
 | `Ctrl+Shift+C` | 多智能体协作 |
 | `Ctrl+Shift+D` | AI 数据面板（本机，不经云端） |
 | `Ctrl+Shift+N` | 自然语言转命令 |
-| `Esc` | 关闭对话框 / 搜索 / 快速连接栏 |
+| `Esc` | 关闭对话框 / 搜索（关掉即清掉高亮并把焦点交回终端） / 快速连接栏 |
 
-> 这张表由 `src/utils/shortcuts.ts` 生成，与「查看快捷键」面板同源；新增绑定只改那一处，`tests/shortcuts.test.ts` 会核对每条绑定真的接了线。
+> 这张表由 `src/utils/shortcuts.ts` 生成，与「查看快捷键」面板同源；新增绑定只改那一处，`tests/shortcuts.test.ts` 会核对每条绑定真的接了线，并核对**这张表里的说明文字与注册表逐字一致**（改了真源忘了改文档，测试当场红）。
 
 ---
 
@@ -306,13 +306,14 @@ npm run tauri build
 
 ## 🧪 验证口径（哪些是跑过的，哪些没有）
 
-- 已实测通过：`npm run typecheck` 0 错误、`npm test` 979 例（22 个文件：`shortcuts` 123 例快捷键漂移守卫、`close-guard` 113 例关闭确认闸、`reconnect-progress` 104 例重连进度与退避调度、`settings-sanity` 96 例配置取值闸、`confirm-queue` 60 例确认排队契约等，每轮另跑变异对照）、`npm run build`、`cargo fmt --check`、`cargo test --lib` 73 例。
+- 已实测通过：`npm run typecheck` 0 错误、`npm test` 1080 例（23 个文件：`shortcuts` 128 例快捷键漂移守卫（含 README 表与注册表逐字对账）、`close-guard` 113 例关闭确认闸、`reconnect-progress` 104 例重连进度与退避调度、`settings-sanity` 96 例配置取值闸、`terminal-search` 96 例终端搜索判定与落点几何、`confirm-queue` 60 例确认排队契约等，每轮另跑变异对照）、`npm run build`、`cargo fmt --check`、`cargo test --lib` 73 例。
 - **「主机信任」设置页已在浏览器里用 stub `invoke` 渲染真实组件跑过**：列表聚合、搜索命中/空态、撤销确认文案与调用参数、错误态与空态区分均已实测；但这仍不是 Tauri 运行时，真实 known_hosts 文件未对过样。
 - **「危险命令确认弹窗」与「环境标识」同样在浏览器里跑过真实组件**：走真实 `confirmDangerousCommand()` 入口弹框，实测生产机汇总台数、`[生产环境]` 加粗标红前缀、预发/未标注的差异化展示；`EnvBadge` 三色与"未标注不占任何 DOM 节点"实测；整棵 `App` 在 stub `__TAURI_INTERNALS__` 下渲染，确认只有生产 tab 带 `PROD` 徽标与红色顶边、切 tab 不漏染。这仍不是 Tauri 运行时。
 - **危险命令确认弹窗的排队语义已在浏览器里跑过真实 `DangerConfirmHost`**（走真实 `decideCommand`，`invoke` 只打桩收 `audit_event`）：三条并发 confirm 级请求按先后逐条上屏（标题带「还有 2 条 / 1 条待确认」），点完后三个 `await` 分别拿到 `true / false / true`、审计落 **3 条**且主机清单带环境前缀；两条 block 级之间逐字确认不串条（下一条上屏时 `input.value` 为空、按钮重新禁用）；宿主带着 2 条待确认被卸载时两条都拿到 `false`。对照组（同一探针下换回原来的单槽实现）里前两条命令**从未上屏**、`await` 永久挂起、审计只有 1 条。这仍不是 Tauri 运行时。
 - **「关闭确认闸」在浏览器里跑过真实 antd `Tabs` 与真实 store action**（`invoke` 只记录 `ssh_disconnect`）：关分屏里的一格后 `panes:["p-a"]`、`disconnects:["s-1b"]`、四个标签页全在（旁边那格没被牵连）；关到最后一格只弹一条框、整页消失且会话恰好断一次；批量「关闭其他」弹一条带 `[生产环境]` 告警的清单，点取消后标签页与断开次数都不变（取消 == 什么都没发生），点关闭后 `disconnects:["s-2","s-3"]` 且只有一道框；没有活跃会话的标签页 `×` 下去弹窗数增量为 0；`confirm_before_close` 关掉同样 `modalDelta:0` 而 `ipc:["ssh_disconnect","save_tabs"]`。这仍不是 Tauri 运行时。
 - **「命令历史」面板已在浏览器里跑过真实 `App`**（`invoke` 打桩 + 假终端句柄）：4 条记录去重成 3 行、`×2` 计次、危险等级标签与 `[生产环境]` 前缀、搜索过滤、点击填入时 PTY 通道收到的 payload **不含回车**、清空二次确认后存储转 `{"v":1,"items":[]}`、设置里 `command_history` 开关关掉后面板出现提示条；`localStorage` 里落盘的 mysql 命令形如 `mysql -uroot -p**** -e 'show databases'`（口令在写盘那一刻已是掩码）。这仍不是 Tauri 运行时。
 - **重连进度已在浏览器里跑过真实 `App` + 真实 `TerminalView`**（只有 `ssh_connect` 打桩成「永远失败」，定时器一律用真的）：连接挂住时面板 Spin 写「正在重连 · 第 1/8 次」、顶部 Tag「重连中」；失败后「第 1/8 次没连上 · 还有 3 秒自动重试」会随真实 1 秒 interval 往下跳；相邻两发 `ssh_connect` 实测间隔 2373 ms 与 5030 ms（对应退避 2s/4s + 抖动，不是 2 倍）；分屏下只有重连那一格带提示，按钮数组是「重试 / 立即重试」，顶部取的是非 `panes[0]` 那一格；关掉自动重连后写「未开启自动重连，连不上也不会再自己试」、按钮退回「重试」、4 秒内不再发连接；`reason=limit` 时面板与顶部 Tooltip 是同一句「已连续 8 次连不上，自动重连已停止」。这仍不是 Tauri 运行时：真到第 8 次要 3 分钟真实退避，那一步的「到达」由假时钟用例证明。
+- **终端搜索已在浏览器里跑过真 xterm + 真 `TerminalView`（两格分屏同时挂载）**：搜 `NEEDLE` 时 `getSelection()` 逐字等于 `NEEDLE`、选中列 `start.x = 13`（证 `select(col,row,len)` 的列是 0-based）；连按 5 次「下一条」目标绝对行 192→155→118→81→44→7 **单调向下**（与箭头图标一致），`viewportY` 180→151→114→77→40→3；首条命中本就在可见带内时**视口不跳**；被浮层盖住的行数实测 4 行（浮层下沿 70 px ÷ 行高 18 px），目标行行顶 72 px 始终在浮层下沿之下、整屏扫描"压在框下的行"数 = 0；从命中态继续敲成不命中，状态条由「6 / 6」变「无匹配」**且高亮同步消失**；Esc 之后搜索栏消失、选中清空、焦点落回**活跃那一格**的 `xterm-helper-textarea`（另一格没拿到）；两格挂载下按 ⌘F 只开 1 条搜索栏。3023 行 buffer 单次全扫实测 5～8.5 ms（0/31/3022 条命中），故本轮不做节流。变异对照：`SEARCH_LIMIT` 改 3 后状态条如实写「3 / 3 · 已到扫描上限，更早的匹配未计入」，且「下一条」只能落到 3 个不同行（被砍的正是更早那 3 条）。这仍不是 Tauri 运行时：真实 SSH 输出流下边打字边有输出时的观感未取样。
 - **其余 GUI 运行时未验证**：主机密钥确认弹窗、审计日志 tab、WebGL 渲染器能否在 WKWebView 里建起上下文，目前都只有单元与静态层面证据，`npm run tauri dev` 未在本机跑起来（需要真机 WebView 与真 SSH 服务端）。SFTP 与 PTY 的端到端行为同样没有测试覆盖。WebGL 的不确定风险已被回退路径兜住：建不起来或上下文丢失即退回 DOM 渲染，最坏情况等同改动前。
 - 安全网关是"防误操作"级别的前端防线：远端主机的真实权限边界仍在服务端，关掉开关即完全旁路（审计轨迹会记下 `command_gate_bypassed`）。
 - 进度、落地位置与有意偏离的口径见 [`doc/优化方案/07_实施进度.md`](doc/优化方案/07_实施进度.md)。
