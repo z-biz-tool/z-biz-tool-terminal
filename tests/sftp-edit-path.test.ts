@@ -179,14 +179,19 @@ function eq(name: string, got: unknown, want: unknown) {
   ok("prepare_write 先白名单后建目录", paths.indexOf("resolve_for_write(path)?") < paths.indexOf("ensure_parent_dir(parent)?"));
   ok("父目录必须递归创建（编辑副本是两层缺失）", paths.includes(".recursive(true)") && paths.includes("create_dir_all(path)"));
   ok("代建目录收 0700", /fs::DirBuilder::new\(\)[\s\S]{0,80}\.mode\(0o700\)/.test(paths));
-  // 只数生产代码（测试模块之前）：私钥落盘一处、命令层下载一处
+  // 只数生产代码（测试模块之前）。§7.30 起命令层下载有了两条分支（可覆盖 / 只新建），
+  // 两条都必须走同一道闸 —— 数的是"入口都在闸上"，不是某个写死的总数。
   const shipped = paths.split("#[cfg(test)]")[0];
   eq(
     "私钥与下载共用同一道落盘闸",
     (shipped.match(/= prepare_write\(/g) || []).length +
       (commands.match(/paths::prepare_write\(/g) || []).length,
-    2
+    3
   );
+  eq("命令层下载的两个分支都过闸（可覆盖 / 已存在即拒）",
+    (commands.match(/paths::prepare_write(_new)?\(/g) || []).length, 2);
+  ok("只新建的那道闸内部仍走 prepare_write（没有第二套白名单）",
+    /pub fn prepare_write_new[\s\S]{0,160}let target = prepare_write\(path\)\?;/.test(shipped));
   const rs = readFileSync("src-tauri/src/ssh.rs", "utf8");
   ok("会话层不再自己 create 落盘路径之外的东西", !/tokio::fs::create_dir/.test(rs));
   ok("下载仍由会话层写文件（闸只在命令层）", /tokio::fs::File::create\(local_path\)/.test(rs));

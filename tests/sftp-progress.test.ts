@@ -320,7 +320,14 @@ const panel = readFileSync("src/components/SftpPanel.tsx", "utf8");
   eq("结算只有一处（runTransfer 里）", (panel.match(/settleTransfer\(prev, id/g) || []).length, 1);
   eq("清除只有一处（按 id 核对）", (panel.match(/setTimeout\(\(\) => setTransfer\(/g) || []).length, 1);
   ok("订阅按会话挂", /return subscribeSftpProgress\(activeSessionId,/.test(panel));
-  ok("成功文案必须在 error===null 之后", (panel.match(/if \(error === null\) message\.success/g) || []).length === 3);
+  // 成功只能来自后端：单文件那两条走 `if (error === null) message.success`，
+  // 批量那条先把结果分进 outcome.saved，再由 summarizeBatch 决定这一句是不是 success。
+  ok(
+    "成功文案必须在 error===null 之后",
+    (panel.match(/if \(error === null\) message\.success/g) || []).length === 2 &&
+      /if \(error === null\) outcome\.saved\.push\(plan\)/.test(panel) &&
+      /if \(summary\.kind === "success"\) message\.success\(summary\.text\)/.test(panel)
+  );
   ok("自动上传失败不得推进 lastModified", panel.indexOf("pushed !== null") < panel.indexOf("已自动上传更新"));
   ok("编辑拉取失败不得继续打开", panel.indexOf("pulled !== null") < panel.indexOf("open_file_with_default_app"));
   // 每个 sftp 传输 IPC 都必须带上 transferId

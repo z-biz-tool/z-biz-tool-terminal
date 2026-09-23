@@ -793,10 +793,17 @@ pub async fn sftp_download(
     remote_path: String,
     local_path: String,
     transfer_id: u64,
+    overwrite: Option<bool>,
 ) -> ExecResult {
     // 落盘位置由"远端递来的文件名 + 前端拼的字符串"决定，必须先过写侧白名单再把父目录备出来：
     // 不校验则 `..` 能逃出临时目录，只校验不建目录则"下载到一个还不存在的临时子目录"必然失败。
-    let target = match crate::paths::prepare_write(&local_path) {
+    // `overwrite: Some(false)` 是批量下载那条没有原生保存框帮忙问覆盖的路径在用：目标已存在即拒写。
+    let prepared = if overwrite == Some(false) {
+        crate::paths::prepare_write_new(&local_path)
+    } else {
+        crate::paths::prepare_write(&local_path)
+    };
+    let target = match prepared {
         Ok(p) => p,
         Err(e) => {
             return ExecResult {

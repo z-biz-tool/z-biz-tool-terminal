@@ -151,6 +151,19 @@ pub fn prepare_write(path: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// 同 `prepare_write`，但目标已存在就拒绝 —— 给"一次选目录、批量落 N 个文件"这类
+/// 没有原生保存框帮忙问覆盖的场合用。
+///
+/// 判存在放在写之前、由后端做：前端探测只能改善提示文案，真正的兜底必须落在这里，
+/// 否则一次批量下载能把用户本地已有的文件悄悄换掉。
+pub fn prepare_write_new(path: &str) -> Result<PathBuf, String> {
+    let target = prepare_write(path)?;
+    if target.symlink_metadata().is_ok() {
+        return Err(format!("目标已存在: {}", describe(&target)));
+    }
+    Ok(target)
+}
+
 /// 落盘私钥：0600，且覆盖已存在文件时也重新收紧权限
 ///
 /// `OpenOptions::mode` 只在**新建**时生效，旧文件的 0644 会留着，所以写完还要显式改权限。
@@ -321,6 +334,43 @@ mod tests {
                 );
             }
         }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn prepare_write_new_refuses_to_replace_an_existing_file() {
+        // 批量下载没有原生保存框帮忙问"要覆盖吗"，所以兜底必须在这里
+        let root = temp_name("new_gate");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("keep.txt");
+        fs::write(&path, "本地的原内容").unwrap();
+
+        let err = prepare_write_new(&describe(&path)).expect_err("已存在的目标必须被拒");
+        assert!(err.contains("目标已存在"), "报错要点名原因，实测 {}", err);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "本地的原内容",
+            "被拒之后原文件一个字节都不能动"
+        );
+
+        // 同一条路径换个不存在的名字，正常放行（闸本身没有变得不可用）
+        let fresh = root.join("fresh.txt");
+        assert!(prepare_write_new(&describe(&fresh)).is_ok());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_write_new_also_refuses_a_dangling_symlink() {
+        // exists() 看不见指向不存在文件的符号链接，跟着它写就是"穿过链接落到别处"，
+        // 所以这道闸判存在用的是 symlink_metadata。
+        let root = temp_name("new_link");
+        fs::create_dir_all(&root).unwrap();
+        let link = root.join("link.txt");
+        std::os::unix::fs::symlink(root.join("nowhere-actually.txt"), &link).unwrap();
+        assert!(!link.exists(), "前置条件：这是悬空链接，exists() 说没有");
+        let err = prepare_write_new(&describe(&link)).expect_err("悬空链接同样要拒");
+        assert!(err.contains("目标已存在"), "报错要点名原因，实测 {}", err);
         fs::remove_dir_all(&root).ok();
     }
 

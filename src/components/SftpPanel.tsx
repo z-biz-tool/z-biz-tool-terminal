@@ -55,6 +55,12 @@ import {
   type TransferKind,
 } from "../utils/sftpTransfer";
 import { editLocalPath } from "../utils/sftpEditPath";
+import {
+  joinDownloadTarget,
+  planDownloads,
+  summarizeBatch,
+  type BatchOutcome,
+} from "../utils/sftpDownloadPlan";
 import { listingCandidates } from "../utils/sftpListing";
 import { pickTabSession } from "../utils/session";
 
@@ -582,7 +588,9 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       if (!localPath) return;
 
       const error = await runTransfer("download", target.name, sessionId, (transferId) =>
-        invoke("sftp_download", { sessionId, remotePath, localPath, transferId })
+        // overwrite:true = 覆盖的决定已经由原生保存框问过了（它会就"替换吗"单独确认），
+        // 这里不再让后端重复拦一道；批量那条路径没有这道框，所以传的是 false。
+        invoke("sftp_download", { sessionId, remotePath, localPath, transferId, overwrite: true })
       );
       if (error === null) message.success(`下载成功: ${target.name}`);
       else message.error(`下载失败: ${target.name}: ${error}`);
@@ -616,23 +624,53 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       return;
     }
 
-    for (const entry of files) {
+    // 一次问清整批：旧写法对每个文件弹一次原生保存框，选 10 个文件就要点 10 次对话框，
+    // 而中途取消只表现为"少下了几个"，屏幕上没有任何解释。
+    const dir = await open({
+      directory: true,
+      title: `下载 ${files.length} 个文件到目录`,
+    });
+    if (!dir) return;
+    const targetDir = String(dir);
+
+    const outcome: BatchOutcome = { saved: [], existing: [], failed: [] };
+    for (const plan of planDownloads(files.map((e) => e.name))) {
+      const entry = files.find((e) => e.name === plan.remoteName);
+      if (!entry) continue;
       const remotePath = sftpPath.endsWith("/")
         ? sftpPath + entry.name
         : sftpPath + "/" + entry.name;
+      const localPath = joinDownloadTarget(targetDir, plan.localName);
 
-      const localPath = await save({
-        defaultPath: entry.name,
-        title: `保存文件到 (${entry.name})`,
-      });
-      if (!localPath) continue;
+      // 探测只为把"跳过"说清楚；真正的不覆盖兜底在后端（prepare_write_new），
+      // 因为探测与写入之间文件可能刚被别的东西建出来。
+      const already = await invoke<{ modified: number }>("get_file_modified_time", {
+        path: localPath,
+      })
+        .then(() => true)
+        .catch(() => false);
+      if (already) {
+        outcome.existing.push(plan);
+        continue;
+      }
 
-      const error = await runTransfer("download", entry.name, sessionId, (transferId) =>
-        invoke("sftp_download", { sessionId, remotePath, localPath, transferId })
+      const error = await runTransfer("download", plan.remoteName, sessionId, (transferId) =>
+        invoke("sftp_download", {
+          sessionId,
+          remotePath,
+          localPath,
+          transferId,
+          overwrite: false,
+        })
       );
-      if (error === null) message.success(`下载成功: ${entry.name}`);
-      else message.error(`下载失败: ${entry.name}: ${error}`);
+      if (error === null) outcome.saved.push(plan);
+      else outcome.failed.push({ plan, reason: error });
     }
+
+    const summary = summarizeBatch(outcome, targetDir);
+    if (summary.kind === "success") message.success(summary.text);
+    else if (summary.kind === "warning") message.warning(summary.text);
+    else message.error(summary.text);
   }, [sftpPath, selectedEntries, sortedEntries, getSessionId, runTransfer]);
 
   const handleBatchDelete = useCallback(() => {
