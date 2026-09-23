@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { Suspense, useEffect, useRef, useState, useCallback } from "react";
 import { useAIStore } from "./stores/aiStore";
 import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message, Divider } from "antd";
 import type { MenuProps } from "antd";
@@ -34,29 +34,13 @@ import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
 import SnippetsPanel from "./components/SnippetsPanel";
-import SettingsModal from "./components/SettingsModal";
-import ShortcutsModal from "./components/ShortcutsModal";
-import SessionLogModal from "./components/SessionLogModal";
 import CommandPalette from "./components/CommandPalette";
 import QuickConnectBar from "./components/QuickConnectBar";
 import RecentConnections from "./components/RecentConnections";
-import PortForwardModal from "./components/PortForwardModal";
-import KeyGenModal from "./components/KeyGenModal";
-import BatchExecModal from "./components/BatchExecModal";
-import DiagnosticModal from "./components/DiagnosticModal";
 import ServerStatsPanel from "./components/ServerStatsPanel";
-import AIChatModal from "./components/AIChatModal";
-import AICommandExplanation from "./components/AICommandExplanation";
-import AIErrorAnalysis from "./components/AIErrorAnalysis";
-import AINaturalLanguageCommand from "./components/AINaturalLanguageCommand";
 import DangerConfirmHost from "./components/DangerConfirm";
-import CommandHistoryModal from "./components/CommandHistoryModal";
 import HostKeyPrompt from "./components/HostKeyPrompt";
 import { activeRecentOutput, activeSelection, feedActiveTerminal } from "./services/terminalFeeds";
-import AICodeEditor from "./components/AICodeEditor";
-import AIGitCommit from "./components/AIGitCommit";
-import AIMultiAgents from "./components/AIMultiAgents";
-import CloudAgent from "./components/CloudAgent";
 import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 import { auditEvent } from "./services/auditLog";
@@ -72,7 +56,24 @@ import { useNow } from "./utils/useNow";
 import { comboLabel, hit, isMacPlatform } from "./utils/shortcuts";
 import { envMeta, isProd } from "./utils/environment";
 import { FONT_SIZE_DEFAULT, FONT_SIZE_STEP, stepFontSize } from "./utils/fontZoom";
+import { lazyPanel } from "@/_shared/lazyPanel";
 import EnvBadge from "./components/EnvBadge";
+const SettingsModal = lazyPanel(() => import("./components/SettingsModal"));
+const ShortcutsModal = lazyPanel(() => import("./components/ShortcutsModal"));
+const SessionLogModal = lazyPanel(() => import("./components/SessionLogModal"));
+const PortForwardModal = lazyPanel(() => import("./components/PortForwardModal"));
+const KeyGenModal = lazyPanel(() => import("./components/KeyGenModal"));
+const BatchExecModal = lazyPanel(() => import("./components/BatchExecModal"));
+const CommandHistoryModal = lazyPanel(() => import("./components/CommandHistoryModal"));
+const DiagnosticModal = lazyPanel(() => import("./components/DiagnosticModal"));
+const AIChatModal = lazyPanel(() => import("./components/AIChatModal"));
+const AICommandExplanation = lazyPanel(() => import("./components/AICommandExplanation"));
+const AIErrorAnalysis = lazyPanel(() => import("./components/AIErrorAnalysis"));
+const AINaturalLanguageCommand = lazyPanel(() => import("./components/AINaturalLanguageCommand"));
+const AICodeEditor = lazyPanel(() => import("./components/AICodeEditor"));
+const AIGitCommit = lazyPanel(() => import("./components/AIGitCommit"));
+const AIMultiAgents = lazyPanel(() => import("./components/AIMultiAgents"));
+const CloudAgent = lazyPanel(() => import("./components/CloudAgent"));
 
 /**
  * AI 生成的命令只填入、不执行（P-1），但"AI 提议过什么"必须留痕（04 §4.9）。
@@ -1150,7 +1151,7 @@ function AppInner() {
             </Space>
           </div>
         </div>
-        {activeTabId && <ServerStatsPanel />}
+        <Suspense fallback={null}>{activeTabId && <ServerStatsPanel />}</Suspense>
       </div>
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />

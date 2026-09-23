@@ -42,7 +42,8 @@ import { save, open } from "@tauri-apps/plugin-dialog";
 import { useServerStore } from "../stores/serverStore";
 import type { ServerConfig } from "../types";
 import { EmptyState } from "@/_shared";
-import ImportModal from "./ImportModal";
+import { lazyPanel } from "@/_shared/lazyPanel";
+const ImportModal = lazyPanel(() => import("./ImportModal"));
 
 // 渐变色主题常量
 const brandGradient = "linear-gradient(135deg, #667eea 0%, #764ba2 100%)";
