@@ -13,7 +13,7 @@ import { commandGuard, requiresConfirmation } from "../utils/commandGuard";
 import { envListPrefix } from "../utils/environment";
 import { recordCommand } from "../utils/commandHistory";
 import { auditEvent } from "./auditLog";
-import type { ServerConfig } from "../types";
+import { dedupeTargets, serverToTarget, targetsByServerIds } from "../utils/guardTargets";
 
 /** 命令来源：04 §4.2 列出的四条下发口 + 粘贴 */
 export type CommandSource = "manual" | "paste" | "snippet" | "batch" | "ai";
@@ -47,27 +47,6 @@ export function historyEnabled(): boolean {
   return useServerStore.getState().settings.command_history !== false;
 }
 
-function serverToTarget(server: ServerConfig): GuardTarget {
-  return {
-    name: server.name || server.id,
-    host: `${server.host}:${server.port}`,
-    environment: server.environment,
-  };
-}
-
-function dedupe(targets: GuardTarget[]): GuardTarget[] {
-  const seen = new Set<string>();
-  const out: GuardTarget[] = [];
-  for (const t of targets) {
-    const key = `${t.name}|${t.host}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(t);
-    }
-  }
-  return out;
-}
-
 /** 某个 pane（或整个 tab）影响到的主机清单 */
 export function paneTargets(tabId: string, paneId?: string): GuardTarget[] {
   const { tabs, servers } = useServerStore.getState();
@@ -81,20 +60,12 @@ export function paneTargets(tabId: string, paneId?: string): GuardTarget[] {
 
 /** 一批 serverId 对应的主机清单（Snippet 多开、批量执行用） */
 export function serverTargets(serverIds: string[]): GuardTarget[] {
-  const { servers } = useServerStore.getState();
-  const byId = new Map(servers.map((s) => [s.id, s] as const));
-  return dedupe(
-    serverIds.map((id) => {
-      const server = byId.get(id);
-      return server ? serverToTarget(server) : { name: "未知服务器", host: id };
-    }),
-  );
+  return targetsByServerIds(serverIds, useServerStore.getState().servers);
 }
 
 /** 一批 sessionId 对应的主机清单（批量执行面板里只有 sessionId） */
 export function sessionTargets(sessionIds: string[]): GuardTarget[] {
   const { tabs, servers } = useServerStore.getState();
-  const byId = new Map(servers.map((s) => [s.id, s] as const));
   const ids: string[] = [];
   for (const tab of tabs) {
     for (const pane of tab.panes) {
@@ -105,10 +76,9 @@ export function sessionTargets(sessionIds: string[]): GuardTarget[] {
   for (const tab of tabs) {
     if (tab.sessionId && sessionIds.includes(tab.sessionId)) ids.push(tab.serverId);
   }
-  return dedupe(ids.length ? ids.map((id) => {
-    const server = byId.get(id);
-    return server ? serverToTarget(server) : { name: "未知服务器", host: id };
-  }) : sessionIds.map((id) => ({ name: "会话", host: id })));
+  // 一个都认不出来时按会话本身列（批量面板里可能是别的进程建的会话），不谎报成"未知服务器"
+  if (!ids.length) return dedupeTargets(sessionIds.map((id) => ({ name: "会话", host: id })));
+  return targetsByServerIds(ids, servers);
 }
 
 /**

@@ -55,6 +55,7 @@ export const BOOL_FIELDS = [
   "command_history",
   "session_log_async",
   "webgl_renderer",
+  "confirm_before_close",
 ] as const satisfies readonly (keyof TerminalSettings)[];
 
 export interface NumberRule {

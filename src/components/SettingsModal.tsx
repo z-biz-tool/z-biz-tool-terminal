@@ -347,6 +347,15 @@ export default function SettingsModal({ open, onClose }: Props) {
                   />
                 </Form.Item>
                 <Form.Item
+                  label="关闭会话前确认"
+                  extra="标签页或分屏面板里还有连着中的 SSH 会话时，关闭（⌘W、标签页 ×、右键关闭/关闭其他/关闭右侧）会先列出会话数与受影响主机；批量关闭只问一次。没有活跃会话的标签页直接关，不打扰。关闭后一律立即断开，误关生产会话风险自担"
+                >
+                  <Switch
+                    checked={settings.confirm_before_close !== false}
+                    onChange={(v) => updateSettings({ confirm_before_close: v })}
+                  />
+                </Form.Item>
+                <Form.Item
                   label="本机命令历史"
                   extra="记录真的落地过 PTY 的命令，供 Ctrl+Shift+Y 检索与填入。口令类参数（--password、PGPASSWORD=、URL 内嵌凭据等）写盘前一律替换为 ****，这一层不能关。关闭只停止新记录，已有历史需到命令历史里手动清空"
                 >

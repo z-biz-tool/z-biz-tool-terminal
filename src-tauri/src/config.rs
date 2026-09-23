@@ -183,6 +183,9 @@ pub struct TerminalSettings {
     /// xterm WebGL 渲染器（T-3-7）。关闭、或运行时装不上/丢上下文，都会回退 DOM 渲染。
     #[serde(default = "default_true")]
     pub webgl_renderer: bool,
+    /// 关闭仍连着会话的标签页/面板前先确认。关闭即回退为直接断开（§5.7 的可回退开关）。
+    #[serde(default = "default_true")]
+    pub confirm_before_close: bool,
 }
 
 fn default_pty_batch_window_ms() -> u64 {
@@ -246,6 +249,7 @@ impl Default for TerminalSettings {
             pty_batch_window_ms: 16,
             session_log_async: true,
             webgl_renderer: true,
+            confirm_before_close: true,
         }
     }
 }
@@ -854,6 +858,7 @@ mod tests {
         assert!(settings.strict_host_key);
         assert!(settings.dangerous_command_guard);
         assert!(settings.command_history);
+        assert!(settings.confirm_before_close);
     }
 
     #[test]
@@ -873,13 +878,15 @@ mod tests {
             "connection_timeout": 30,
             "pty_batch_window_ms": 0,
             "session_log_async": false,
-            "webgl_renderer": false
+            "webgl_renderer": false,
+            "confirm_before_close": false
         }))
         .expect("新字段应能读取");
 
         assert_eq!(settings.pty_batch_window_ms, 0);
         assert!(!settings.session_log_async);
         assert!(!settings.webgl_renderer);
+        assert!(!settings.confirm_before_close);
     }
 
     /// 落盘加密相关测试会改环境变量和临时目录, 必须串行（锁定义在模块级，跨文件共用）

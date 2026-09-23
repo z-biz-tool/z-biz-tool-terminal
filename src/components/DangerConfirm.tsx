@@ -11,7 +11,8 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { Modal, Input, Typography, Alert } from "antd";
 import { ConfirmQueue } from "../utils/confirmQueue";
 import { commandGuard, requiresConfirmation, BLOCK_CONFIRM_TEXT } from "../utils/commandGuard";
-import { envListPrefix, isProd } from "../utils/environment";
+import { isProd } from "../utils/environment";
+import HostList from "./HostList";
 
 export interface GuardTarget {
   name: string;
@@ -152,20 +153,7 @@ export default function DangerConfirmHost() {
                 message={`清单中有 ${prodCount} 台生产环境主机`}
               />
             )}
-            <ul style={{ margin: "4px 0 0", paddingLeft: 18, maxHeight: 160, overflow: "auto" }}>
-              {req.targets.map((t, i) => (
-                <li key={`${t.host}-${i}`}>
-                  {isProd(t.environment) ? (
-                    <Typography.Text strong style={{ color: "#d4380d" }}>
-                      {envListPrefix(t.environment).trim()}{" "}
-                    </Typography.Text>
-                  ) : (
-                    envListPrefix(t.environment)
-                  )}
-                  {t.name} <Typography.Text code>{t.host}</Typography.Text>
-                </li>
-              ))}
-            </ul>
+            <HostList targets={req.targets} />
           </div>
           {isBlock && (
             <div>

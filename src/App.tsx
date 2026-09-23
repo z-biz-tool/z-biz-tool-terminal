@@ -74,6 +74,7 @@ function AppInner() {
     loaded,
     setActiveTab,
     closeTab,
+    closeTabs,
     splitTab,
     closePane,
     setActivePane,
@@ -544,8 +545,9 @@ function AppInner() {
       {
         key: "closeOthers",
         label: "关闭其他",
+        // 批量关闭走 closeTabs：一次问清整批有多少活跃会话，而不是逐条弹确认框
         onClick: () => {
-          tabs.filter((t) => t.id !== tabId).forEach((t) => closeTab(t.id));
+          closeTabs(tabs.filter((t) => t.id !== tabId).map((t) => t.id));
         },
       },
       {
@@ -553,9 +555,7 @@ function AppInner() {
         label: "关闭右侧",
         onClick: () => {
           const idx = tabs.findIndex((t) => t.id === tabId);
-          if (idx >= 0) {
-            tabs.slice(idx + 1).forEach((t) => closeTab(t.id));
-          }
+          if (idx >= 0) closeTabs(tabs.slice(idx + 1).map((t) => t.id));
         },
       }
     );

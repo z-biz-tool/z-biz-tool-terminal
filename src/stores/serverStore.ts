@@ -22,6 +22,7 @@ import { attemptKey, backoffDelay, nextReconnectPlan } from "../utils/reconnectP
 import { FONT_SIZE_DEFAULT } from "../utils/fontZoom";
 import { normalizeSettings } from "../utils/settingsSanity";
 import { pickActiveSession } from "../utils/session";
+import { guardClose, type AskClose, type CloseContext } from "../utils/closeGuard";
 
 /**
  * 一次 Snippet 下发的真实结果。调用方**必须**按这个结论给反馈 —— 旧写法在命令根本没
@@ -33,6 +34,16 @@ import { pickActiveSession } from "../utils/session";
 export type SnippetRun =
   | { ok: true; sessionId: string }
   | { ok: false; reason: "no-session" | "cancelled" | "failed"; error?: string };
+
+/**
+ * 关闭入口的可选参数。
+ * - `force`：内部级联（最后一个面板关闭→整页、删除服务器→断该服务器会话），不再问第二遍
+ * - `ask`：注入的问询实现，测试用它把"取消之后会话还在不在"跑成真实断言；UI 不传即用确认弹窗
+ */
+export interface CloseOptions {
+  force?: boolean;
+  ask?: AskClose;
+}
 
 /** 终端设置 */
 export interface TerminalSettings {
@@ -70,6 +81,8 @@ export interface TerminalSettings {
   session_log_async: boolean;
   /** xterm WebGL 渲染器，关闭或加载失败即回退 DOM 渲染 */
   webgl_renderer: boolean;
+  /** 关闭仍连着会话的标签页/分屏面板前先确认（防误关）；关闭即回退为直接断开 */
+  confirm_before_close: boolean;
 }
 
 /** 持久化的分屏面板(只保存结构) */
@@ -145,8 +158,10 @@ interface ServerStore {
   openNewTab: (server: ServerConfig) => Promise<void>;
   /** 内部辅助: 创建一个新 tab 并发起 SSH 连接 */
   _createTabForServer: (server: ServerConfig, targetTabId?: string) => Promise<ConnectResult>;
-  /** 关闭指定 tab(断开该 tab 全部面板的 SSH 会话) */
-  closeTab: (tabId: string) => Promise<void>;
+  /** 关闭指定 tab(断开该 tab 全部面板的 SSH 会话)；仍连着会话时先过确认闸 */
+  closeTab: (tabId: string, opts?: CloseOptions) => Promise<void>;
+  /** 批量关闭：一次问清这批标签页里有多少活跃会话，确认后逐条强关 */
+  closeTabs: (tabIds: string[], ask?: AskClose) => Promise<void>;
   /** 激活指定 tab */
   setActiveTab: (tabId: string) => void;
   /** 关闭该服务器下所有 tab */
@@ -169,8 +184,8 @@ interface ServerStore {
   updateSettings: (settings: Partial<TerminalSettings>) => void;
   /** 分屏: 在指定 tab 中添加新面板(可指定连接其他服务器) */
   splitTab: (tabId: string, direction: SplitDirection, targetServerId?: string) => Promise<void>;
-  /** 关闭分屏面板(若该 tab 无面板则关闭整个 tab) */
-  closePane: (tabId: string, paneId: string) => Promise<void>;
+  /** 关闭分屏面板(若该 tab 无面板则关闭整个 tab)；仍连着会话时先过确认闸 */
+  closePane: (tabId: string, paneId: string, opts?: CloseOptions) => Promise<void>;
   /** 设置活动面板 */
   setActivePane: (tabId: string, paneId: string) => void;
   /** 按面板重连指定服务器；manual=true 表示用户主动点击，跳过退避并重置尝试次数 */
@@ -211,6 +226,20 @@ function forgetReconnect(key: string) {
 function forgetTabReconnect(tabId: string) {
   for (const key of [...pendingReconnects.keys()]) if (key.startsWith(`${tabId}:`)) forgetReconnect(key);
   for (const key of [...reconnectAttempts.keys()]) if (key.startsWith(`${tabId}:`)) reconnectAttempts.delete(key);
+}
+
+/** 关闭闸的输入：一次取快照，避免 await 前后各读到一份不同的 tabs */
+function closeCtx(state: {
+  tabs: TerminalTab[];
+  servers: ServerConfig[];
+  settings: TerminalSettings;
+}): CloseContext {
+  // 缺字段按开启处理（§5.7 的老配置兼容），只有显式 false 才回退为"直接断"
+  return {
+    tabs: state.tabs,
+    servers: state.servers,
+    enabled: state.settings.confirm_before_close !== false,
+  };
 }
 
 /** 连接服务器的辅助函数，支持 ProxyJump */
@@ -285,6 +314,7 @@ export const defaultSettings: TerminalSettings = {
   pty_batch_window_ms: 16,
   session_log_async: true,
   webgl_renderer: true,
+  confirm_before_close: true,
 };
 
 export const useServerStore = create<ServerStore>((set, get) => ({
@@ -772,9 +802,15 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     get().persistTabs();
   },
 
-  closeTab: async (tabId) => {
+  closeTab: async (tabId, opts) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
+
+    // 用户点开的每一条关闭口都在这里问；内部级联带 force，不再问第二遍
+    if (!opts?.force) {
+      const approved = await guardClose([{ tabId }], closeCtx(get()), opts?.ask);
+      if (!approved) return;
+    }
 
     // 先掐掉排队中的自动重连，否则关掉的 tab 会被定时器重新连回来
     forgetTabReconnect(tabId);
@@ -812,6 +848,20 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     get().persistTabs();
   },
 
+  closeTabs: async (tabIds, ask) => {
+    // 只统计真实存在的标签页：调用方（右键"关闭其他/关闭右侧"）拿的是渲染时的列表，可能已经过期
+    const ids = tabIds.filter((id) => get().tabs.some((t) => t.id === id));
+    if (!ids.length) return;
+    // 一次问清整批：逐条弹 N 个确认框只会让人不看内容就点确认
+    const approved = await guardClose(
+      ids.map((id) => ({ tabId: id })),
+      closeCtx(get()),
+      ask
+    );
+    if (!approved) return;
+    for (const id of ids) await get().closeTab(id, { force: true });
+  },
+
   setActiveTab: (tabId) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     set({
@@ -826,10 +876,11 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     for (const tab of [...get().tabs]) {
       const mine = tab.panes.filter((p) => p.serverId === serverId);
       if (mine.length === 0) continue;
+      // 调用方（删除服务器）自己已经弹过确认框，这里再问一遍就是同一个决定点两次同意
       if (mine.length === tab.panes.length) {
-        await get().closeTab(tab.id);
+        await get().closeTab(tab.id, { force: true });
       } else {
-        for (const p of mine) await get().closePane(tab.id, p.id);
+        for (const p of mine) await get().closePane(tab.id, p.id, { force: true });
       }
     }
   },
@@ -1002,9 +1053,24 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     get().persistTabs();
   },
 
-  closePane: async (tabId, paneId) => {
+  closePane: async (tabId, paneId, opts) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return;
+
+    // 只问这一个面板：旁边的面板仍在连，关它不该被扯进确认框的清单里
+    if (!opts?.force) {
+      const approved = await guardClose([{ tabId, paneId }], closeCtx(get()), opts?.ask);
+      if (!approved) return;
+    }
+
+    const remainingPanes = tab.panes.filter((p) => p.id !== paneId);
+
+    if (remainingPanes.length === 0) {
+      // 最后一格：交给整页关闭去断会话（这里先断一次、closeTab 再断一次会白跑一趟），
+      // 而且这一页的会话刚才已经问过一遍，别再问第二次
+      await get().closeTab(tabId, { force: true });
+      return;
+    }
 
     forgetReconnect(attemptKey(tabId, paneId));
 
@@ -1013,14 +1079,6 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       try {
         await invoke("ssh_disconnect", { sessionId: pane.sessionId });
       } catch {}
-    }
-
-    const remainingPanes = tab.panes.filter((p) => p.id !== paneId);
-
-    if (remainingPanes.length === 0) {
-      // 无面板剩,关闭整个 tab
-      await get().closeTab(tabId);
-      return;
     }
 
     const primaryPane = remainingPanes[0];
