@@ -224,6 +224,7 @@ export default function TerminalSearch({
         <Tooltip title="上一条 (Shift+Enter)">
           <Button
             size="small"
+            aria-label="上一条匹配"
             icon={<ArrowUpOutlined />}
             onClick={() => go(-1)}
             disabled={result.matches.length === 0}
@@ -232,13 +233,14 @@ export default function TerminalSearch({
         <Tooltip title="下一条 (Enter)">
           <Button
             size="small"
+            aria-label="下一条匹配"
             icon={<ArrowDownOutlined />}
             onClick={() => go(1)}
             disabled={result.matches.length === 0}
           />
         </Tooltip>
         <Tooltip title="关闭 (Esc)">
-          <Button size="small" icon={<CloseOutlined />} onClick={onClose} />
+          <Button size="small" aria-label="关闭搜索" icon={<CloseOutlined />} onClick={onClose} />
         </Tooltip>
       </Space.Compact>
       <div

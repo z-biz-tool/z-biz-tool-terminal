@@ -200,13 +200,16 @@ const QuickConnectBar: React.FC<QuickConnectBarProps> = ({ open, onClose }) => {
         >
           连接
         </Button>
-        <Button
-          size="small"
-          type="text"
-          icon={<CloseOutlined />}
-          onClick={onClose}
-          style={{ flexShrink: 0 }}
-        />
+        <Tooltip title="关闭快捷连接">
+          <Button
+            size="small"
+            type="text"
+            aria-label="关闭快捷连接"
+            icon={<CloseOutlined />}
+            onClick={onClose}
+            style={{ flexShrink: 0 }}
+          />
+        </Tooltip>
       </div>
       {probe && (
         <Alert

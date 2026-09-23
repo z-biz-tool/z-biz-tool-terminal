@@ -907,6 +907,7 @@ function AppInner() {
                 <Button
                   type="text"
                   size="small"
+                  aria-label={`为 ${activeServer.name} 新建终端`}
                   icon={<PlusOutlined />}
                   onClick={() => openNewTab(activeServer)}
                   style={{ flexShrink: 0, marginLeft: 4 }}
@@ -996,6 +997,7 @@ function AppInner() {
                                 <Button
                                   size="small"
                                   type="text"
+                                  aria-label="关闭此分屏"
                                   icon={<CloseOutlined />}
                                   style={{
                                     fontSize: 10,

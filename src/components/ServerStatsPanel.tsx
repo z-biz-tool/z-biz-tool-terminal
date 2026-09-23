@@ -102,6 +102,7 @@ export default function ServerStatsPanel() {
         <Button
           type="text"
           size="small"
+          aria-label="刷新服务器信息"
           icon={<ReloadOutlined spin={isFetching} />}
           onClick={handleRefresh}
           disabled={!sessionId || !isConnected}

@@ -694,13 +694,15 @@ function HostKeysTab() {
                   {entry.fingerprint}
                 </Typography.Text>
               </Tooltip>
-              <Button
-                size="small"
-                type="text"
-                title="复制指纹"
-                icon={<CopyOutlined />}
-                onClick={() => copyFingerprint(entry.fingerprint)}
-              />
+              <Tooltip title="复制指纹">
+                <Button
+                  size="small"
+                  type="text"
+                  aria-label={`复制 ${entry.host} 的公钥指纹`}
+                  icon={<CopyOutlined />}
+                  onClick={() => copyFingerprint(entry.fingerprint)}
+                />
+              </Tooltip>
             </div>
           ))}
         </div>

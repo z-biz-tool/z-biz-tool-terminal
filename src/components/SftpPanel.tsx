@@ -1521,9 +1521,20 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         }}
       >
         <Space size="small">
-          <Button size="small" icon={<HomeOutlined />} onClick={handleGoHome} />
-          <Button size="small" icon={<ArrowLeftOutlined />} onClick={handleGoUp} />
-          <Button size="small" icon={<ReloadOutlined />} onClick={() => navigateTo(sftpPath)} />
+          <Tooltip title="回到用户主目录">
+            <Button size="small" aria-label="回到用户主目录" icon={<HomeOutlined />} onClick={handleGoHome} />
+          </Tooltip>
+          <Tooltip title="上一级目录（Backspace）">
+            <Button size="small" aria-label="上一级目录" icon={<ArrowLeftOutlined />} onClick={handleGoUp} />
+          </Tooltip>
+          <Tooltip title="重新列出当前目录">
+            <Button
+              size="small"
+              aria-label="重新列出当前目录"
+              icon={<ReloadOutlined />}
+              onClick={() => navigateTo(sftpPath)}
+            />
+          </Tooltip>
           <Input
             size="small"
             style={{ width: 300 }}
@@ -1575,29 +1586,38 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
               已选 1 项
             </Tag>
           )}
-          <Button
-            size="small"
-            icon={<UploadOutlined />}
-            onClick={() => handleUpload()}
-            title="上传文件"
-          >
-            上传
-          </Button>
-          <Button
-            size="small"
-            icon={<DownloadOutlined />}
-            onClick={() => singleSelected && handleDownload(singleSelected)}
-            disabled={!singleSelected || singleSelected.is_dir}
+          {/* 裸 title 属性一律换成 Tooltip：原生 title 要悬停近一秒才出、不进无障碍树 */}
+          <Tooltip title="上传文件">
+            <Button
+              size="small"
+              aria-label="上传文件"
+              icon={<UploadOutlined />}
+              onClick={() => handleUpload()}
+            >
+              上传
+            </Button>
+          </Tooltip>
+          <Tooltip
             title={singleSelected && !singleSelected.is_dir ? `下载 ${singleSelected.name}` : "请先选择文件"}
           >
-            下载
-          </Button>
-          <Button
-            size="small"
-            icon={<FolderAddOutlined />}
-            onClick={handleNewFolder}
-            title="新建文件夹"
-          />
+            <Button
+              size="small"
+              aria-label="下载选中文件"
+              icon={<DownloadOutlined />}
+              onClick={() => singleSelected && handleDownload(singleSelected)}
+              disabled={!singleSelected || singleSelected.is_dir}
+            >
+              下载
+            </Button>
+          </Tooltip>
+          <Tooltip title="新建文件夹">
+            <Button
+              size="small"
+              aria-label="新建文件夹"
+              icon={<FolderAddOutlined />}
+              onClick={handleNewFolder}
+            />
+          </Tooltip>
           <Button size="small" onClick={() => toggleSftp(false)}>
             关闭
           </Button>

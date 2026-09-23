@@ -155,6 +155,7 @@ export default function CommandHistoryModal({ open, onClose }: { open: boolean; 
                       <Button
                         size="small"
                         type="text"
+                        aria-label="复制这条命令（不填入终端）"
                         icon={<CopyOutlined />}
                         onClick={(ev) => {
                           ev.stopPropagation();

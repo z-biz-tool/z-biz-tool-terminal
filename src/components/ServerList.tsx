@@ -271,6 +271,7 @@ export default function ServerList() {
                 <Button
                   type="text"
                   size="small"
+                  aria-label={`${s.pinned ? "取消收藏" : "收藏"} ${s.name}`}
                   icon={s.pinned ? <StarFilled style={{ color: "#faad14" }} /> : <StarOutlined />}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -282,6 +283,7 @@ export default function ServerList() {
                 <Button
                   type="text"
                   size="small"
+                  aria-label={`连接 ${s.name}`}
                   icon={<LinkOutlined />}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -293,6 +295,7 @@ export default function ServerList() {
                 <Button
                   type="text"
                   size="small"
+                  aria-label={`编辑 ${s.name}`}
                   icon={<EditOutlined />}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -695,6 +698,7 @@ export default function ServerList() {
               <Button
                 type="text"
                 size="small"
+                aria-label="新建分组"
                 icon={<FolderAddOutlined />}
                 onClick={() => {
                   groupForm.resetFields();
@@ -707,6 +711,7 @@ export default function ServerList() {
               <Button
                 type="primary"
                 size="small"
+                aria-label="添加服务器"
                 icon={<PlusOutlined />}
                 onClick={handleAdd}
                 style={{ 
@@ -740,7 +745,15 @@ export default function ServerList() {
                 ],
               }}
             >
-              <Button type="text" size="small" icon={<MoreOutlined />} style={{ borderRadius: 8 }} />
+              <Tooltip title="导入 / 导出配置">
+                <Button
+                  type="text"
+                  size="small"
+                  aria-label="导入 / 导出配置"
+                  icon={<MoreOutlined />}
+                  style={{ borderRadius: 8 }}
+                />
+              </Tooltip>
             </Dropdown>
           </Space>
         </div>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Modal, Button, Space, Tag, message, Input, Tabs } from "antd";
+import { Modal, Button, Space, Tag, Tooltip, message, Input, Tabs } from "antd";
 import type { TabsProps } from "antd";
 import { SendOutlined, StopOutlined, SettingOutlined, PlusOutlined, DeleteOutlined } from "@ant-design/icons";
 import type { AIMessage, AIConfig, AIProvider } from "../types/ai";
@@ -297,7 +297,9 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
           </div>
           <h2 style={{ margin: 0 }}>AI 聊天助手</h2>
         </div>
-        <Button type="text" icon={<SettingOutlined />} onClick={handleShowSettings} />
+        <Tooltip title="AI 设置">
+          <Button type="text" aria-label="AI 设置" icon={<SettingOutlined />} onClick={handleShowSettings} />
+        </Tooltip>
       </div>
       <Tabs activeKey={showSettings ? "settings" : "chat"} onChange={showSettings ? handleChatClose : undefined} items={items} />
     </Modal>

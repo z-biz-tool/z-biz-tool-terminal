@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
-import { Layout, Button, Space, Typography, theme } from "antd";
+import { Layout, Button, Space, Tooltip, Typography, theme } from "antd";
 import { BulbOutlined, BulbFilled } from "@ant-design/icons";
 import { useTheme } from "./ThemeContext";
 
@@ -121,12 +121,14 @@ export function AppShell({
         <Space>
           {headerStats}
           {headerExtra}
-          <Button
-            type="text"
-            icon={mode === "dark" ? <BulbFilled /> : <BulbOutlined />}
-            onClick={toggle}
-            title={mode === "dark" ? "切换到亮色" : "切换到暗色"}
-          />
+          <Tooltip title={mode === "dark" ? "切换到亮色" : "切换到暗色"}>
+            <Button
+              type="text"
+              aria-label={mode === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
+              icon={mode === "dark" ? <BulbFilled /> : <BulbOutlined />}
+              onClick={toggle}
+            />
+          </Tooltip>
         </Space>
       </Header>
       <Layout>

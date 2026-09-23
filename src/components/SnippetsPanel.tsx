@@ -153,6 +153,7 @@ export default function SnippetsPanel() {
           <Button
             type="text"
             size="small"
+            aria-label={`执行 ${snippet.name}`}
             icon={<PlayCircleOutlined />}
             onClick={() => handleRun(snippet)}
           />
@@ -161,6 +162,7 @@ export default function SnippetsPanel() {
           <Button
             type="text"
             size="small"
+            aria-label={`编辑 ${snippet.name}`}
             icon={<EditOutlined />}
             onClick={() => handleEdit(snippet)}
           />
@@ -173,7 +175,7 @@ export default function SnippetsPanel() {
           okButtonProps={{ danger: true }}
         >
           <Tooltip title="删除">
-            <Button type="text" size="small" icon={<DeleteOutlined />} danger />
+            <Button type="text" size="small" aria-label={`删除 ${snippet.name}`} icon={<DeleteOutlined />} danger />
           </Tooltip>
         </Popconfirm>
       </Space>
