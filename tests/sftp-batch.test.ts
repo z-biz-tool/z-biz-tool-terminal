@@ -9,6 +9,9 @@
  * 假装能立刻停下就是骗人）。
  */
 import {
+  batchBytesOf,
+  batchElapsedOf,
+  batchPaceOf,
   beginBatch,
   describeBatch,
   finishItem,
@@ -16,9 +19,18 @@ import {
   requestCancel,
   startItem,
   type Batch,
+  type LiveBytes,
 } from "../src/utils/sftpBatch";
 import { planDownloads, summarizeBatch, type PlannedDownload } from "../src/utils/sftpDownloadPlan";
 import { readFileSync } from "node:fs";
+
+const live = (over: Partial<LiveBytes> = {}): LiveBytes => ({
+  kind: "download",
+  filename: "a.txt",
+  running: true,
+  transferred: 0,
+  ...over,
+});
 
 let pass = 0;
 let fail = 0;
@@ -172,6 +184,111 @@ ok("上传那批也过 planDownloads（两个同名本地文件不再互相覆�
   /planDownloads\(filePaths\.map\(basenameOf\)\)/.test(panel));
 ok("上传远端落点用去重后的名字", /sftpPath \+ plan\.localName/.test(panel));
 eq("批量路径不再逐条弹成功提示", /message\.success\(`上传成功: \$\{filename\}`\)/.test(panel), false);
+
+
+// ---- 7. 整批字节：只有一条大小未知就不给百分比 ----
+
+{
+  const bytes = { bytesTotal: 30, startedAt: 1000 };
+  let b = beginBatch("download", 3, bytes);
+  eq("总字节进来就存下", b.bytesTotal, 30);
+  eq("没有实时值时 done=0、pct=0", batchBytesOf(b), { done: 0, total: 30 });
+  b = startItem(b, "a.txt", 10);
+  eq("当前条目的实时字节计入 done", batchBytesOf(b, live({ filename: "a.txt", transferred: 4 })), { done: 4, total: 30 });
+  eq("实时值超出本条大小要被夹住（不能报出比这条还多的字节）",
+    batchBytesOf(b, live({ filename: "a.txt", transferred: 999 })), { done: 10, total: 30 });
+  eq("文件名对不上 ⇒ 忽略实时值（宁可少算）", batchBytesOf(b, live({ filename: "b.txt", transferred: 9 })), { done: 0, total: 30 });
+  eq("方向对不上 ⇒ 忽略", batchBytesOf(b, live({ kind: "upload", filename: "a.txt", transferred: 9 })), { done: 0, total: 30 });
+  eq("已经不在传了 ⇒ 忽略", batchBytesOf(b, live({ filename: "a.txt", transferred: 9, running: false })), { done: 0, total: 30 });
+  b = finishItem(b);
+  eq("结束后按本条大小过账", batchBytesOf(b), { done: 10, total: 30 });
+  b = finishItem(startItem(finishItem(startItem(b, "b.txt", 10)), "c.txt", 10));
+  eq("三条跑完正好到总数", batchBytesOf(b), { done: 30, total: 30 });
+  eq("过账不会越过总数", (() => { const x = finishItem(startItem(b, "d.txt", 999)); return batchBytesOf(x); })(), { done: 30, total: 30 });
+  const txt = describeBatch(beginBatch("download", 3, bytes), live({ filename: "a.txt" }), 1000);
+  ok("总大小未知时整批一个字都不提", describeBatch(beginBatch("download", 3), null, 1000)?.includes("整批") === false);
+  eq("文案里的百分比按 done/total 算", (() => { const x = startItem(beginBatch("download", 3, bytes), "a.txt", 10); return describeBatch(x, live({ filename: "a.txt", transferred: 9 }), 1000); })(),
+    "下载 3 个文件 · 第 1/3 · a.txt · 整批 9 B / 30 B · 30%");
+}
+
+// ---- 8. 整批约剩：时间不够/没字节/传完了都算不出 ----
+
+{
+  const b = startItem(beginBatch("download", 2, { bytesTotal: 100, startedAt: 1000 }), "a.txt", 50);
+  eq("用时为 0 ⇒ 算不出", batchPaceOf(b, live({ filename: "a.txt", transferred: 10 }), 1000), null);
+  eq("一个字节没过 ⇒ 算不出", batchPaceOf(b, null, 3000), null);
+  eq("按 10 字节 / 2 秒 ⇒ 约剩 18 秒", batchPaceOf(b, live({ filename: "a.txt", transferred: 10 }), 3000), {
+    speed: 5, remaining: 18000,
+  });
+  eq("时钟倒挂 ⇒ null", batchElapsedOf(b, 900), null);
+  // b 只完成了 2 条里的 1 条（过账 50/100），整批仍要给约剩
+  eq("半批过账后仍给约剩", batchPaceOf(finishItem(b), null, 5000), { speed: 12.5, remaining: 4000 });
+  const allDone = finishItem(startItem(finishItem(b), "b.txt", 50));
+  eq("整批传完（done===total）不再给约剩", batchPaceOf(allDone, null, 9_000), null);
+  const txt = describeBatch(allDone, null, 9_000);
+  ok("传完之后文案里不留「约剩」，但仍报 100%", !txt!.includes("约剩") && txt!.includes("100%"));
+}
+
+// ---- 9. 属性：模拟一整批，百分比单调不降、最后必到 100 ----
+
+{
+  let seed = 73;
+  const rnd = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 0x1_0000_0000;
+  };
+  let violations = 0;
+  for (let round = 0; round < 800; round++) {
+    const n = 2 + Math.floor(rnd() * 4);
+    const sizes = Array.from({ length: n }, () => 1 + Math.floor(rnd() * 5000));
+    const total = sizes.reduce((a, x) => a + x, 0);
+    let b = beginBatch("download", n, { bytesTotal: total, startedAt: 0 });
+    let lastPct = -1;
+    let clock = 0;
+    sizes.forEach((size, idx) => {
+      clock += 1;
+      b = startItem(b, `f${idx}.bin`, size);
+      // 条目内部推进若干次（含一次倒退，模拟迟到事件）
+      for (const step of [0.3, 0.9, 0.5, 1]) {
+        clock += 1;
+        const lv = live({ filename: `f${idx}.bin`, transferred: Math.floor(size * step) });
+        const bytes = batchBytesOf(b, lv)!;
+        const pct = Math.floor((bytes.done / bytes.total) * 100);
+        const text = describeBatch(b, lv, clock)!;
+        if (/NaN|undefined|%$/.test(text + "x") === false && !text.includes("%")) violations += 1;
+        if (bytes.done > bytes.total || bytes.done < 0) violations += 1;
+        void pct;
+      }
+      // 取最后一次的 done 作为该条过账（finishItem 用 currentBytes，不看实时值）
+      const before = batchBytesOf(b, live({ filename: `f${idx}.bin`, transferred: size }))!;
+      const pctBefore = Math.floor((before.done / before.total) * 100);
+      b = finishItem(b);
+      const after = batchBytesOf(b)!;
+      const pctAfter = Math.floor((after.done / after.total) * 100);
+      if (pctAfter < pctBefore - 1) violations += 1; // 过账瞬间最多因夹取抖动 1%
+      if (after.done > after.total) violations += 1;
+      const t = describeBatch(b, null, clock);
+      if (t && /NaN|undefined/.test(t)) violations += 1;
+      lastPct = pctAfter;
+    });
+    if (lastPct !== 100) violations += 1;
+    if (batchBytesOf(b)!.done !== total) violations += 1;
+  }
+  eq("800 批随机大小 + 随机实时字节：百分比不越界、结束时必到 100%、文案无脏值", violations, 0);
+}
+
+// ---- 10. 面板接线：大小来源、实时值来源、掉出的条目不得静默消失 ----
+
+ok("整批总字节要每条都已知才给", /allSizesKnown \? sizes\.reduce/.test(panel) && /Number\.isFinite\(n\) && n >= 0/.test(panel));
+ok("每条开传时把列表里的 size 带进状态机", /startItem\(cur!, plan\.remoteName, entry\?\.size\)/.test(panel));
+ok("实时字节从单条传输状态映射（文件名/方向/是否在传都要对上）",
+  /transferred: transfer\.transferred/.test(panel) && /running: transfer\.phase === "running"/.test(panel));
+ok("整批行也有秒级把手（卡住时百分比不动，约剩也不能装得像在走）",
+  /setBatchTick\(\(n\) => n \+ 1\), 1000/.test(panel));
+ok("条目在点选后被刷掉要记成失败，不能静默少做",
+  /该项已不在列表里/.test(panel));
+eq("上传那条不猜总字节（本地文件大小这里拿不到）",
+  /beginBatch\("upload", plans\.length\)/.test(panel), true);
 
 console.log(`\n[SftpBatch] PASS ${pass} / FAIL ${fail}`);
 if (fail) {

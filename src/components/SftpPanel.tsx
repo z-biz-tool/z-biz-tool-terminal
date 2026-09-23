@@ -70,6 +70,7 @@ import {
   requestCancel,
   startItem,
   type Batch,
+  type LiveBytes,
 } from "../utils/sftpBatch";
 import { pickTabSession } from "../utils/session";
 
@@ -272,8 +273,24 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
     [tabId]
   );
 
+  // 整批的百分比/约剩由"已完成条目 + 当前条目实时字节"推出 ⇒ 卡住时这一行也得自己走
+  const [, setBatchTick] = useState(0);
+  useEffect(() => {
+    if (!batch) return;
+    const h = window.setInterval(() => setBatchTick((n) => n + 1), 1000);
+    return () => window.clearInterval(h);
+  }, [batch]);
+  const live: LiveBytes | null =
+    transfer && batch?.current
+      ? {
+          kind: transfer.kind,
+          filename: transfer.filename,
+          running: transfer.phase === "running",
+          transferred: transfer.transferred,
+        }
+      : null;
   // 单条传输时 describeBatch 给 null：一条文件写"第 1/1 个"是没有信息量的噪声
-  const batchText = describeBatch(batch);
+  const batchText = describeBatch(batch, live, Date.now());
 
   const nextTransferId = useRef(createTransferIds()).current;
 
@@ -688,17 +705,24 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
 
     const outcome: BatchOutcome = { saved: [], existing: [], failed: [], notStarted: [] };
     const plans = planDownloads(files.map((e) => e.name));
-    applyBatch(beginBatch("download", plans.length));
+    // 只要有一条大小未知（远端 ls 没给、或给的是 -1/NaN），整批就不给百分比 ——
+    // 拿"知道的那几条"加总当总数，会画出一个偏小的假进度
+    const sizes = files.map((e) => e.size);
+    const allSizesKnown = sizes.every((n) => Number.isFinite(n) && n >= 0);
+    const bytesTotal = allSizesKnown ? sizes.reduce((a, n) => a + n, 0) : 0;
+    applyBatch(beginBatch("download", plans.length, { bytesTotal, startedAt: Date.now() }));
     for (const plan of plans) {
       const cur = batchRef.current;
       if (cur?.cancelled) {
         outcome.notStarted!.push(plan);
         continue;
       }
-      applyBatch(startItem(cur!, plan.remoteName));
       const entry = files.find((e) => e.name === plan.remoteName);
+      applyBatch(startItem(cur!, plan.remoteName, entry?.size));
       if (!entry) {
+        // 条目在点选之后被别的操作刷掉了：这一条按 0 字节过账，不能拿别处的 size 顶
         applyBatch(finishItem(batchRef.current!));
+        outcome.failed.push({ plan, reason: "该项已不在列表里" });
         continue;
       }
       const remotePath = sftpPath.endsWith("/")
