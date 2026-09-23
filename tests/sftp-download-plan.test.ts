@@ -17,6 +17,7 @@ import {
   type PlannedDownload,
 } from "../src/utils/sftpDownloadPlan";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./_strip_comments";
 
 let pass = 0;
 let fail = 0;
@@ -166,12 +167,6 @@ const outcome = (o: Partial<BatchOutcome>): BatchOutcome => ({ saved: [], existi
 
 // ---- 接线守卫：面板真的按这套走（注释先剥掉，免得旧代码的文字骗出假阳性）----
 
-function stripComments(code: string): string {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^[\t ]*\/\/.*$/gm, "")
-    .replace(/\/\/[^\n]*$/gm, "");
-}
 
 const panel = stripComments(readFileSync("src/components/SftpPanel.tsx", "utf8"));
 const commands = stripComments(readFileSync("src-tauri/src/commands.rs", "utf8"));

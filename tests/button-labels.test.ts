@@ -12,6 +12,7 @@
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./_strip_comments";
 
 let pass = 0;
 let fail = 0;
@@ -70,6 +71,7 @@ function buttonSites(file: string, src: string): Site[] {
     at = j + 1;
   }
 }
+
 
 const files = walk("src");
 const sites: Site[] = files.flatMap((f) => buttonSites(f, readFileSync(f, "utf8")));
@@ -132,6 +134,18 @@ ok("服务器行内动作带主机名", /aria-label=\{`连接 \$\{s\.name\}`\}/.
   /aria-label=\{`\$\{s\.pinned \? "取消收藏" : "收藏"\} \$\{s\.name\}`\}/.test(serverList));
 const snippets = readFileSync("src/components/SnippetsPanel.tsx", "utf8");
 ok("片段行内动作带片段名", /aria-label=\{`执行 \$\{snippet\.name\}`\}/.test(snippets));
+
+// §7.40：分屏兄弟节点的关闭按钮必须各不相同（都写「关闭此分屏」时读屏分不清关哪一格）
+const appSrc = stripComments(readFileSync("src/App.tsx", "utf8"));
+ok("分屏关闭按钮名称带序号", /const paneCloseLabel = `关闭第 \$\{i \+ 1\}/.test(appSrc));
+ok("分屏关闭按钮的 aria-label 用的就是这个变量", /aria-label=\{paneCloseLabel\}/.test(appSrc));
+// 模板串里漏了 $ 前缀会把 {tab.panes.length} 当字面量印到界面上（写这轮时真犯过）
+{
+  const tpl = appSrc.match(/`关闭第[^`]*`/)?.[0] ?? "";
+  ok("拿到了那条模板串", tpl.length > 0);
+  // 漏了 `$` 前缀时 `{tab.panes.length}` 会被当字面量印到界面上（写这轮时真犯过一次）
+  eq("模板串里的花括号都是插值", /(^|[^$])\{[A-Za-z]/.test(tpl), false);
+}
 
 console.log(`\n[ButtonLabels] PASS ${pass} / FAIL ${fail}`);
 if (fail) {

@@ -23,6 +23,7 @@ import {
 } from "../src/utils/sftpBatch";
 import { planDownloads, summarizeBatch, type PlannedDownload } from "../src/utils/sftpDownloadPlan";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./_strip_comments";
 
 const live = (over: Partial<LiveBytes> = {}): LiveBytes => ({
   kind: "download",
@@ -161,12 +162,6 @@ for (const bad of [0, -3, Number.NaN, Number.POSITIVE_INFINITY, 2.7]) {
 
 // ---- 6. 面板接线：整批状态 + 取消按钮 + 上传也走去重后的落点名 ----
 
-function stripComments(code: string): string {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "")
-    .replace(/\/\/[^\n]*$/gm, "");
-}
 
 const panel = stripComments(readFileSync("src/components/SftpPanel.tsx", "utf8"));
 ok("面板挂了整批状态", /useState<Batch \| null>\(null\)/.test(panel));

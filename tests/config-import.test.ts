@@ -12,6 +12,7 @@
  */
 import { useServerStore } from "../src/stores/serverStore";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./_strip_comments";
 
 let pass = 0;
 let fail = 0;
@@ -111,12 +112,6 @@ const st = () => useServerStore.getState();
 
 // ---- 4. 静态守卫：确认闸与真实反馈接上了 ----
 
-function stripComments(code: string): string {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^[\t ]*\/\/.*$/gm, "")
-    .replace(/\/\/[^\n]*$/gm, "");
-}
 
 const list = stripComments(readFileSync("src/components/ServerList.tsx", "utf8"));
 const at = list.indexOf("const handleImport = async");

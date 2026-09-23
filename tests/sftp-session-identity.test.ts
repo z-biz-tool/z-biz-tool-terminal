@@ -16,6 +16,7 @@
 import { pickActiveSession, pickTabSession } from "../src/utils/session";
 import { listingCandidates } from "../src/utils/sftpListing";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./_strip_comments";
 
 let pass = 0;
 let fail = 0;
@@ -155,13 +156,6 @@ const tab = (id: string, sessionId: string | undefined, panes: any[], serverId =
 
 // ---- 4. 静态守卫：同一份查找不许再被复制 ----
 
-/** 去掉注释再断言：否则注释里引用的旧代码会把自己骗成"已经修好" */
-function stripComments(code: string): string {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^[\t ]*\/\/.*$/gm, "")
-    .replace(/\/\/[^\n]*$/gm, "");
-}
 
 const panel = stripComments(readFileSync("src/components/SftpPanel.tsx", "utf8"));
 const app = stripComments(readFileSync("src/App.tsx", "utf8"));

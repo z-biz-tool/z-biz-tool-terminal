@@ -10,6 +10,7 @@
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { stripComments } from "./_strip_comments";
 
 let pass = 0;
 let fail = 0;
@@ -39,13 +40,6 @@ function walk(dir: string): string[] {
 const files = walk("src");
 const sources = files.map((f) => ({ f, src: readFileSync(f, "utf8") }));
 
-/** 去掉注释：文档里提到旧名是允许的（"原来写的是 destroyOnClose"这种句子不能算违规） */
-function stripComments(code: string): string {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "")
-    .replace(/\/\/[^\n]*$/gm, "");
-}
 
 const DEPRECATED: [string, RegExp][] = [
   ["Modal destroyOnClose", /\bdestroyOnClose\b/],

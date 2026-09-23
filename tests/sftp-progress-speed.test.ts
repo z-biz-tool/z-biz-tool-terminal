@@ -21,6 +21,7 @@ import {
   type Transfer,
 } from "../src/utils/sftpTransfer";
 import { readFileSync } from "node:fs";
+import { stripComments } from "./_strip_comments";
 
 let pass = 0;
 let fail = 0;
@@ -164,12 +165,6 @@ eq("NaN 不装样子", formatDuration(Number.NaN), "-");
 
 // ---- 8. 面板接线：起表/结算都交时钟，横幅运行时每秒自己走 ----
 
-function stripComments(code: string): string {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^[\t ]*\/\/.*$/gm, "")
-    .replace(/\/\/[^\n]*$/gm, "");
-}
 
 const panel = stripComments(readFileSync("src/components/SftpPanel.tsx", "utf8"));
 ok("起表用 Date.now()", /beginTransfer\(id, sessionId, kind, filename, Date\.now\(\)\)/.test(panel));

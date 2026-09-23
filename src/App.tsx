@@ -2,7 +2,34 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useAIStore } from "./stores/aiStore";
 import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message, Divider } from "antd";
 import type { MenuProps } from "antd";
-import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined, DatabaseOutlined, FieldTimeOutlined, BulbOutlined, ExperimentOutlined, EditOutlined, BranchesOutlined, ApartmentOutlined, KeyOutlined } from "@ant-design/icons";
+import {
+  SettingOutlined,
+  FolderOpenOutlined,
+  DesktopOutlined,
+  CodeOutlined,
+  ColumnWidthOutlined,
+  ColumnHeightOutlined,
+  CloseOutlined,
+  FileTextOutlined,
+  SearchOutlined,
+  HistoryOutlined,
+  ApiOutlined,
+  ThunderboltOutlined,
+  ReloadOutlined,
+  CopyOutlined,
+  TeamOutlined,
+  BugOutlined,
+  PlusOutlined,
+  RobotOutlined,
+  DatabaseOutlined,
+  FieldTimeOutlined,
+  BulbOutlined,
+  ExperimentOutlined,
+  EditOutlined,
+  BranchesOutlined,
+  ApartmentOutlined,
+  KeyOutlined,
+} from "@ant-design/icons";
 import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
@@ -44,11 +71,7 @@ import {
 import { useNow } from "./utils/useNow";
 import { comboLabel, hit, isMacPlatform } from "./utils/shortcuts";
 import { envMeta, isProd } from "./utils/environment";
-import {
-  FONT_SIZE_DEFAULT,
-  FONT_SIZE_STEP,
-  stepFontSize,
-} from "./utils/fontZoom";
+import { FONT_SIZE_DEFAULT, FONT_SIZE_STEP, stepFontSize } from "./utils/fontZoom";
 import EnvBadge from "./components/EnvBadge";
 
 /**
@@ -428,7 +451,8 @@ function AppInner() {
       const container = (e.target as HTMLElement).parentElement;
       if (!container) return;
       const startPos = direction === "horizontal" ? e.clientX : e.clientY;
-      const containerSize = direction === "horizontal" ? container.offsetWidth : container.offsetHeight;
+      const containerSize =
+        direction === "horizontal" ? container.offsetWidth : container.offsetHeight;
       const startRatio = paneRatios[tabId] ?? 0.5;
       const onMove = (ev: MouseEvent) => {
         if (!draggingRef.current) return;
@@ -481,7 +505,11 @@ function AppInner() {
     activeTab?.state === "connected"
       ? "已连接"
       : reconnectTag ||
-        (activeTab?.state === "connecting" ? "连接中" : activeTab?.state === "error" ? "错误" : "未连接");
+        (activeTab?.state === "connecting"
+          ? "连接中"
+          : activeTab?.state === "error"
+            ? "错误"
+            : "未连接");
 
   const handleSftpToggle = () => {
     // 列目录交给面板：它按自己的 tabId 解析会话，失败会自己上屏。
@@ -491,7 +519,11 @@ function AppInner() {
     else toggleSftp(false);
   };
 
-  const getTabContextMenu = (tabId: string, serverId: string, tabState: string): MenuProps["items"] => {
+  const getTabContextMenu = (
+    tabId: string,
+    serverId: string,
+    tabState: string
+  ): MenuProps["items"] => {
     const server = servers.find((s) => s.id === serverId);
     const items: MenuProps["items"] = [];
 
@@ -644,12 +676,7 @@ function AppInner() {
       </Tooltip>
       <Tooltip title="最近连接">
         <RecentConnections open={recentOpen} onClose={() => setRecentOpen(false)}>
-          <Button
-            size="small"
-            type="text"
-            aria-label="最近连接"
-            icon={<HistoryOutlined />}
-          />
+          <Button size="small" type="text" aria-label="最近连接" icon={<HistoryOutlined />} />
         </RecentConnections>
       </Tooltip>
       {activeTab && (
@@ -855,12 +882,7 @@ function AppInner() {
   );
 
   return (
-    <AppShell
-      title=""
-      sidebar={<ServerList />}
-      headerExtra={headerExtra}
-      siderWidth={260}
-    >
+    <AppShell title="" sidebar={<ServerList />} headerExtra={headerExtra} siderWidth={260}>
       <div
         style={{
           display: "flex",
@@ -878,230 +900,255 @@ function AppInner() {
             overflow: "hidden",
           }}
         >
-        {tabs.length > 0 && (
+          {tabs.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                padding: "0 8px",
+                borderBottom: `1px solid ${token.colorBorderSecondary}`,
+                background: token.colorBgContainer,
+                height: 40,
+                flexShrink: 0,
+              }}
+            >
+              <Tabs
+                activeKey={activeTabId || undefined}
+                onChange={(key) => setActiveTab(key)}
+                items={tabItems}
+                onEdit={(key, action) => {
+                  if (action === "remove") closeTab(key as string);
+                }}
+                type="editable-card"
+                size="small"
+                hideAdd
+                style={{ flex: 1, minWidth: 0 }}
+              />
+              {activeServer && (
+                <Tooltip title="为当前服务器新建一个终端 (同服务器多开)">
+                  <Button
+                    type="text"
+                    size="small"
+                    aria-label={`为 ${activeServer.name} 新建终端`}
+                    icon={<PlusOutlined />}
+                    onClick={() => openNewTab(activeServer)}
+                    style={{ flexShrink: 0, marginLeft: 4 }}
+                  />
+                </Tooltip>
+              )}
+            </div>
+          )}
+
+          <QuickConnectBar open={quickConnectOpen} onClose={() => setQuickConnectOpen(false)} />
+
+          {tabs.length === 0 ? (
+            <EmptyState
+              icon={
+                <DesktopOutlined
+                  style={{ fontSize: 56, color: "var(--ant-color-text-tertiary)" }}
+                />
+              }
+              title="z-Terminal"
+              description="从左侧选择服务器双击连接，或点击 + 添加"
+            />
+          ) : (
+            <>
+              <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
+                {tabs.map((tab) => {
+                  const tabServer = servers.find((s) => s.id === tab.serverId);
+                  const dangerMeta = envMeta(tabServer?.environment);
+                  return (
+                    <div
+                      key={tab.id}
+                      style={{
+                        display: tab.id === activeTabId ? "flex" : "none",
+                        height: "100%",
+                        // 生产会话给整块终端加一条醒目顶边：切错标签页时第一眼就能看见
+                        boxShadow: dangerMeta?.danger
+                          ? `inset 0 3px 0 0 ${dangerMeta.color}`
+                          : undefined,
+                        flexDirection:
+                          tab.panes.length > 1
+                            ? tab.splitDirection === "vertical"
+                              ? "column"
+                              : "row"
+                            : "column",
+                      }}
+                    >
+                      {tab.panes.length <= 1 ? (
+                        <TerminalView tabId={tab.id} paneId={tab.panes[0]?.id} />
+                      ) : (
+                        tab.panes.map((pane, i) => {
+                          // 每一格只写「关闭此分屏」时读屏听到 N 个同名按钮，分不清关的是哪一格：
+                          // 名称里带上序号与该格的服务器名（`{}` 漏写会被当字面量输出，这里一次算好）
+                          const paneServerName = servers.find(
+                            (sv) => sv.id === pane.serverId
+                          )?.name;
+                          const paneCloseLabel = `关闭第 ${i + 1}/${tab.panes.length} 格`;
+                          const direction = tab.splitDirection || "horizontal";
+                          const ratio = paneRatios[tab.id] ?? 0.5;
+                          const isActive = pane.id === activePaneId;
+                          return (
+                            <React.Fragment key={pane.id}>
+                              {i > 0 && (
+                                <div
+                                  onMouseDown={(e) => startPaneDrag(e, tab.id, direction)}
+                                  style={{
+                                    width: direction === "horizontal" ? 4 : "auto",
+                                    height: direction === "horizontal" ? "auto" : 4,
+                                    background: token.colorBorderSecondary,
+                                    cursor:
+                                      direction === "horizontal" ? "col-resize" : "row-resize",
+                                    flexShrink: 0,
+                                    transition: "background 0.15s",
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    (e.target as HTMLElement).style.background = token.colorPrimary;
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    (e.target as HTMLElement).style.background =
+                                      token.colorBorderSecondary;
+                                  }}
+                                />
+                              )}
+                              <div
+                                style={{
+                                  flex: i === 0 ? ratio : 1 - ratio,
+                                  overflow: "hidden",
+                                  position: "relative",
+                                  outline: isActive ? `2px solid ${token.colorPrimary}` : "none",
+                                  outlineOffset: -2,
+                                }}
+                                onMouseDown={() => setActivePane(tab.id, pane.id)}
+                              >
+                                <TerminalView tabId={tab.id} paneId={pane.id} />
+                                {tab.panes.length > 1 && (
+                                  <div
+                                    style={{
+                                      position: "absolute",
+                                      top: 4,
+                                      right: 4,
+                                      zIndex: 10,
+                                    }}
+                                  >
+                                    {/* 每一格都只写「关闭此分屏」时，读屏听到的是 N 个同名按钮，
+                                    分不清关的是哪一格 —— 把序号与该格的服务器名放进名称里 */}
+                                    <Tooltip
+                                      title={
+                                        paneServerName
+                                          ? `${paneCloseLabel} · ${paneServerName}`
+                                          : paneCloseLabel
+                                      }
+                                    >
+                                      <Button
+                                        size="small"
+                                        type="text"
+                                        aria-label={paneCloseLabel}
+                                        icon={<CloseOutlined />}
+                                        style={{
+                                          fontSize: 10,
+                                          width: 18,
+                                          height: 18,
+                                          minWidth: 18,
+                                          padding: 0,
+                                          color: token.colorTextSecondary,
+                                          background: token.colorBgContainer,
+                                          opacity: isActive ? 0.8 : 0.3,
+                                          borderRadius: 2,
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          closePane(tab.id, pane.id);
+                                        }}
+                                      />
+                                    </Tooltip>
+                                  </div>
+                                )}
+                              </div>
+                            </React.Fragment>
+                          );
+                        })
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {sftpVisible && activeTabId && (
+                <>
+                  <div
+                    onMouseDown={startDrag}
+                    style={{
+                      height: 4,
+                      cursor: "row-resize",
+                      background: token.colorBorderSecondary,
+                      flexShrink: 0,
+                    }}
+                  />
+                  <div
+                    style={{
+                      height: sftpHeight,
+                      borderTop: `1px solid ${token.colorBorderSecondary}`,
+                      background: token.colorBgContainer,
+                      flexShrink: 0,
+                    }}
+                  >
+                    <SftpPanel tabId={activeTabId} />
+                  </div>
+                </>
+              )}
+              {snippetsVisible && activeTabId && (
+                <>
+                  <div
+                    onMouseDown={startSnippetsDrag}
+                    style={{
+                      height: 4,
+                      cursor: "row-resize",
+                      background: token.colorBorderSecondary,
+                      flexShrink: 0,
+                    }}
+                  />
+                  <div
+                    style={{
+                      height: snippetsHeight,
+                      borderTop: `1px solid ${token.colorBorderSecondary}`,
+                      background: token.colorBgContainer,
+                      flexShrink: 0,
+                    }}
+                  >
+                    <SnippetsPanel />
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          {/* 底部状态栏 */}
           <div
             style={{
+              height: 24,
               display: "flex",
               alignItems: "center",
-              padding: "0 8px",
-              borderBottom: `1px solid ${token.colorBorderSecondary}`,
+              justifyContent: "space-between",
+              padding: "0 12px",
+              fontSize: 11,
               background: token.colorBgContainer,
-              height: 40,
+              borderTop: `1px solid ${token.colorBorderSecondary}`,
               flexShrink: 0,
             }}
           >
-            <Tabs
-              activeKey={activeTabId || undefined}
-              onChange={(key) => setActiveTab(key)}
-              items={tabItems}
-              onEdit={(key, action) => {
-                if (action === "remove") closeTab(key as string);
-              }}
-              type="editable-card"
-              size="small"
-              hideAdd
-              style={{ flex: 1, minWidth: 0 }}
-            />
-            {activeServer && (
-              <Tooltip title="为当前服务器新建一个终端 (同服务器多开)">
-                <Button
-                  type="text"
-                  size="small"
-                  aria-label={`为 ${activeServer.name} 新建终端`}
-                  icon={<PlusOutlined />}
-                  onClick={() => openNewTab(activeServer)}
-                  style={{ flexShrink: 0, marginLeft: 4 }}
-                />
-              </Tooltip>
-            )}
+            <Space size={16}>
+              <span>🔗 {tabs.filter((t) => t.state === "connected").length} 个连接</span>
+              {activeServer && activeTab?.state === "connected" && (
+                <span>
+                  {activeServer.username}@{activeServer.host}:{activeServer.port}
+                </span>
+              )}
+            </Space>
+            <Space size={16}>
+              <span>{currentTime.toLocaleTimeString()}</span>
+              <span>~/.z-terminal</span>
+            </Space>
           </div>
-        )}
-
-        <QuickConnectBar open={quickConnectOpen} onClose={() => setQuickConnectOpen(false)} />
-
-        {tabs.length === 0 ? (
-          <EmptyState
-            icon={
-              <DesktopOutlined style={{ fontSize: 56, color: "var(--ant-color-text-tertiary)" }} />
-            }
-            title="z-Terminal"
-            description="从左侧选择服务器双击连接，或点击 + 添加"
-          />
-        ) : (
-          <>
-            <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-              {tabs.map((tab) => {
-                const tabServer = servers.find((s) => s.id === tab.serverId);
-                const dangerMeta = envMeta(tabServer?.environment);
-                return (
-                <div
-                  key={tab.id}
-                  style={{
-                    display: tab.id === activeTabId ? "flex" : "none",
-                    height: "100%",
-                    // 生产会话给整块终端加一条醒目顶边：切错标签页时第一眼就能看见
-                    boxShadow: dangerMeta?.danger ? `inset 0 3px 0 0 ${dangerMeta.color}` : undefined,
-                    flexDirection: tab.panes.length > 1
-                      ? tab.splitDirection === "vertical" ? "column" : "row"
-                      : "column",
-                  }}
-                >
-                  {tab.panes.length <= 1 ? (
-                    <TerminalView tabId={tab.id} paneId={tab.panes[0]?.id} />
-                  ) : (
-                    tab.panes.map((pane, i) => {
-                      const direction = tab.splitDirection || "horizontal";
-                      const ratio = paneRatios[tab.id] ?? 0.5;
-                      const isActive = pane.id === activePaneId;
-                      return (
-                        <React.Fragment key={pane.id}>
-                          {i > 0 && (
-                            <div
-                              onMouseDown={(e) => startPaneDrag(e, tab.id, direction)}
-                              style={{
-                                width: direction === "horizontal" ? 4 : "auto",
-                                height: direction === "horizontal" ? "auto" : 4,
-                                background: token.colorBorderSecondary,
-                                cursor: direction === "horizontal" ? "col-resize" : "row-resize",
-                                flexShrink: 0,
-                                transition: "background 0.15s",
-                              }}
-                              onMouseEnter={(e) => {
-                                (e.target as HTMLElement).style.background = token.colorPrimary;
-                              }}
-                              onMouseLeave={(e) => {
-                                (e.target as HTMLElement).style.background = token.colorBorderSecondary;
-                              }}
-                            />
-                          )}
-                          <div
-                            style={{
-                              flex: i === 0 ? ratio : 1 - ratio,
-                              overflow: "hidden",
-                              position: "relative",
-                              outline: isActive ? `2px solid ${token.colorPrimary}` : "none",
-                              outlineOffset: -2,
-                            }}
-                            onMouseDown={() => setActivePane(tab.id, pane.id)}
-                          >
-                            <TerminalView tabId={tab.id} paneId={pane.id} />
-                            {tab.panes.length > 1 && (
-                              <div
-                                style={{
-                                  position: "absolute",
-                                  top: 4,
-                                  right: 4,
-                                  zIndex: 10,
-                                }}
-                              >
-                                <Button
-                                  size="small"
-                                  type="text"
-                                  aria-label="关闭此分屏"
-                                  icon={<CloseOutlined />}
-                                  style={{
-                                    fontSize: 10,
-                                    width: 18,
-                                    height: 18,
-                                    minWidth: 18,
-                                    padding: 0,
-                                    color: token.colorTextSecondary,
-                                    background: token.colorBgContainer,
-                                    opacity: isActive ? 0.8 : 0.3,
-                                    borderRadius: 2,
-                                  }}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    closePane(tab.id, pane.id);
-                                  }}
-                                />
-                              </div>
-                            )}
-                          </div>
-                        </React.Fragment>
-                      );
-                    })
-                  )}
-                </div>
-              );
-              })}
-            </div>
-            {sftpVisible && activeTabId && (
-              <>
-                <div
-                  onMouseDown={startDrag}
-                  style={{
-                    height: 4,
-                    cursor: "row-resize",
-                    background: token.colorBorderSecondary,
-                    flexShrink: 0,
-                  }}
-                />
-                <div
-                  style={{
-                    height: sftpHeight,
-                    borderTop: `1px solid ${token.colorBorderSecondary}`,
-                    background: token.colorBgContainer,
-                    flexShrink: 0,
-                  }}
-                >
-                  <SftpPanel tabId={activeTabId} />
-                </div>
-              </>
-            )}
-            {snippetsVisible && activeTabId && (
-              <>
-                <div
-                  onMouseDown={startSnippetsDrag}
-                  style={{
-                    height: 4,
-                    cursor: "row-resize",
-                    background: token.colorBorderSecondary,
-                    flexShrink: 0,
-                  }}
-                />
-                <div
-                  style={{
-                    height: snippetsHeight,
-                    borderTop: `1px solid ${token.colorBorderSecondary}`,
-                    background: token.colorBgContainer,
-                    flexShrink: 0,
-                  }}
-                >
-                  <SnippetsPanel />
-                </div>
-              </>
-            )}
-          </>
-        )}
-
-        {/* 底部状态栏 */}
-        <div
-          style={{
-            height: 24,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "0 12px",
-            fontSize: 11,
-            background: token.colorBgContainer,
-            borderTop: `1px solid ${token.colorBorderSecondary}`,
-            flexShrink: 0,
-          }}
-        >
-          <Space size={16}>
-            <span>🔗 {tabs.filter((t) => t.state === "connected").length} 个连接</span>
-            {activeServer && activeTab?.state === "connected" && (
-              <span>
-                {activeServer.username}@{activeServer.host}:{activeServer.port}
-              </span>
-            )}
-          </Space>
-          <Space size={16}>
-            <span>{currentTime.toLocaleTimeString()}</span>
-            <span>~/.z-terminal</span>
-          </Space>
-        </div>
         </div>
         {activeTabId && <ServerStatsPanel />}
       </div>
@@ -1122,8 +1169,16 @@ function AppInner() {
         onOpenLogs={() => setLogsOpen(true)}
       />
       <AIChatModal open={aiChatOpen} onClose={() => setAiChatOpen(false)} />
-      <AICommandExplanation open={aiCommandExpOpen} onClose={() => setAiCommandExpOpen(false)} command={aiSubject.command} />
-      <AIErrorAnalysis open={aiErrorAnalysisOpen} onClose={() => setAiErrorAnalysisOpen(false)} error={aiSubject.error} />
+      <AICommandExplanation
+        open={aiCommandExpOpen}
+        onClose={() => setAiCommandExpOpen(false)}
+        command={aiSubject.command}
+      />
+      <AIErrorAnalysis
+        open={aiErrorAnalysisOpen}
+        onClose={() => setAiErrorAnalysisOpen(false)}
+        error={aiSubject.error}
+      />
       <AINaturalLanguageCommand
         open={aiNaturalLanguageOpen}
         onClose={() => setAiNaturalLanguageOpen(false)}
@@ -1152,7 +1207,11 @@ function AppInner() {
           else message.warning("没有可用终端，代码保留在编辑器里");
         }}
       />
-      <AIGitCommit open={aiGitCommitOpen} onClose={() => setAiGitCommitOpen(false)} diff={aiSubject.diff} />
+      <AIGitCommit
+        open={aiGitCommitOpen}
+        onClose={() => setAiGitCommitOpen(false)}
+        diff={aiSubject.diff}
+      />
       <AIMultiAgents open={aiMultiAgentsOpen} onClose={() => setAiMultiAgentsOpen(false)} />
       <CloudAgent open={cloudAgentOpen} onClose={() => setCloudAgentOpen(false)} />
       {/* 危险命令二次确认弹窗：手输/Snippet/批量/AI 四个下发口共用（P-2） */}
