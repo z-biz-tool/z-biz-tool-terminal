@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useAIStore } from "./stores/aiStore";
-import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message } from "antd";
+import { Tabs, theme, Button, Space, Tag, Tooltip, Dropdown, message, Divider } from "antd";
 import type { MenuProps } from "antd";
-import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined, DatabaseOutlined, FieldTimeOutlined } from "@ant-design/icons";
+import { SettingOutlined, FolderOpenOutlined, DesktopOutlined, CodeOutlined, ColumnWidthOutlined, ColumnHeightOutlined, CloseOutlined, FileTextOutlined, SearchOutlined, HistoryOutlined, ApiOutlined, ThunderboltOutlined, ReloadOutlined, CopyOutlined, TeamOutlined, BugOutlined, PlusOutlined, RobotOutlined, DatabaseOutlined, FieldTimeOutlined, BulbOutlined, ExperimentOutlined, EditOutlined, BranchesOutlined, ApartmentOutlined, KeyOutlined } from "@ant-design/icons";
 import ServerList from "./components/ServerList";
 import TerminalView from "./components/TerminalView";
 import SftpPanel from "./components/SftpPanel";
@@ -637,6 +637,7 @@ function AppInner() {
         <Button
           size="small"
           type="text"
+          aria-label={`命令面板 ${comboLabel("command-palette")}`}
           icon={<SearchOutlined />}
           onClick={() => setPaletteOpen(true)}
         />
@@ -646,6 +647,7 @@ function AppInner() {
           <Button
             size="small"
             type="text"
+            aria-label="最近连接"
             icon={<HistoryOutlined />}
           />
         </RecentConnections>
@@ -683,6 +685,7 @@ function AppInner() {
           <Button
             size="small"
             type={historyOpen ? "primary" : "text"}
+            aria-label={`命令历史 ${comboLabel("command-history")}`}
             icon={<FieldTimeOutlined />}
             onClick={() => setHistoryOpen(true)}
           />
@@ -705,6 +708,7 @@ function AppInner() {
           <Button
             size="small"
             type="text"
+            aria-label={`水平分屏 ${comboLabel("split-horizontal")}`}
             icon={<ColumnWidthOutlined />}
             onClick={() => splitTab(activeTabId, "horizontal")}
           />
@@ -715,6 +719,7 @@ function AppInner() {
           <Button
             size="small"
             type="text"
+            aria-label={`垂直分屏 ${comboLabel("split-vertical")}`}
             icon={<ColumnHeightOutlined />}
             onClick={() => splitTab(activeTabId, "vertical")}
           />
@@ -725,6 +730,7 @@ function AppInner() {
           <Button
             size="small"
             type="text"
+            aria-label="端口转发"
             icon={<ApiOutlined />}
             onClick={() => setPortForwardOpen(true)}
           >
@@ -737,17 +743,20 @@ function AppInner() {
           <Button
             size="small"
             type="text"
-            icon={<BugOutlined />}
+            aria-label="连接诊断"
+            icon={<ExperimentOutlined />}
             onClick={() => setDiagnosticOpen(true)}
           >
             诊断
           </Button>
         </Tooltip>
       )}
+      <Divider type="vertical" style={{ margin: "0 4px" }} />
       <Tooltip title={`AI 聊天助手 ${comboLabel("ai-chat")}`}>
         <Button
           size="small"
           type="text"
+          aria-label={`AI 聊天助手 ${comboLabel("ai-chat")}`}
           icon={<RobotOutlined />}
           onClick={() => setAiChatOpen(true)}
         />
@@ -756,7 +765,8 @@ function AppInner() {
         <Button
           size="small"
           type="text"
-          icon={<CodeOutlined />}
+          aria-label={`AI 命令解释 ${comboLabel("ai-explain")}`}
+          icon={<BulbOutlined />}
           onClick={openAiExplain}
         />
       </Tooltip>
@@ -764,6 +774,7 @@ function AppInner() {
         <Button
           size="small"
           type="text"
+          aria-label={`AI 错误分析 ${comboLabel("ai-error")}`}
           icon={<BugOutlined />}
           onClick={openAiError}
         />
@@ -772,6 +783,7 @@ function AppInner() {
         <Button
           size="small"
           type="text"
+          aria-label={`自然语言转命令 ${comboLabel("ai-natural-language")}`}
           icon={<ThunderboltOutlined />}
           onClick={() => setAiNaturalLanguageOpen(true)}
         />
@@ -780,7 +792,8 @@ function AppInner() {
         <Button
           size="small"
           type="text"
-          icon={<ColumnWidthOutlined />}
+          aria-label={`AI 代码编辑 ${comboLabel("ai-code")}`}
+          icon={<EditOutlined />}
           onClick={openAiCode}
         />
       </Tooltip>
@@ -788,7 +801,8 @@ function AppInner() {
         <Button
           size="small"
           type="text"
-          icon={<FolderOpenOutlined />}
+          aria-label={`AI Git 提交 ${comboLabel("ai-git")}`}
+          icon={<BranchesOutlined />}
           onClick={openAiGit}
         />
       </Tooltip>
@@ -796,7 +810,8 @@ function AppInner() {
         <Button
           size="small"
           type="text"
-          icon={<TeamOutlined />}
+          aria-label={`多智能体协作 ${comboLabel("ai-multi-agent")}`}
+          icon={<ApartmentOutlined />}
           onClick={() => setAiMultiAgentsOpen(true)}
         />
       </Tooltip>
@@ -804,36 +819,38 @@ function AppInner() {
         <Button
           size="small"
           type="text"
+          aria-label={`AI 数据（本机，无云端同步） ${comboLabel("ai-data")}`}
           icon={<DatabaseOutlined />}
           onClick={() => setCloudAgentOpen(true)}
         />
       </Tooltip>
-      <Button
-        size="small"
-        type="text"
-        icon={<ThunderboltOutlined />}
-        onClick={() => setShortcutsOpen(true)}
-        title="快捷键"
-      />
-      <Button
-        size="small"
-        type="text"
-        icon={<FileTextOutlined />}
-        onClick={() => setLogsOpen(true)}
-      />
-      <Button
-        size="small"
-        type="text"
-        icon={<RobotOutlined />}
-        onClick={() => setAiChatOpen(true)}
-        title={`AI 聊天助手 ${comboLabel("ai-chat")}`}
-      />
-      <Button
-        size="small"
-        type="text"
-        icon={<SettingOutlined />}
-        onClick={() => setSettingsOpen(true)}
-      />
+      <Tooltip title="快捷键一览">
+        <Button
+          size="small"
+          type="text"
+          aria-label="快捷键一览"
+          icon={<KeyOutlined />}
+          onClick={() => setShortcutsOpen(true)}
+        />
+      </Tooltip>
+      <Tooltip title="日志与审计">
+        <Button
+          size="small"
+          type="text"
+          aria-label="日志与审计"
+          icon={<FileTextOutlined />}
+          onClick={() => setLogsOpen(true)}
+        />
+      </Tooltip>
+      <Tooltip title="设置">
+        <Button
+          size="small"
+          type="text"
+          aria-label="设置"
+          icon={<SettingOutlined />}
+          onClick={() => setSettingsOpen(true)}
+        />
+      </Tooltip>
     </Space>
   );
 
