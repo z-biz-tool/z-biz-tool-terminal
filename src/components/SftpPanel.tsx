@@ -62,6 +62,15 @@ import {
   type BatchOutcome,
 } from "../utils/sftpDownloadPlan";
 import { listingCandidates } from "../utils/sftpListing";
+import {
+  beginBatch,
+  describeBatch,
+  finishItem,
+  notStartedCount,
+  requestCancel,
+  startItem,
+  type Batch,
+} from "../utils/sftpBatch";
 import { pickTabSession } from "../utils/session";
 
 interface SftpPanelProps {
@@ -201,6 +210,10 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
   const [loading, setLoading] = useState(false);
   // 上一次列目录为什么没成：列表空着的原因必须上屏，不能只闪过一条 toast
   const [listError, setListError] = useState<string | null>(null);
+  // 整批进度（一批 N 个文件时"第 2/7"与"取消"都挂在这条上）。
+  // ref 与 state 同步写：循环里要读的是"此刻有没有人按过取消"，state 那份是渲染快照，会旧。
+  const [batch, setBatch] = useState<Batch | null>(null);
+  const batchRef = useRef<Batch | null>(null);
   const [selectedEntries, setSelectedEntries] = useState<Set<string>>(new Set());
   const [lastClickedName, setLastClickedName] = useState<string | null>(null);
   const [focusedIndex, setFocusedIndex] = useState(-1);
@@ -217,6 +230,11 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
   // 编辑监听器的登记表：卸载清理必须走 ref，不能读 editingFiles —— `[]` 依赖的 effect
   // 闭包里那份数组永远是挂载时的空表，后来开的监听器一个都关不掉（3 s 一次 IPC，命中还会往远端上传）。
   const watchersRef = useRef<number[]>([]);
+
+  const applyBatch = useCallback((next: Batch | null) => {
+    batchRef.current = next;
+    setBatch(next);
+  }, []);
 
   const stopWatching = useCallback((id: number) => {
     clearInterval(id);
@@ -253,6 +271,9 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
     () => pickTabSession(useServerStore.getState(), tabId),
     [tabId]
   );
+
+  // 单条传输时 describeBatch 给 null：一条文件写"第 1/1 个"是没有信息量的噪声
+  const batchText = describeBatch(batch);
 
   const nextTransferId = useRef(createTransferIds()).current;
 
@@ -557,18 +578,42 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         filePaths = Array.isArray(selected) ? selected : [selected];
       }
 
-      for (const localPath of filePaths) {
-        const filename = basenameOf(localPath);
-        const remotePath = sftpPath.endsWith("/") ? sftpPath + filename : sftpPath + "/" + filename;
-        const error = await runTransfer("upload", filename, sessionId, (transferId) =>
+      // 落点名照样要过一遍净化 + 批内去重：`~/a/x.txt` 与 `~/b/x.txt` 选进同一批时，
+      // 旧写法两个都报「上传成功」，实际后一个把前一个覆盖掉了。
+      const plans = planDownloads(filePaths.map(basenameOf));
+      const outcome: BatchOutcome = { saved: [], existing: [], failed: [], notStarted: [] };
+      applyBatch(beginBatch("upload", plans.length));
+      for (const [i, plan] of plans.entries()) {
+        const localPath = filePaths[i];
+        const cur = batchRef.current;
+        if (cur?.cancelled) {
+          outcome.notStarted!.push(plan);
+          continue;
+        }
+        applyBatch(startItem(cur!, plan.remoteName));
+        const remotePath = sftpPath.endsWith("/") ? sftpPath + plan.localName : sftpPath + "/" + plan.localName;
+        const error = await runTransfer("upload", plan.remoteName, sessionId, (transferId) =>
           invoke("sftp_upload", { sessionId, localPath, remotePath, transferId })
         );
-        if (error === null) message.success(`上传成功: ${filename}`);
-        else message.error(`上传失败: ${filename}: ${error}`);
+        if (error === null) outcome.saved.push(plan);
+        else outcome.failed.push({ plan, reason: error });
+        applyBatch(finishItem(batchRef.current!));
+      }
+      const done = batchRef.current;
+      applyBatch(null);
+      // 单个文件不刷屏（一条汇总对单条来说反而罗嗦），保持原来的一句式反馈
+      if (plans.length === 1 && !done?.cancelled) {
+        const only = outcome.failed[0];
+        if (only) message.error(`上传失败: ${only.plan.remoteName}: ${only.reason}`);
+        else message.success(`上传成功: ${plans[0].remoteName}`);
+      } else {
+        const summary = summarizeBatch({ ...outcome, existing: [] }, sftpPath, "上传");
+        if (summary.kind === "success") message.success(summary.text);
+        else message.warning(summary.text);
       }
       navigateTo(sftpPath);
     },
-    [sftpPath, getSessionId, navigateTo, runTransfer]
+    [sftpPath, getSessionId, navigateTo, runTransfer, applyBatch]
   );
 
   const handleDownload = useCallback(
@@ -641,10 +686,21 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
     if (!dir) return;
     const targetDir = String(dir);
 
-    const outcome: BatchOutcome = { saved: [], existing: [], failed: [] };
-    for (const plan of planDownloads(files.map((e) => e.name))) {
+    const outcome: BatchOutcome = { saved: [], existing: [], failed: [], notStarted: [] };
+    const plans = planDownloads(files.map((e) => e.name));
+    applyBatch(beginBatch("download", plans.length));
+    for (const plan of plans) {
+      const cur = batchRef.current;
+      if (cur?.cancelled) {
+        outcome.notStarted!.push(plan);
+        continue;
+      }
+      applyBatch(startItem(cur!, plan.remoteName));
       const entry = files.find((e) => e.name === plan.remoteName);
-      if (!entry) continue;
+      if (!entry) {
+        applyBatch(finishItem(batchRef.current!));
+        continue;
+      }
       const remotePath = sftpPath.endsWith("/")
         ? sftpPath + entry.name
         : sftpPath + "/" + entry.name;
@@ -659,6 +715,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         .catch(() => false);
       if (already) {
         outcome.existing.push(plan);
+        applyBatch(finishItem(batchRef.current!));
         continue;
       }
 
@@ -673,13 +730,15 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       );
       if (error === null) outcome.saved.push(plan);
       else outcome.failed.push({ plan, reason: error });
+      applyBatch(finishItem(batchRef.current!));
     }
+    applyBatch(null);
 
     const summary = summarizeBatch(outcome, targetDir);
     if (summary.kind === "success") message.success(summary.text);
     else if (summary.kind === "warning") message.warning(summary.text);
     else message.error(summary.text);
-  }, [sftpPath, selectedEntries, sortedEntries, getSessionId, runTransfer]);
+  }, [sftpPath, selectedEntries, sortedEntries, getSessionId, runTransfer, applyBatch]);
 
   const handleBatchDelete = useCallback(() => {
     const sessionId = getSessionId();
@@ -1542,6 +1601,35 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
           ]}
         />
       </div>
+
+      {/* 整批进度：一批 N 个文件时才出现。单条横幅说的是"这条传到哪了"，
+          这条说的是"这批还剩多少、要不要停下"——两个层级不能挤在同一行里。 */}
+      {batchText && batch && (
+        <div
+          style={{
+            padding: "4px 12px",
+            background: token.colorInfoBg,
+            borderBottom: `1px solid ${token.colorInfoBorder}`,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <span style={{ fontSize: 12, color: token.colorTextSecondary, flex: 1, minWidth: 0 }}>
+            {batchText} · 已结束 {batch.finished}/{batch.total}
+          </span>
+          {!batch.cancelled && notStartedCount(batch) > 0 && (
+            <Button
+              size="small"
+              type="text"
+              aria-label="取消剩余传输"
+              onClick={() => applyBatch(requestCancel(batchRef.current!))}
+            >
+              取消剩余 {notStartedCount(batch)} 个
+            </Button>
+          )}
+        </div>
+      )}
 
       {/* 传输进度指示器 */}
       {transfer && <TransferBanner transfer={transfer} />}

@@ -55,6 +55,8 @@ export interface BatchOutcome {
   existing: PlannedDownload[];
   /** 传输失败（含后端拒绝） */
   failed: { plan: PlannedDownload; reason: string }[];
+  /** 请求过取消之后，**根本没开始**的那些（正在传的那条不会被打断） */
+  notStarted?: PlannedDownload[];
 }
 
 const NAME_CAP = 6;
@@ -66,28 +68,39 @@ function nameList(items: readonly string[]): string {
 
 /**
  * 一条汇总说清整批结果。逐项弹 toast 会让人不看内容就一路点掉，
- * 但更关键的是：批量下载里"跳过了 3 个已存在的文件"如果不说，人只会以为都下下来了。
+ * 但更关键的是：批量传输里"跳过了 3 个已存在的文件"或"取消了 4 个"如果不说，
+ * 人只会以为都下下来了。
+ *
+ * `action` 只影响措辞（默认"下载"）：上传那批也要用同一条规则，免得两处对
+ * "什么算失败"各写一套判断。
  */
-export function summarizeBatch(o: BatchOutcome, dir: string): {
-  kind: "success" | "warning" | "error";
-  text: string;
-} {
+export function summarizeBatch(
+  o: BatchOutcome,
+  dir: string,
+  action: "下载" | "上传" = "下载"
+): { kind: "success" | "warning" | "error"; text: string } {
   const parts: string[] = [];
   if (o.saved.length > 0) {
     const renamed = o.saved.filter((p) => p.renamed);
-    parts.push(`已下载 ${o.saved.length} 个文件到 ${dir}`);
+    parts.push(`已${action} ${o.saved.length} 个文件到 ${dir}`);
     if (renamed.length > 0) {
-      parts.push(`其中 ${nameList(renamed.map((p) => `${p.remoteName}→${p.localName}`))} 因文件名不安全已改名`);
+      // 两种原因都会改名（远端名字不安全 / 同一批里两个名字撞成一个），措辞里不猜原因，只点名结果
+      parts.push(`其中 ${nameList(renamed.map((p) => `${p.remoteName}→${p.localName}`))} 已改名以免互相覆盖`);
     }
   }
   if (o.existing.length > 0) {
     parts.push(`跳过 ${o.existing.length} 个（本地已存在，未覆盖）：${nameList(o.existing.map((p) => p.remoteName))}`);
+  }
+  if (o.notStarted && o.notStarted.length > 0) {
+    parts.push(`已取消 ${o.notStarted.length} 个（未开始）：${nameList(o.notStarted.map((p) => p.remoteName))}`);
   }
   if (o.failed.length > 0) {
     parts.push(`失败 ${o.failed.length} 个：${nameList(o.failed.map((p) => `${p.plan.remoteName}: ${p.reason}`))}`);
   }
   const text = parts.join("；");
   if (o.failed.length > 0 && o.saved.length === 0) return { kind: "error", text };
-  if (o.failed.length > 0 || o.existing.length > 0) return { kind: "warning", text };
+  if (o.failed.length > 0 || o.existing.length > 0 || (o.notStarted?.length ?? 0) > 0) {
+    return { kind: "warning", text };
+  }
   return { kind: "success", text };
 }
