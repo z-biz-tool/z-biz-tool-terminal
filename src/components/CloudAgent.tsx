@@ -66,7 +66,7 @@ export default function CloudAgent({ open, onClose }: Props) {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="云端同步未实现"
+        title="云端同步未实现"
         description="下列数据只存在你这台机器的本地存储里，不会上传到任何服务器；应用内也没有任何「同步到云端」的能力。需要迁移请用「设置 → 备份与恢复」。"
       />
       {datasets.length > 0 ? (

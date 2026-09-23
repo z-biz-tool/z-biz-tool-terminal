@@ -409,7 +409,7 @@ export default function ImportModal({ open, onClose }: ImportModalProps) {
           导入 ({selectedCount})
         </Button>,
       ]}
-      destroyOnClose
+      destroyOnHidden
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

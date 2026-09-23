@@ -213,7 +213,7 @@ const QuickConnectBar: React.FC<QuickConnectBarProps> = ({ open, onClose }) => {
           type={probe.reachable ? "success" : "warning"}
           showIcon
           banner
-          message={
+          title={
             <Space size={8}>
               <span>
                 {probe.reachable
@@ -231,7 +231,7 @@ const QuickConnectBar: React.FC<QuickConnectBarProps> = ({ open, onClose }) => {
           type="error"
           showIcon
           banner
-          message={error}
+          title={error}
           style={{ padding: "2px 10px", fontSize: 12 }}
           closable
           onClose={() => setError(null)}

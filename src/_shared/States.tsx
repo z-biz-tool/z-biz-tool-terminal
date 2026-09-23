@@ -48,7 +48,7 @@ export function LoadingState({ tip = "加载中...", minHeight = 240 }: LoadingS
         minHeight,
       }}
     >
-      <Spin tip={tip} size="large" />
+      <Spin description={tip} size="large" />
     </div>
   );
 }

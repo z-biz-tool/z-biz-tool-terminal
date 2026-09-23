@@ -300,7 +300,7 @@ export default function SnippetsPanel() {
         okText={editingSnippet ? "保存" : "添加"}
         cancelText="取消"
         width={480}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item

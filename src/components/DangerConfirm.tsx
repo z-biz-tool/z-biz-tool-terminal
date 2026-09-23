@@ -109,7 +109,7 @@ export default function DangerConfirmHost() {
       cancelText="取消"
       onOk={() => settle(true)}
       onCancel={() => settle(false)}
-      maskClosable={false}
+      mask={{ closable: false }}
       width={620}
     >
       {req && (
@@ -117,7 +117,7 @@ export default function DangerConfirmHost() {
           <Alert
             type="error"
             showIcon
-            message="该命令命中危险规则"
+            title="该命令命中危险规则"
             description={
               <ul style={{ margin: 0, paddingLeft: 18 }}>
                 {req.reasons.map((r) => (
@@ -150,7 +150,7 @@ export default function DangerConfirmHost() {
                 type="warning"
                 showIcon
                 style={{ marginTop: 6, padding: "4px 8px" }}
-                message={`清单中有 ${prodCount} 台生产环境主机`}
+                title={`清单中有 ${prodCount} 台生产环境主机`}
               />
             )}
             <HostList targets={req.targets} />

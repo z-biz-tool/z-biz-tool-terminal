@@ -254,7 +254,7 @@ export default function BatchExecModal({ open, onClose }: Props) {
       onCancel={onClose}
       width={720}
       footer={null}
-      destroyOnClose
+      destroyOnHidden
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         {/* 命令输入 */}

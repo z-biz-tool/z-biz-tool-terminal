@@ -317,7 +317,7 @@ function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave:
     <form onSubmit={handleSubmit} style={{ padding: "24px", maxWidth: 600 }}>
       <div style={{ marginBottom: "16px" }}>
         <label style={{ display: "block", marginBottom: "8px", fontWeight: "bold" }}>AI 提供商</label>
-        <Space direction="horizontal">
+        <Space orientation="horizontal">
           {(["openai", "claude", "gemini", "ollama", "custom"] as AIProvider[]).map((provider) => (
             <Tag
               key={provider}

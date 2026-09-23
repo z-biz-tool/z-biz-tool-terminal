@@ -1620,7 +1620,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
               background: `${token.colorPrimaryBg}80`,
             }}
           >
-            <Space direction="vertical" align="center">
+            <Space orientation="vertical" align="center">
               <UploadOutlined style={{ fontSize: 32, color: token.colorPrimary }} />
               <span style={{ color: token.colorPrimary, fontWeight: 500 }}>
                 拖放文件到此处上传

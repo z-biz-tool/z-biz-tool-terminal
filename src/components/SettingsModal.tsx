@@ -93,7 +93,7 @@ export default function SettingsModal({ open, onClose }: Props) {
       okText="保存"
       cancelText="取消"
       width={520}
-      destroyOnClose
+      destroyOnHidden
     >
       <Tabs
         defaultActiveKey="appearance"

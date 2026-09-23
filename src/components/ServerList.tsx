@@ -821,7 +821,7 @@ export default function ServerList() {
         width={560}
         okText="保存"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
@@ -977,7 +977,7 @@ export default function ServerList() {
         onCancel={() => setGroupModalVisible(false)}
         okText="创建"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={groupForm} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item
@@ -1001,7 +1001,7 @@ export default function ServerList() {
         onCancel={() => setRenameModal((s) => ({ ...s, visible: false }))}
         okText="确定"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={renameForm} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item

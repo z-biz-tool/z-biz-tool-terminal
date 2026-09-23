@@ -132,7 +132,7 @@ export default function ServerStatsPanel() {
           <EmptyPanelText>当前会话未连接, 暂无统计信息</EmptyPanelText>
         ) : !info ? (
           <div style={{ padding: "40px 0", textAlign: "center" }}>
-            <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <Space orientation="vertical" size={8} style={{ width: "100%" }}>
               <Spin />
               <Typography.Text type="secondary">正在采集服务器信息…</Typography.Text>
             </Space>

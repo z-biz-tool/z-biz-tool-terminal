@@ -82,7 +82,7 @@ export default function HostKeyPrompt() {
         cancelText="拒绝连接"
         onOk={() => current && answer(current, true)}
         onCancel={() => current && answer(current, false)}
-        maskClosable={false}
+        mask={{ closable: false }}
         keyboard={false}
         width={620}
       >
@@ -91,7 +91,7 @@ export default function HostKeyPrompt() {
             <Alert
               type="warning"
               showIcon
-              message="请通过可信渠道（如机房/运维平台）核对该主机的公钥指纹后再信任"
+              title="请通过可信渠道（如机房/运维平台）核对该主机的公钥指纹后再信任"
               description="信任后指纹会写入 ~/.z-terminal/known_hosts，之后的连接只比对不再询问；若日后指纹变化将直接拒绝连接。"
             />
             <Descriptions column={1} size="small" bordered>
@@ -115,7 +115,7 @@ export default function HostKeyPrompt() {
         cancelButtonProps={{ style: { display: "none" } }}
         onOk={() => setChanged((list) => list.slice(1))}
         onCancel={() => setChanged((list) => list.slice(1))}
-        maskClosable={false}
+        mask={{ closable: false }}
         width={620}
       >
         {changed[0] && (
@@ -123,7 +123,7 @@ export default function HostKeyPrompt() {
             <Alert
               type="error"
               showIcon
-              message="疑似中间人攻击"
+              title="疑似中间人攻击"
               description="该主机此前记录的指纹与本次服务端出示的指纹不一致。除非你确认服务端刚做过密钥轮换，否则不要在此主机上输入任何口令。"
             />
             <Descriptions column={1} size="small" bordered>

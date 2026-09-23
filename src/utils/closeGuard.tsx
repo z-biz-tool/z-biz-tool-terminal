@@ -104,7 +104,7 @@ const modalAsk: AskClose = (plan) =>
               type="warning"
               showIcon
               style={{ padding: "4px 8px" }}
-              message={`清单中有 ${plan.prodCount} 台生产环境主机`}
+              title={`清单中有 ${plan.prodCount} 台生产环境主机`}
             />
           )}
           <HostList targets={plan.hosts} style={{ margin: 0 }} />

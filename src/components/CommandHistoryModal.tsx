@@ -83,11 +83,11 @@ export default function CommandHistoryModal({ open, onClose }: { open: boolean; 
           type="warning"
           showIcon
           style={{ marginBottom: 12 }}
-          message="命令历史记录已在设置里关闭"
+          title="命令历史记录已在设置里关闭"
           description="下面的内容是之前留下的历史；关闭开关只停止新记录，不会自动删除已有数据。"
         />
       )}
-      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+      <Space orientation="vertical" size={8} style={{ width: "100%" }}>
         <Space.Compact style={{ width: "100%" }}>
           <Input
             autoFocus
