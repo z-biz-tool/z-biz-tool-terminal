@@ -551,9 +551,34 @@ export default function ServerList() {
         title: "导入配置",
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
-      if (path) {
-        await importConfig(path as string);
-        message.success("导入成功");
+      if (!path) return;
+      // 导入是整份覆盖（服务器、设置、片段、AI 配置、tab 布局一起换），
+      // 旧写法选完文件直接就写了，一句"导入成功"才让人意识到列表被换了。
+      const { servers, snippets } = useServerStore.getState();
+      const confirmed = await new Promise<boolean>((resolve) => {
+        Modal.confirm({
+          title: "导入会替换当前全部配置",
+          content: `当前 ${servers.length} 台服务器、${snippets.length} 条片段会被文件里的内容整份替换（设置与 AI 配置同样会被覆盖）。旧配置会自动备份到 ~/.z-terminal/backups/。`,
+          okText: "替换并导入",
+          okButtonProps: { danger: true },
+          cancelText: "取消",
+          onOk: () => resolve(true),
+          onCancel: () => resolve(false),
+        });
+      });
+      if (!confirmed) return;
+      const result = await importConfig(path as string);
+      if (result.servers === 0) {
+        message.warning(
+          `文件里没有服务器，列表已清空（原 ${servers.length} 台已备份到 backups/）`
+        );
+        return;
+      }
+      message.success(`已导入 ${result.servers} 台服务器、${result.snippets} 条片段`);
+      if (result.needsCredential > 0) {
+        message.warning(
+          `其中 ${result.needsCredential} 台的凭证在本机解不开（来自另一台机器的导出件），连接前请在编辑里重填`
+        );
       }
     } catch (e) {
       message.error(String(e));

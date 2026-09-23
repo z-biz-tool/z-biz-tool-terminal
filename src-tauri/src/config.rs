@@ -620,14 +620,39 @@ pub async fn save_ai_config(config: AiConfig) -> Result<(), String> {
     save_config(&app)
 }
 
-/// 导入配置
+/// 导入配置：整份替换并立即落盘（`save_config` 自带备份 + 封存 + 原子写）。
+///
+/// 返回的必须是 `load_config()`（内存态、凭证已解密）而不是刚读出来的磁盘态：
+/// 磁盘里的凭证是 `enc:v1:` 密文，把它原样交给前端，界面就会拿密文当密码用 ——
+/// 导入后所有服务器连不上，且下一次 `save_servers` 会把这段密文再封一层。
+///
+/// 与 `export_config` 对称，导入同样要留痕（它整份覆盖服务器、设置、片段与 AI 配置）。
 #[tauri::command]
 pub async fn import_config(path: String) -> Result<AppConfig, String> {
-    let content = fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
-    let config: AppConfig =
-        serde_json::from_str(&content).map_err(|e| format!("解析失败: {}", e))?;
-    save_config(&config)?;
-    Ok(config)
+    let outcome: Result<AppConfig, String> = (|| {
+        let content = fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
+        let parsed: AppConfig =
+            serde_json::from_str(&content).map_err(|e| format!("解析失败: {}", e))?;
+        save_config(&parsed)?;
+        // 覆盖已经发生，回读的那份才是当前生效的配置
+        Ok(load_config())
+    })();
+    match &outcome {
+        Ok(config) => crate::audit::record(
+            "import_config",
+            serde_json::json!({
+                "path": path,
+                "success": true,
+                "servers": config.servers.len(),
+                "snippets": config.snippets.len(),
+            }),
+        ),
+        Err(e) => crate::audit::record(
+            "import_config",
+            serde_json::json!({ "path": path, "success": false, "error": e }),
+        ),
+    }
+    outcome
 }
 
 /// 获取配置
@@ -1046,6 +1071,72 @@ mod tests {
         assert!(serde_json::from_str::<AppConfig>(&raw).unwrap().servers[0]
             .password
             .is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        std::env::remove_var("Z_TERMINAL_CONFIG_DIR");
+    }
+
+    /// 导入必须交回"能直接用的那份"，且坏文件不得把现有配置冲掉
+    #[tokio::test]
+    async fn import_returns_the_usable_view_and_never_wipes_on_error() {
+        let _guard = lock_config_dir_env();
+        let dir = isolated_config_dir("import");
+        save_config(&config_with(Some("export-pass"))).unwrap();
+
+        let with_secrets = dir.join("out-secrets.json");
+        export_config(with_secrets.to_string_lossy().to_string(), Some(true))
+            .await
+            .unwrap();
+
+        // 换一套配置目录再导回来：模拟"把文件拿到别的机器/重装后导入"
+        let imported = import_config(with_secrets.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        let pass = imported.servers[0].password.clone();
+        assert!(
+            pass.as_deref()
+                .map(|p| !p.starts_with("enc:v1:"))
+                .unwrap_or(false),
+            "交回前端的凭证不得是磁盘态密文，实测 {:?}",
+            pass
+        );
+        assert_eq!(
+            pass.as_deref(),
+            Some("export-pass"),
+            "同一台机器（同一主密钥）导入自己的导出件，密码应还原成明文可用"
+        );
+        assert_eq!(
+            load_config().servers[0].password,
+            pass,
+            "返回的那份应与落盘后回读的一致（导入确实生效，而不是只改了内存）"
+        );
+        let raw = fs::read_to_string(get_config_path()).unwrap();
+        assert!(!raw.contains("export-pass"), "明文密码不得落盘");
+
+        // 坏文件：解析失败必须原样保留现有配置（导入是整份覆盖，不能覆盖成空）
+        let broken = dir.join("broken.json");
+        fs::write(&broken, "{\"servers\": [not json]").unwrap();
+        let err = import_config(broken.to_string_lossy().to_string())
+            .await
+            .expect_err("坏文件必须报错");
+        assert!(
+            err.contains("解析失败"),
+            "报错要点名是解析问题，实测 {}",
+            err
+        );
+        assert_eq!(
+            load_config().servers[0].password,
+            pass,
+            "导入失败后现有配置必须一字未动"
+        );
+
+        // 不存在的路径同样报错，而不是静默给出空配置
+        assert!(
+            import_config(dir.join("missing.json").to_string_lossy().to_string())
+                .await
+                .expect_err("文件不存在必须报错")
+                .contains("读取失败")
+        );
 
         fs::remove_dir_all(&dir).ok();
         std::env::remove_var("Z_TERMINAL_CONFIG_DIR");

@@ -269,16 +269,29 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+/// `lower` 从 `at` 起是否以该 ASCII 关键词开头（`lower` 与 `chars` 逐字符对齐）
+fn starts_at(lower: &[char], at: usize, needle: &str) -> bool {
+    let n = needle.chars().count();
+    at + n <= lower.len()
+        && lower[at..at + n]
+            .iter()
+            .zip(needle.chars())
+            .all(|(a, b)| *a == b)
+}
+
 /// `Bearer xxx` / `Basic xxx`
 fn mask_bearer_tokens(line: &str) -> String {
     let chars: Vec<char> = line.chars().collect();
-    let lower: String = chars.iter().flat_map(|c| c.to_lowercase()).collect();
+    // 只按 ASCII 小写比较，且保持**逐字符对齐**：原来这里把 chars 拼回一个 String
+    // 再用字符下标去切（`lower[i..]`），只要同一行里 i 之前出现过任何非 ASCII 字符
+    // （本项目日志几乎条条带中文），i 就不再是合法的字节边界 —— 直接 panic。
+    let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
     let mut out: Vec<char> = Vec::with_capacity(chars.len());
     let mut i = 0;
     while i < chars.len() {
         let matched = ["bearer ", "basic "]
             .iter()
-            .find(|n| lower[i..].starts_with(*n) && (i == 0 || !is_word_char(chars[i - 1])));
+            .find(|n| starts_at(&lower, i, n) && (i == 0 || !is_word_char(chars[i - 1])));
         match matched {
             Some(needle) => {
                 let n = needle.chars().count();
@@ -527,6 +540,43 @@ mod tests {
         let b = redact_once("postgres://app:S3cr3t@db.internal:5432/prod");
         assert!(!b.contains("S3cr3t"), "got {}", b);
         assert!(b.contains("app:"), "用户名应保留以便定位: {}", b);
+    }
+
+    /// 中文日志 + Bearer：脱敏器按字符下标扫关键词，行里一旦有多字节字符，
+    /// 早先用 `String` 切片的那版会直接 panic（字节边界非法）。
+    #[test]
+    fn bearer_masking_survives_multibyte_lines() {
+        for case in [
+            "导入配置失败: 解析失败 at line 1, Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.x",
+            "服务器「生产库」返回 未授权 Bearer aaa.bbb.ccc 请重填凭证",
+            "保存设置成功 basic hunter2pass 到 ~/.z-terminal/config.json",
+            "🔐 密钥 basic s3cr3t-value 已封存",
+        ] {
+            let out = std::panic::catch_unwind(|| redact_once(case));
+            let out = match out {
+                Ok(v) => v,
+                Err(_) => panic!("脱敏在含非 ASCII 的行上 panic 了: {:?}", case),
+            };
+            assert!(!out.contains("eyJhbGciOiJIUzI1NiJ9"), "leaked {}", out);
+            assert!(!out.contains("aaa.bbb.ccc"), "leaked {}", out);
+            assert!(!out.contains("s3cr3t-value"), "leaked {}", out);
+            // 关键词本身要留在原地，否则日志失去可读性
+            assert!(
+                out.contains("Bearer")
+                    || out.contains("basic")
+                    || out.contains("Bearer ")
+                    || out.contains("***"),
+                "关键词应保留: {}",
+                out
+            );
+        }
+        // 逐字符对齐：ASCII 行上的行为不得被这次改动破坏
+        let plain = redact_once("x Bearer tok123 y");
+        assert!(!plain.contains("tok123"), "got {}", plain);
+        assert!(plain.contains("Bearer"), "got {}", plain);
+        // 词边界的负例：`Abearer ` 不算 bearer 前缀，不得被截断
+        let word = redact_once("Abearer keepme 的值");
+        assert!(word.contains("keepme"), "误伤了普通词: {}", word);
     }
 
     #[test]

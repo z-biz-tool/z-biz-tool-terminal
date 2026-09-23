@@ -115,6 +115,20 @@ export interface PersistConfig {
   active_pane_id?: string;
 }
 
+/**
+ * 导入结果。界面在动手之前要拿它说清"会替换掉什么"，之后就"实际换成了什么"，
+ * 所以数量必须由 store 算好交出去，而不是让组件重新读一遍 store（那时已经是新值）。
+ */
+export interface ImportSummary {
+  servers: number;
+  snippets: number;
+  /**
+   * 仍带着打不开的凭证（`enc:v1:` 前缀）的台数：导入件出自另一台机器时主密钥对不上，
+   * 后端不会静默清空、只能原样留着，所以必须告诉用户"这几台要重填密码"。
+   */
+  needsCredential: number;
+}
+
 interface ServerStore {
   servers: ServerConfig[];
   tabs: TerminalTab[];
@@ -156,8 +170,8 @@ interface ServerStore {
   persistSnippets: () => Promise<void>;
   /** 导出配置到文件 */
   exportConfig: (path: string) => Promise<string>;
-  /** 导入配置 */
-  importConfig: (path: string) => Promise<void>;
+  /** 导入配置：整份替换并落盘，返回给界面用的真实结果 */
+  importConfig: (path: string) => Promise<ImportSummary>;
   /** 持久化自定义分组 */
   persistCustomGroups: () => Promise<void>;
   /** 持久化 Tab 结构 + 活动 tab/pane(用于重启后恢复) */
@@ -497,15 +511,27 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   },
 
   importConfig: async (path) => {
+    // 命令返回的是**磁盘写完之后回读的那份**（凭证已解密），不是文件里的原始密文：
+    // 早先它返回刚 parse 出来的磁盘态，界面于是把 `enc:v1:…` 当密码用 —— 导入完所有服务器都连不上。
     const config = await invoke<PersistConfig>("import_config", { path });
     // 导入件是外部输入：可能整份是 null，也可能只有当年那几个字段。
     // 少了字段不能等于"该项为 undefined"，否则 xterm 会拿 undefined 当字号去量。
+    const servers = config?.servers || [];
+    const snippets = config?.snippets || [];
     set({
-      servers: config?.servers || [],
+      servers,
       settings: normalizeSettings(config?.settings, defaultSettings),
-      snippets: config?.snippets || [],
+      snippets,
       customGroups: config?.custom_groups || [],
     });
+    const sealed = (v?: string) => !!v && v.startsWith("enc:v1:");
+    return {
+      servers: servers.length,
+      snippets: snippets.length,
+      needsCredential: servers.filter(
+        (s) => sealed(s.password) || sealed(s.privateKey)
+      ).length,
+    };
   },
 
   addServer: (server) => {
