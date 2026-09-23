@@ -18,7 +18,12 @@ import {
   sessionTargets,
   type CommandSource,
 } from "../services/commandGate";
-import { attemptKey, backoffDelay, nextReconnectPlan } from "../utils/reconnectPolicy";
+import { attemptKey, nextReconnectPlan } from "../utils/reconnectPolicy";
+import {
+  progressAfterFailure,
+  progressOnAttempt,
+  type ReconnectProgress,
+} from "../utils/reconnectProgress";
 import { FONT_SIZE_DEFAULT } from "../utils/fontZoom";
 import { normalizeSettings } from "../utils/settingsSanity";
 import { pickActiveSession } from "../utils/session";
@@ -124,6 +129,8 @@ interface ServerStore {
   loaded: boolean;
   /** 正在重连的 tabId 集合(每个 tab 独立重连) */
   reconnectingTabs: Set<string>;
+  /** 重连进度: `${tabId}:${paneId}` -> 进度。运行时投影，不落盘 */
+  reconnectProgress: Record<string, ReconnectProgress>;
   /** 已连接会话的服务器系统信息: sessionId -> info */
   serverInfos: Record<string, ServerSystemInfo>;
   /** 正在采集信息的 sessionId 集合,避免重复请求 */
@@ -215,17 +222,39 @@ const reconnectAttempts = new Map<string, number>();
 /** 排队中的自动重连定时器。closeTab/closePane 必须清掉，否则会往已销毁的面板重连 */
 const pendingReconnects = new Map<string, ReturnType<typeof setTimeout>>();
 
+/**
+ * 重连进度是"此刻有什么在跑"的运行时投影，跟着上面两张表同生同灭：
+ * 故意不进 `tabs`，因此不会被 `persistTabs` 写进配置 —— 重启后一个已过期的
+ * `nextAt` 会变成"还有 -37 秒重试"这种假话。
+ */
+function setReconnectProgress(key: string, progress?: ReconnectProgress) {
+  useServerStore.setState((state) => {
+    const current = state.reconnectProgress;
+    if (!progress) {
+      if (!(key in current)) return {};
+      const { [key]: _drop, ...rest } = current;
+      return { reconnectProgress: rest };
+    }
+    return { reconnectProgress: { ...current, [key]: progress } };
+  });
+}
+
 function forgetReconnect(key: string) {
   const timer = pendingReconnects.get(key);
   if (timer !== undefined) clearTimeout(timer);
   pendingReconnects.delete(key);
   reconnectAttempts.delete(key);
+  setReconnectProgress(key);
 }
 
 /** 该 tab 下所有面板的重连状态（含已销毁面板的排队定时器） */
 function forgetTabReconnect(tabId: string) {
   for (const key of [...pendingReconnects.keys()]) if (key.startsWith(`${tabId}:`)) forgetReconnect(key);
-  for (const key of [...reconnectAttempts.keys()]) if (key.startsWith(`${tabId}:`)) reconnectAttempts.delete(key);
+  for (const key of [...reconnectAttempts.keys()]) if (key.startsWith(`${tabId}:`)) forgetReconnect(key);
+  // 停在"已放弃"态的面板没有定时器也没有计数，只有进度记录，得单独扫一遍，
+  // 否则关掉一个标签页会在 store 里留下一条永远显示"已停止自动重连"的孤儿
+  for (const key of Object.keys(useServerStore.getState().reconnectProgress))
+    if (key.startsWith(`${tabId}:`)) setReconnectProgress(key);
 }
 
 /** 关闭闸的输入：一次取快照，避免 await 前后各读到一份不同的 tabs */
@@ -330,6 +359,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   settings: defaultSettings,
   loaded: false,
   reconnectingTabs: new Set(),
+  reconnectProgress: {},
   serverInfos: {},
   fetchingServerInfo: new Set(),
   customGroups: [],
@@ -618,8 +648,10 @@ export const useServerStore = create<ServerStore>((set, get) => ({
 
     const attempt = opts?.manual ? 1 : (reconnectAttempts.get(key) ?? 0) + 1;
     reconnectAttempts.set(key, attempt);
-    const waitMs = opts?.manual ? 0 : backoffDelay(attempt);
-    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    // 这里绝不能再 sleep 一次：等待由 `planRetry` 的定时器负责（它按
+    // `nextReconnectPlan` 算好时长）。以前两处都等，第 2 次尝试实际要等 2×退避，
+    // 封顶时一次就要等 60 秒，而这段时间屏幕上只有一个红色的"错误"。
+    setReconnectProgress(key, progressOnAttempt(attempt));
 
     // 退避期间面板可能已被关掉/整个 tab 已关，必须重新确认再发连接
     const stillTab = get().tabs.find((t) => t.id === tabId);
@@ -631,6 +663,8 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     const isPrimary = stillTab.panes[0]?.id === paneId;
     const server = get().servers.find((s) => s.id === pane.serverId);
     if (!server) {
+      // 配置都没了，"正在重连"是句假话：抹掉进度，让面板老实显示这条错误
+      setReconnectProgress(key);
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === tabId
@@ -670,12 +704,31 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     }));
 
     // 失败后排一个退避重试；关掉自动重连或达到上限则清零，停在 error 态等用户
-    const planRetry = (failedAttempt: number) => {
+    const planRetry = (failedAttempt: number, wasAuto: boolean) => {
       const plan = nextReconnectPlan(failedAttempt);
-      if (!plan.retry || !get().settings.auto_reconnect) {
+      const autoOn = get().settings.auto_reconnect;
+      const keepTrying = plan.retry && autoOn;
+      if (!keepTrying) {
         reconnectAttempts.delete(key);
+        // 上限/开关关掉：明确告诉用户"不会再自己试了"，而不是留一个红叉。
+        // 原因得由这里判 —— 只有这一侧知道开关的状态。
+        setReconnectProgress(
+          key,
+          progressAfterFailure(failedAttempt, {
+            retry: false,
+            reason: !wasAuto ? "failed" : autoOn ? "limit" : "off",
+          }),
+        );
         return;
       }
+      setReconnectProgress(
+        key,
+        progressAfterFailure(failedAttempt, {
+          now: Date.now(),
+          retry: true,
+          delayMs: plan.delayMs,
+        }),
+      );
       pendingReconnects.set(
         key,
         setTimeout(() => {
@@ -697,6 +750,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
           return;
         }
         reconnectAttempts.delete(key);
+        setReconnectProgress(key);
         set((state) => ({
           tabs: state.tabs.map((t) =>
             t.id === tabId
@@ -732,7 +786,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
               : t
           ),
         }));
-        planRetry(attempt);
+        planRetry(attempt, !opts?.manual);
       }
     } catch (e) {
       const error = String(e);
@@ -752,7 +806,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
             : t
         ),
       }));
-      planRetry(attempt);
+      planRetry(attempt, !opts?.manual);
     } finally {
       get().persistTabs();
     }

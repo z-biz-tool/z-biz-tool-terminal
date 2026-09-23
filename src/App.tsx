@@ -34,6 +34,14 @@ import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
 import { auditEvent } from "./services/auditLog";
 import { commandGuard } from "./utils/commandGuard";
+import { attemptKey } from "./utils/reconnectPolicy";
+import {
+  describeReconnect,
+  isCountingDown,
+  pickReconnectProgress,
+  tagReconnectState,
+} from "./utils/reconnectProgress";
+import { useNow } from "./utils/useNow";
 import { comboLabel, hit, isMacPlatform } from "./utils/shortcuts";
 import { envMeta, isProd } from "./utils/environment";
 import {
@@ -78,7 +86,7 @@ function AppInner() {
     splitTab,
     closePane,
     setActivePane,
-    reconnectingTabs,
+    reconnectProgress,
     openNewTab,
     reconnectTab,
   } = useServerStore();
@@ -451,17 +459,32 @@ function AppInner() {
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const activeServer = activeTab ? servers.find((s) => s.id === activeTab.serverId) : undefined;
 
-  const isReconnecting = activeTabId ? reconnectingTabs.has(activeTabId) : false;
+  // 状态条要说"接下来会发生什么"：自动重连过去在后台跑，标签页只挂一个红叉，
+  // 用户分不清"还有下一次"和"已经放弃、得我自己点"。进度取活跃标签页各面板里
+  // 最有代表性的一条（不从 panes[0] 汇总，那正是这类缺陷的形状）。
+  const activeReconnect = activeTab
+    ? pickReconnectProgress(
+        activeTab.panes.map((p) => reconnectProgress[attemptKey(activeTab.id, p.id)])
+      )
+    : undefined;
+  const now = useNow(isCountingDown(activeReconnect));
+  const reconnectText = describeReconnect(activeReconnect, now);
+  const reconnectTag = tagReconnectState(activeReconnect);
   const stateColor =
-    activeTab?.state === "connected" ? "green" : activeTab?.state === "error" ? "red" : "orange";
+    activeTab?.state === "connected"
+      ? "green"
+      : reconnectTag
+        ? activeReconnect?.stopped
+          ? "red"
+          : "orange"
+        : activeTab?.state === "error"
+          ? "red"
+          : "orange";
   const stateText =
     activeTab?.state === "connected"
       ? "已连接"
-      : activeTab?.state === "connecting"
-        ? isReconnecting ? "重连中" : "连接中"
-        : activeTab?.state === "error"
-          ? isReconnecting ? "重连中" : "错误"
-          : "未连接";
+      : reconnectTag ||
+        (activeTab?.state === "connecting" ? "连接中" : activeTab?.state === "error" ? "错误" : "未连接");
 
   const handleSftpToggle = () => {
     if (!sftpVisible && activeTabId) {
@@ -632,10 +655,12 @@ function AppInner() {
         </RecentConnections>
       </Tooltip>
       {activeTab && (
-        <Tag color={stateColor}>
-          {stateText}
-          {activeServer ? ` · ${activeServer.name}` : ""}
-        </Tag>
+        <Tooltip title={reconnectText || undefined}>
+          <Tag color={stateColor}>
+            {stateText}
+            {activeServer ? ` · ${activeServer.name}` : ""}
+          </Tag>
+        </Tooltip>
       )}
       {activeTabId && (
         <Button

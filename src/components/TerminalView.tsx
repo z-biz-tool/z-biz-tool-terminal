@@ -7,6 +7,9 @@ import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { useServerStore } from "../stores/serverStore";
 import { LoadingState, ErrorState } from "@/_shared";
+import { attemptKey } from "../utils/reconnectPolicy";
+import { describeReconnect, isCountingDown } from "../utils/reconnectProgress";
+import { useNow } from "../utils/useNow";
 import TerminalSearch from "./TerminalSearch";
 import { LineInputGuard, type PushOptions } from "../utils/inputGuard";
 import { createBackpressuredWriter } from "../utils/terminalWriter";
@@ -140,8 +143,15 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   const zmodemBufferRef = useRef<string>("");
   const zmodemActiveRef = useRef(false);
 
-  const { tabs, settings, setActivePane, reconnectPane, activeTabId, activePaneId } =
-    useServerStore();
+  const {
+    tabs,
+    settings,
+    setActivePane,
+    reconnectPane,
+    activeTabId,
+    activePaneId,
+    reconnectProgress,
+  } = useServerStore();
   const tab = tabs.find((t) => t.id === tabId);
   // 优先按 paneId 找到对应 pane (split 时 pane 可能连的是其他 server),
   // 找不到时回落到 tab 的主面板(panes[0])
@@ -149,6 +159,10 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   const paneState = pane?.state;
   const paneSessionId = pane?.sessionId;
   const paneError = pane?.error;
+  // 重连进度：这一格自己的那条，不借用邻居面板的（面板级重连本来就互相独立）
+  const reconnect = pane ? reconnectProgress[attemptKey(tabId, pane.id)] : undefined;
+  const now = useNow(isCountingDown(reconnect));
+  const reconnectHint = describeReconnect(reconnect, now);
   const isActivePane =
     !!tabId && tabId === activeTabId && !!pane && pane.id === activePaneId;
 
@@ -748,12 +762,17 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
         />
         {paneState === "connecting" && (
           <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: bgWithAlpha }}>
-            <LoadingState tip="正在连接..." minHeight={200} />
+            <LoadingState tip={reconnect?.running ? reconnectHint : "正在连接..."} minHeight={200} />
           </div>
         )}
         {paneState === "error" && (
           <div style={{ position: "absolute", inset: 0, overflow: "auto", background: bgWithAlpha }}>
-            <ErrorState message={paneError} onRetry={handleRetry} />
+            <ErrorState
+              message={paneError}
+              onRetry={handleRetry}
+              hint={reconnectHint}
+              retryLabel={isCountingDown(reconnect) ? "立即重试" : "重试"}
+            />
           </div>
         )}
         <ZmodemOverlay
