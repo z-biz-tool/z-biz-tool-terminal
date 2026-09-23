@@ -16,12 +16,23 @@ import {
 } from "@ant-design/icons";
 import { useServerStore } from "../stores/serverStore";
 import { describeSnippetRun } from "../utils/snippetRun";
+import {
+  SESSION_GROUP_TITLE,
+  isCurrentTab,
+  sessionHint,
+  stateColorOf,
+  stateHint,
+} from "../utils/paletteSession";
 
 const { Text } = Typography;
 
 interface CommandItem {
   id: string;
   type: "server" | "snippet" | "action";
+  /** 指向某个标签页的条目才带；"是不是当前会话"只看它，不从 id 前缀猜 */
+  tabId?: string;
+  /** 该标签页此刻的连接状态（只有 tabId 条目有），用来标"连接中/连接失败" */
+  tabState?: string;
   label: string;
   description?: string;
   icon: React.ReactNode;
@@ -87,8 +98,10 @@ export default function CommandPalette({
       list.push({
         id: `tab-${tab.id}`,
         type: "server",
+        tabId: tab.id,
+        tabState: tab.state,
         label,
-        description: "切换到此会话",
+        description: sessionHint({ tabId: tab.id }, activeTabId),
         icon: <DesktopOutlined style={{ color: "#1677ff" }} />,
         keywords: ["switch", "tab", "切换", "会话", server?.host ?? "", server?.username ?? ""].filter(
           Boolean,
@@ -296,15 +309,14 @@ export default function CommandPalette({
 
   const grouped = useMemo(() => {
     const groups: Record<string, CommandItem[]> = {
-      "已连接会话": [],
+      [SESSION_GROUP_TITLE]: [],
       服务器: [],
-      "代码片段": [],
+      代码片段: [],
       操作: [],
     };
     for (const item of filtered) {
       if (item.type === "server") {
-        const isTab = item.id.startsWith("tab-");
-        (groups[isTab ? "已连接会话" : "服务器"] as CommandItem[]).push(item);
+        (groups[item.tabId != null ? SESSION_GROUP_TITLE : "服务器"] as CommandItem[]).push(item);
       } else if (item.type === "snippet") {
         groups["代码片段"].push(item);
       } else {
@@ -317,6 +329,8 @@ export default function CommandPalette({
   const renderItem = (item: CommandItem) => {
     const idx = filtered.indexOf(item);
     const isActive = idx === activeIndex;
+    const current = isCurrentTab(item, activeTabId);
+    const [stateLabel, showState] = stateHint(item.tabState);
     return (
       <List.Item
         key={item.id}
@@ -335,9 +349,14 @@ export default function CommandPalette({
           title={
             <Space>
               <span>{item.label}</span>
-              {item.type === "server" && item.id.startsWith("tab-") && (
+              {current && (
                 <Tag color="blue" style={{ marginLeft: 4 }}>
                   当前
+                </Tag>
+              )}
+              {showState && (
+                <Tag color={stateColorOf(item.tabState)} style={{ marginLeft: 4 }}>
+                  {stateLabel}
                 </Tag>
               )}
             </Space>
