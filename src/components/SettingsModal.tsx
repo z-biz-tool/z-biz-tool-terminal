@@ -11,6 +11,8 @@ import {
   type HostKeyGroup,
   type HostKeyView,
 } from "../utils/hostkeys";
+import { comboLabel } from "../utils/shortcuts";
+import { FONT_SIZE_MAX, FONT_SIZE_MIN, FONT_SIZE_STEP } from "../utils/fontZoom";
 import { useState, useEffect } from "react";
 import {
   CopyOutlined,
@@ -98,10 +100,14 @@ export default function SettingsModal({ open, onClose }: Props) {
                     placeholder="SF Mono, Monaco, Menlo, monospace"
                   />
                 </Form.Item>
-                <Form.Item label="字号">
+                <Form.Item
+                  label="字号"
+                  extra={`也可用 ${comboLabel("zoom-in")} / ${comboLabel("zoom-out")} 缩放，${comboLabel("zoom-reset")} 还原`}
+                >
                   <InputNumber
-                    min={8}
-                    max={32}
+                    min={FONT_SIZE_MIN}
+                    max={FONT_SIZE_MAX}
+                    step={FONT_SIZE_STEP}
                     value={settings.font_size}
                     onChange={(v) => v && updateSettings({ font_size: v })}
                   />

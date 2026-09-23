@@ -19,6 +19,7 @@ import {
   type CommandSource,
 } from "../services/commandGate";
 import { attemptKey, backoffDelay, nextReconnectPlan } from "../utils/reconnectPolicy";
+import { FONT_SIZE_DEFAULT } from "../utils/fontZoom";
 
 /** 终端设置 */
 export interface TerminalSettings {
@@ -239,7 +240,7 @@ async function connectToServer(
 }
 
 const defaultSettings: TerminalSettings = {
-  font_size: 14,
+  font_size: FONT_SIZE_DEFAULT,
   font_family: "SF Mono, Monaco, Menlo, Courier New, monospace",
   theme: "dark",
   scrollback: 10000,

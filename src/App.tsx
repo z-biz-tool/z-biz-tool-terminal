@@ -36,6 +36,11 @@ import { auditEvent } from "./services/auditLog";
 import { commandGuard } from "./utils/commandGuard";
 import { comboLabel, hit, isMacPlatform } from "./utils/shortcuts";
 import { envMeta, isProd } from "./utils/environment";
+import {
+  FONT_SIZE_DEFAULT,
+  FONT_SIZE_STEP,
+  stepFontSize,
+} from "./utils/fontZoom";
 import EnvBadge from "./components/EnvBadge";
 
 /**
@@ -216,6 +221,23 @@ function AppInner() {
         const idx = found < 0 ? 0 : found;
         const next = tab.panes[(idx + dir + tab.panes.length) % tab.panes.length];
         st.setActivePane(tab.id, next.id);
+        return;
+      }
+
+      // Cmd/Ctrl + =/-/0 - 放大、缩小、还原终端字号
+      const zoomIn = hit(e, "zoom-in", mac);
+      const zoomOut = hit(e, "zoom-out", mac);
+      if (zoomIn || zoomOut || hit(e, "zoom-reset", mac)) {
+        e.preventDefault();
+        const st = useServerStore.getState();
+        const cur = st.settings.font_size;
+        const next = zoomIn
+          ? stepFontSize(cur, FONT_SIZE_STEP)
+          : zoomOut
+            ? stepFontSize(cur, -FONT_SIZE_STEP)
+            : FONT_SIZE_DEFAULT;
+        // 贴边时不再写设置：省掉一次 persistSettings 落盘，也免得设置页闪一下
+        if (next !== cur) st.updateSettings({ font_size: next });
         return;
       }
 

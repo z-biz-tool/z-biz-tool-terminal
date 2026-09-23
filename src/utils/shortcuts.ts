@@ -27,6 +27,11 @@ export interface Combo {
   mod: true;
   /** 省略即"不能按 Shift"，所以 Cmd+T 不会被 Cmd+Shift+T 命中 */
   shift?: boolean;
+  /**
+   * 同一个动作的第二个物理键。只给"同一个功能在键盘上有两种敲法"的用（⌘= 与 ⌘+ 都是放大），
+   * 不要拿它当第二个绑定的别名 —— 那会让"组合键唯一"这条守卫失去意义。
+   */
+  alt?: string;
 }
 
 export interface Shortcut {
@@ -155,6 +160,28 @@ const SHORTCUTS = [
     wiredIn: "src/App.tsx",
   },
   {
+    id: "zoom-in",
+    group: "layout",
+    label: "放大终端字号",
+    // "=" 是主键（不用按 Shift 就能敲到），"+" 是同一动作的另一种敲法（⌘⇧= 与数字键盘 +）
+    combo: { key: "=", mod: true, alt: "+" },
+    wiredIn: "src/App.tsx",
+  },
+  {
+    id: "zoom-out",
+    group: "layout",
+    label: "缩小终端字号",
+    combo: { key: "-", mod: true },
+    wiredIn: "src/App.tsx",
+  },
+  {
+    id: "zoom-reset",
+    group: "layout",
+    label: "还原终端字号",
+    combo: { key: "0", mod: true },
+    wiredIn: "src/App.tsx",
+  },
+  {
     id: "show-shortcuts",
     group: "layout",
     label: "显示快捷键",
@@ -249,9 +276,17 @@ export function matchesCombo(e: KeyLike, combo: Combo, mac: boolean): boolean {
   if (e.altKey) return false;
   const mod = mac ? e.metaKey : e.ctrlKey;
   if (!mod) return false;
-  if (e.shiftKey !== !!combo.shift) return false;
-  if (combo.key === "digit") return e.key >= "1" && e.key <= "9";
-  if (e.key.length === 1) return e.key.toUpperCase() === combo.key.toUpperCase();
+  if (combo.key === "digit") return !e.shiftKey && e.key >= "1" && e.key <= "9";
+  if (e.shiftKey !== !!combo.shift) {
+    // alt 那种敲法必然带 Shift（⌘⇧= 交出来的 key 就是 "+"，数字键盘的 + 在部分 webview 里
+    // 也上报 shiftKey）：所以只有 combo 自己不许 Shift 时才为 alt 放行 Shift。
+    if (!(combo.alt && !combo.shift && e.shiftKey)) return false;
+  }
+  if (e.key.length === 1) {
+    return (
+      e.key.toUpperCase() === combo.key.toUpperCase() || (!!combo.alt && e.key === combo.alt)
+    );
+  }
   return e.key === combo.key;
 }
 

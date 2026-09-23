@@ -48,17 +48,35 @@ const K = (over: Partial<KeyLike> = {}): KeyLike => ({
 {
   const noMod = ALL_SHORTCUTS.filter((s) => s.combo.mod !== true).map((s) => s.id);
   eq("全部绑定都带修饰键", noMod, []);
-  eq(
-    "没有任何绑定占用裸数字或符号",
-    ALL_SHORTCUTS.filter((s) => /[0-9#]/.test(s.combo.key) && s.combo.key !== "digit").map((s) => s.id),
-    []
-  );
+  // 真正的性质是"裸按（一个修饰键都不按）不得命中任何绑定"——当年 `#` 抢走终端输入就是这么来的。
+  // 只看 combo.key 里有没有数字/符号是不够的：⌘0（还原缩放）安全，裸 0 才是问题。
+  for (const k of ["0", "1", "9", "#", "3", "t", "f", "=", "-", "!", "@", "ArrowUp", "ArrowRight"]) {
+    eq(
+      `裸按 ${k} 不命中任何绑定`,
+      ALL_SHORTCUTS.filter((s) => matchesCombo(K({ key: k }), s.combo, false)).map((s) => s.id),
+      []
+    );
+  }
 }
 
 // 2. 组合键不许撞车，中文名片段不许重复
 {
   const dup = (list: string[]) => list.filter((v, i) => list.indexOf(v) !== i);
   eq("组合键唯一", dup(ALL_SHORTCUTS.map((s) => comboKey(s.combo))), []);
+  // alt 只是"同一个动作的另一种敲法"，不许顺带把别的绑定顶掉
+  for (const s of ALL_SHORTCUTS.filter((x) => x.combo.alt)) {
+    const alt = s.combo.alt as string;
+    const clash = ALL_SHORTCUTS.filter(
+      (o) =>
+        o.id !== s.id &&
+        matchesCombo(K({ key: alt, shiftKey: true, ctrlKey: true }), o.combo, false)
+    ).map((o) => o.id);
+    eq(`${s.id} 的 alt 键不与他人撞车`, clash, []);
+    ok(
+      `${s.id} 的 alt 键命中自己（数字键盘那种不带 Shift 的敲法）`,
+      matchesCombo(K({ key: alt, ctrlKey: true }), s.combo, false)
+    );
+  }
   eq("快捷键 id 唯一", dup(ALL_SHORTCUTS.map((s) => s.id)), []);
   eq("说明文案唯一", dup(ALL_SHORTCUTS.map((s) => s.label)), []);
   ok("说明文案都非空", ALL_SHORTCUTS.every((s) => s.label.trim().length > 3));
@@ -99,6 +117,17 @@ const K = (over: Partial<KeyLike> = {}): KeyLike => ({
   eq("⌘⇧N 接管自然语言转命令", hit(K({ key: "N", metaKey: true, shiftKey: true }), "ai-natural-language", true), true);
   // 分屏聚焦走方向键，但裸方向键必须原样留给终端（行编辑/历史命令）
   eq("⌘⇧→ 命中", hit(K({ key: "ArrowRight", metaKey: true, shiftKey: true }), "focus-next-pane", true), true);
+  // 字号缩放：= 是主键，+ 是同一动作的另一种敲法（⌘⇧= 与数字键盘）
+  eq("⌘= 放大（Mac）", hit(K({ key: "=", metaKey: true }), "zoom-in", true), true);
+  eq("Ctrl+= 放大（Win）", hit(K({ key: "=", ctrlKey: true }), "zoom-in", false), true);
+  eq("⌘⇧=（给出 +）也放大", hit(K({ key: "+", metaKey: true, shiftKey: true }), "zoom-in", true), true);
+  eq("数字键盘 ⌘+（无 Shift）也放大", hit(K({ key: "+", ctrlKey: true }), "zoom-in", false), true);
+  eq("Ctrl+- 缩小", hit(K({ key: "-", ctrlKey: true }), "zoom-out", false), true);
+  eq("Ctrl+_（Shift+-）不缩小", hit(K({ key: "_", ctrlKey: true, shiftKey: true }), "zoom-out", false), false);
+  eq("Ctrl+0 还原", hit(K({ key: "0", ctrlKey: true }), "zoom-reset", false), true);
+  eq("Ctrl+1 不是还原", hit(K({ key: "1", ctrlKey: true }), "zoom-reset", false), false);
+  eq("Ctrl+0 也不切标签", hit(K({ key: "0", ctrlKey: true }), "tab-index", false), false);
+  eq("裸 = 不放大", hit(K({ key: "=" }), "zoom-in", false), false);
   eq("⌘⇧← 命中", hit(K({ key: "ArrowLeft", ctrlKey: true, shiftKey: true }), "focus-prev-pane", false), true);
   eq("⌘→（无 Shift）不命中", hit(K({ key: "ArrowRight", metaKey: true }), "focus-next-pane", true), false);
   // 裸方向键（终端的行编辑与历史命令）不得命中任何绑定，也不得命中"带 Shift 的同名键"绑定
@@ -141,6 +170,9 @@ const K = (over: Partial<KeyLike> = {}): KeyLike => ({
   eq("命名键不强制大写（Mac）", comboLabel("next-tab", true), "⌘Tab");
   eq("方向键用符号", comboLabel("focus-next-pane", false), "Ctrl+Shift+→");
   eq("方向键用符号（Mac）", comboLabel("focus-prev-pane", true), "⌘⇧←");
+  eq("缩放键帽（Mac）", comboLabel("zoom-in", true), "⌘=");
+  eq("缩放键帽（Win）", comboLabel("zoom-out", false), "Ctrl+-");
+  eq("还原键帽（Mac）", comboLabel("zoom-reset", true), "⌘0");
   eq("键帽拆分", comboParts(shortcut("split-vertical").combo, true), ["⌘", "⇧", "V"]);
   eq("键帽拆分（无修饰）", comboParts(shortcut("close-tab").combo, false), ["Ctrl", "W"]);
 }
