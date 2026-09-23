@@ -13,6 +13,18 @@ import {
 } from "../utils/hostkeys";
 import { comboLabel } from "../utils/shortcuts";
 import { FONT_SIZE_MAX, FONT_SIZE_MIN, FONT_SIZE_STEP } from "../utils/fontZoom";
+import {
+  CONNECTION_TIMEOUT_MAX,
+  CONNECTION_TIMEOUT_MIN,
+  KEEPALIVE_MAX,
+  KEEPALIVE_MIN,
+  OPACITY_MAX,
+  OPACITY_MIN,
+  PTY_BATCH_MAX,
+  PTY_BATCH_MIN,
+  SCROLLBACK_MAX,
+  SCROLLBACK_MIN,
+} from "../utils/settingsSanity";
 import { useState, useEffect } from "react";
 import {
   CopyOutlined,
@@ -132,8 +144,8 @@ export default function SettingsModal({ open, onClose }: Props) {
                 </Form.Item>
                 <Form.Item label="回滚行数">
                   <InputNumber
-                    min={1000}
-                    max={100000}
+                    min={SCROLLBACK_MIN}
+                    max={SCROLLBACK_MAX}
                     step={1000}
                     value={settings.scrollback}
                     onChange={(v) => v && updateSettings({ scrollback: v })}
@@ -164,8 +176,8 @@ export default function SettingsModal({ open, onClose }: Props) {
                 </Form.Item>
                 <Form.Item label="背景透明度" extra="0.5 为半透明，1.0 为不透明">
                   <Slider
-                    min={0.5}
-                    max={1.0}
+                    min={OPACITY_MIN}
+                    max={OPACITY_MAX}
                     step={0.05}
                     value={settings.opacity}
                     onChange={(v) => updateSettings({ opacity: v })}
@@ -252,8 +264,8 @@ export default function SettingsModal({ open, onClose }: Props) {
               <Form layout="vertical" style={{ marginTop: 4 }}>
                 <Form.Item label="Keep-Alive 间隔(秒)" extra="0 表示禁用，建议 60">
                   <InputNumber
-                    min={0}
-                    max={600}
+                    min={KEEPALIVE_MIN}
+                    max={KEEPALIVE_MAX}
                     step={10}
                     value={settings.keepalive_interval ?? 0}
                     onChange={(v) => updateSettings({ keepalive_interval: v === 0 ? null : v })}
@@ -261,8 +273,8 @@ export default function SettingsModal({ open, onClose }: Props) {
                 </Form.Item>
                 <Form.Item label="连接超时(秒)" extra="SSH 连接超时时间">
                   <InputNumber
-                    min={5}
-                    max={300}
+                    min={CONNECTION_TIMEOUT_MIN}
+                    max={CONNECTION_TIMEOUT_MAX}
                     value={settings.connection_timeout}
                     onChange={(v) => v && updateSettings({ connection_timeout: v })}
                   />
@@ -301,8 +313,8 @@ export default function SettingsModal({ open, onClose }: Props) {
                   extra="窗口内到达的多个数据块合并成一次 IPC，刷屏时明显降低渲染开销；交互延迟最多增加该值。0 表示关闭合并（回退开关）。新建连接后生效"
                 >
                   <InputNumber
-                    min={0}
-                    max={250}
+                    min={PTY_BATCH_MIN}
+                    max={PTY_BATCH_MAX}
                     step={4}
                     value={settings.pty_batch_window_ms ?? 16}
                     onChange={(v) => v !== null && updateSettings({ pty_batch_window_ms: v })}

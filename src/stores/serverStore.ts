@@ -20,6 +20,7 @@ import {
 } from "../services/commandGate";
 import { attemptKey, backoffDelay, nextReconnectPlan } from "../utils/reconnectPolicy";
 import { FONT_SIZE_DEFAULT } from "../utils/fontZoom";
+import { normalizeSettings } from "../utils/settingsSanity";
 
 /** 终端设置 */
 export interface TerminalSettings {
@@ -239,7 +240,8 @@ async function connectToServer(
   });
 }
 
-const defaultSettings: TerminalSettings = {
+/** 导出是给取值闸的测试用：字段清单以这份真值为准，别在测试里再抄一份 */
+export const defaultSettings: TerminalSettings = {
   font_size: FONT_SIZE_DEFAULT,
   font_family: "SF Mono, Monaco, Menlo, Courier New, monospace",
   theme: "dark",
@@ -291,8 +293,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       config = await invoke<PersistConfig>("get_config");
       set({
         servers: config.servers || [],
-        // 逐字段兜底：旧配置文件/导入的半成品不会让新开关变成 undefined
-        settings: { ...defaultSettings, ...(config.settings || {}) },
+        // 逐字段兜底：旧配置文件/导入的半成品不会让新开关变成 undefined，
+        // 读不懂的值也进不了 xterm（见 settingsSanity 文件头的实测后果）
+        settings: normalizeSettings(config.settings, defaultSettings),
         snippets: config.snippets || [],
         customGroups: config.custom_groups || [],
         loaded: true,
@@ -408,11 +411,13 @@ export const useServerStore = create<ServerStore>((set, get) => ({
 
   importConfig: async (path) => {
     const config = await invoke<PersistConfig>("import_config", { path });
+    // 导入件是外部输入：可能整份是 null，也可能只有当年那几个字段。
+    // 少了字段不能等于"该项为 undefined"，否则 xterm 会拿 undefined 当字号去量。
     set({
-      servers: config.servers || [],
-      settings: config.settings || defaultSettings,
-      snippets: config.snippets || [],
-      customGroups: config.custom_groups || [],
+      servers: config?.servers || [],
+      settings: normalizeSettings(config?.settings, defaultSettings),
+      snippets: config?.snippets || [],
+      customGroups: config?.custom_groups || [],
     });
   },
 
