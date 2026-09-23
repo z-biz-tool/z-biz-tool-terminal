@@ -16,13 +16,8 @@ import {
 } from "@ant-design/icons";
 import { useServerStore } from "../stores/serverStore";
 import { describeSnippetRun } from "../utils/snippetRun";
-import {
-  SESSION_GROUP_TITLE,
-  isCurrentTab,
-  sessionHint,
-  stateColorOf,
-  stateHint,
-} from "../utils/paletteSession";
+import { paletteSequence } from "../utils/paletteOrder";
+import { isCurrentTab, sessionHint, stateColorOf, stateHint } from "../utils/paletteSession";
 
 const { Text } = Typography;
 
@@ -260,13 +255,17 @@ export default function CommandPalette({
     onOpenLogs,
   ]);
 
-  const filtered = useMemo(() => {
-    const scored = items
+  /** 打分后的命中顺序（未分块） */
+  const scored = useMemo(() => {
+    const ranked = items
       .map((it) => ({ item: it, score: scoreItem(it, query) }))
       .filter((x) => x.score >= 0);
-    scored.sort((a, b) => a.score - b.score);
-    return scored.map((x) => x.item);
+    ranked.sort((a, b) => a.score - b.score);
+    return ranked.map((x) => x.item);
   }, [items, query]);
+
+  // 视觉与键盘共用的一条序列：分块只是为了插标题，不另起一套顺序
+  const { blocks, ordered: visible } = useMemo(() => paletteSequence(scored), [scored]);
 
   useEffect(() => {
     if (open) {
@@ -278,8 +277,8 @@ export default function CommandPalette({
   }, [open]);
 
   useEffect(() => {
-    if (activeIndex >= filtered.length) setActiveIndex(0);
-  }, [filtered, activeIndex]);
+    if (activeIndex >= visible.length) setActiveIndex(0);
+  }, [visible, activeIndex]);
 
   const runItem = useCallback(
     async (item: CommandItem) => {
@@ -293,13 +292,13 @@ export default function CommandPalette({
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActiveIndex((i) => Math.min(filtered.length - 1, i + 1));
+      setActiveIndex((i) => Math.min(visible.length - 1, i + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActiveIndex((i) => Math.max(0, i - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const item = filtered[activeIndex];
+      const item = visible[activeIndex];
       if (item) runItem(item);
     } else if (e.key === "Escape") {
       e.preventDefault();
@@ -307,33 +306,31 @@ export default function CommandPalette({
     }
   };
 
-  const grouped = useMemo(() => {
-    const groups: Record<string, CommandItem[]> = {
-      [SESSION_GROUP_TITLE]: [],
-      服务器: [],
-      代码片段: [],
-      操作: [],
-    };
-    for (const item of filtered) {
-      if (item.type === "server") {
-        (groups[item.tabId != null ? SESSION_GROUP_TITLE : "服务器"] as CommandItem[]).push(item);
-      } else if (item.type === "snippet") {
-        groups["代码片段"].push(item);
-      } else {
-        groups["操作"].push(item);
-      }
-    }
-    return groups;
-  }, [filtered]);
+  /** 高亮序号必须来自键盘走的那条序列：id → 在 `visible` 里的位置 */
+  const indexById = useMemo(() => new Map(visible.map((it, i) => [it.id, i] as const)), [visible]);
+
+  /** ↑↓ 走到哪一行，那一行就得在窗口里：靠滚动容器把高亮行带进视野 */
+  // antd 把 List.Item 的 ref 标成 HTMLDivElement，运行时给的却是 <li>，所以按共同父类型存
+  const activeRowRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    activeRowRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, query]);
 
   const renderItem = (item: CommandItem) => {
-    const idx = filtered.indexOf(item);
+    const idx = indexById.get(item.id) ?? -1;
     const isActive = idx === activeIndex;
     const current = isCurrentTab(item, activeTabId);
     const [stateLabel, showState] = stateHint(item.tabState);
     return (
       <List.Item
         key={item.id}
+        ref={
+          isActive
+            ? (node) => {
+                activeRowRef.current = node;
+              }
+            : undefined
+        }
         onMouseEnter={() => setActiveIndex(idx)}
         onClick={() => runItem(item)}
         style={{
@@ -397,28 +394,24 @@ export default function CommandPalette({
         />
       </div>
       <div style={{ flex: 1, overflow: "auto", padding: "8px 12px" }}>
-        {filtered.length === 0 ? (
+        {visible.length === 0 ? (
           <Empty
             description="无匹配结果"
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             style={{ marginTop: 40 }}
           />
         ) : (
-          (Object.keys(grouped) as Array<keyof typeof grouped>).map((groupName) => {
-            const items = grouped[groupName];
-            if (items.length === 0) return null;
-            return (
-              <div key={groupName} style={{ marginBottom: 8 }}>
-                <Text
-                  type="secondary"
-                  style={{ fontSize: 11, padding: "4px 12px", textTransform: "uppercase" }}
-                >
-                  {groupName} · {items.length}
-                </Text>
-                <List size="small" dataSource={items} renderItem={renderItem} />
-              </div>
-            );
-          })
+          blocks.map((group) => (
+            <div key={group.title} style={{ marginBottom: 8 }}>
+              <Text
+                type="secondary"
+                style={{ fontSize: 11, padding: "4px 12px", textTransform: "uppercase" }}
+              >
+                {group.title} · {group.items.length}
+              </Text>
+              <List size="small" dataSource={group.items} renderItem={renderItem} />
+            </div>
+          ))
         )}
       </div>
       <div

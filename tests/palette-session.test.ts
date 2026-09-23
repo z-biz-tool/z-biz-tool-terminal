@@ -121,7 +121,12 @@ const src = (p: string) => readFileSync(p, "utf8");
   ok("说明文字来自 sessionHint", /description: sessionHint\(\{ tabId: tab\.id \}, activeTabId\)/.test(palette));
   ok("会话条目带 tabId", /tabId: tab\.id,/.test(palette));
   ok("会话条目带 tabState", /tabState: tab\.state,/.test(palette));
-  ok("分组标题来自 SESSION_GROUP_TITLE", /\[SESSION_GROUP_TITLE\]: \[\]/.test(palette));
+  // 属性从"组件里那份写死的类别清单"挪成"分组只有一个真源"：清单本身已被 paletteOrder 收走，
+  // 组件再维护一份就会重新出现"键盘一套序、屏幕一套序"
+  ok("分组交给 paletteOrder 的单一真源", /paletteSequence\(scored\)/.test(palette));
+  eq("组件里没有第二份分组清单", /Record<string, CommandItem\[\]>|groups\[/.test(palette), false);
+  ok("组标题渲染的是判定层给出的 title", /\{group\.title\} · \{group\.items\.length\}/.test(palette));
+  ok("会话组标题来自 SESSION_GROUP_TITLE（判定层，不是组件手写）", /SESSION_GROUP_TITLE/.test(src("src/utils/paletteOrder.ts")));
   eq(
     "组件里不再硬写「已连接会话」",
     /已连接会话/.test(palette.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "")),
