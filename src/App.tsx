@@ -1028,7 +1028,7 @@ function AppInner() {
                     flexShrink: 0,
                   }}
                 >
-                  <SnippetsPanel serverId={activeTabId} />
+                  <SnippetsPanel />
                 </div>
               </>
             )}

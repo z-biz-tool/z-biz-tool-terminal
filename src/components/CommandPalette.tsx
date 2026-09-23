@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { Modal, Input, List, Tag, Space, Typography, Empty } from "antd";
+import { Modal, Input, List, Tag, Space, Typography, Empty, message } from "antd";
 import {
   DesktopOutlined,
   FolderOpenOutlined,
@@ -15,6 +15,7 @@ import {
   SearchOutlined,
 } from "@ant-design/icons";
 import { useServerStore } from "../stores/serverStore";
+import { describeSnippetRun } from "../utils/snippetRun";
 
 const { Text } = Typography;
 
@@ -135,10 +136,11 @@ export default function CommandPalette({
           Boolean,
         ),
         weight: 20,
-        action: () => {
-          // 优先发送到当前活动 tab，否则发送到第一个已连接的 tab
-          const target = activeTabId || tabs[0]?.serverId;
-          if (target) executeSnippet(target, snip.command);
+        action: async () => {
+          // 目标会话由 store 按"当前标签的当前面板"决定：这里以前传的是 activeTabId
+          // 却当作 serverId 用，于是命令从没发出去过，面板却已经关掉当作成功
+          const notice = describeSnippetRun(await executeSnippet(snip.command), snip.name);
+          message[notice.type](notice.text);
         },
       });
     }

@@ -21,13 +21,10 @@ import {
   CloseOutlined,
 } from "@ant-design/icons";
 import { useServerStore } from "../stores/serverStore";
+import { describeSnippetRun } from "../utils/snippetRun";
 import type { Snippet } from "../types";
 
-interface SnippetsPanelProps {
-  serverId: string;
-}
-
-export default function SnippetsPanel({ serverId }: SnippetsPanelProps) {
+export default function SnippetsPanel() {
   const { snippets, addSnippet, updateSnippet, removeSnippet, executeSnippet, toggleSnippets } =
     useServerStore();
   const [searchText, setSearchText] = useState("");
@@ -60,9 +57,11 @@ export default function SnippetsPanel({ serverId }: SnippetsPanelProps) {
     return { groups, ungrouped };
   }, [filteredSnippets]);
 
-  const handleRun = (snippet: Snippet) => {
-    executeSnippet(serverId, snippet.command);
-    message.success(`已执行: ${snippet.name}`);
+  const handleRun = async (snippet: Snippet) => {
+    const res = await executeSnippet(snippet.command);
+    // 只有真写进 PTY 才报成功；网关取消/没有会话都必须如实说"没发出去"
+    const notice = describeSnippetRun(res, snippet.name);
+    message[notice.type](notice.text);
   };
 
   const handleAdd = () => {

@@ -13,14 +13,26 @@ import type {
 } from "../types";
 // 与 commandGate 互相引用是安全的：两边都只在函数调用时读取对方，模块顶层无副作用
 import {
-  approveCommand,
   decideCommand,
   serverTargets,
+  sessionTargets,
   type CommandSource,
 } from "../services/commandGate";
 import { attemptKey, backoffDelay, nextReconnectPlan } from "../utils/reconnectPolicy";
 import { FONT_SIZE_DEFAULT } from "../utils/fontZoom";
 import { normalizeSettings } from "../utils/settingsSanity";
+import { pickActiveSession } from "../utils/session";
+
+/**
+ * 一次 Snippet 下发的真实结果。调用方**必须**按这个结论给反馈 —— 旧写法在命令根本没
+ * 写进 PTY 时也弹「已执行」，用户于是以为那条命令在那台机器上跑过了。
+ * - `no-session`：当前标签/面板没有活着的会话
+ * - `cancelled`：危险命令网关被用户拒掉（P-2），命令未发出
+ * - `failed`：网关放行但 `ssh_pty_write` 报错（会话刚好断了等）
+ */
+export type SnippetRun =
+  | { ok: true; sessionId: string }
+  | { ok: false; reason: "no-session" | "cancelled" | "failed"; error?: string };
 
 /** 终端设置 */
 export interface TerminalSettings {
@@ -148,7 +160,12 @@ interface ServerStore {
   addSnippet: (snippet: Omit<Snippet, "id">) => void;
   updateSnippet: (id: string, snippet: Partial<Snippet>) => void;
   removeSnippet: (id: string) => void;
-  executeSnippet: (serverId: string, command: string) => Promise<void>;
+  /**
+   * 把一条 Snippet 发到"当前该发的会话"（活跃标签的活跃面板），并如实返回结果。
+   * 不接受任何 serverId 参数：调用方手上通常是 tab id，两类 id 混为一谈正是这接口
+   * 原先的缺陷形状（见 §7.19）。
+   */
+  executeSnippet: (command: string) => Promise<SnippetRun>;
   updateSettings: (settings: Partial<TerminalSettings>) => void;
   /** 分屏: 在指定 tab 中添加新面板(可指定连接其他服务器) */
   splitTab: (tabId: string, direction: SplitDirection, targetServerId?: string) => Promise<void>;
@@ -883,19 +900,21 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     get().persistSnippets();
   },
 
-  executeSnippet: async (serverId, command) => {
-    const tab =
-      get().tabs.find((t) => t.serverId === serverId && t.id === get().activeTabId) ||
-      get().tabs.find((t) => t.serverId === serverId);
-    const activePane = tab?.panes.find((p) => p.id === get().activePaneId);
-    const sessionId = activePane?.sessionId || tab?.sessionId;
-    if (!sessionId) return;
+  executeSnippet: async (command) => {
+    // 目标会话只能有一个真源：当前标签的当前面板（同 §7.14 的 pickActiveSession）。
+    // 原来这里拿调用方传进来的 serverId 去比 t.serverId，而两个调用口交的都是 tab id，
+    // 于是永远匹配不到 → 静默 return，界面上却已经弹了「已执行」。
+    const sessionId = pickActiveSession(get());
+    if (!sessionId) return { ok: false, reason: "no-session" };
     // Snippet 同样是命令下发口，必须过同一道闸门（P-2）
-    const targets = serverTargets([activePane?.serverId ?? tab?.serverId ?? serverId]);
-    if (!(await approveCommand(command, targets, "snippet"))) return;
-    invoke("ssh_pty_write", { sessionId, data: command + "\n" }).catch((e) => {
-      console.error("执行快捷命令失败:", e);
-    });
+    const { approved } = await decideCommand(command, sessionTargets([sessionId]), "snippet");
+    if (!approved) return { ok: false, reason: "cancelled" };
+    try {
+      await invoke("ssh_pty_write", { sessionId, data: command + "\n" });
+    } catch (e) {
+      return { ok: false, reason: "failed", error: String((e as Error)?.message || e) };
+    }
+    return { ok: true, sessionId };
   },
 
   updateSettings: (updates) => {
