@@ -1417,8 +1417,12 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
     dragEl.textContent = entry.is_dir ? `📁 ${entry.name}` : `📄 ${entry.name}`;
     document.body.appendChild(dragEl);
     e.dataTransfer.setDragImage(dragEl, 0, 0);
-    // Clean up after a tick
-    requestAnimationFrame(() => document.body.removeChild(dragEl));
+    // 立刻回收：setDragImage 已经把节点交给浏览器用掉一次就够了。
+    // 原来挂在 requestAnimationFrame 上 —— 后台/隐藏标签页里 rAF 会停摆（本仓实测过），
+    // 每拖一次就留一个游离节点在 body 里。
+    window.setTimeout(() => {
+      if (dragEl.parentNode) dragEl.parentNode.removeChild(dragEl);
+    }, 0);
   }, []);
 
   const handleRowDragEnd = useCallback(() => {

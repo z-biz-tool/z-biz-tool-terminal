@@ -170,6 +170,12 @@ function AppInner() {
   const [snippetsHeight, setSnippetsHeight] = useState(200);
   // 分屏面板尺寸比例(0~1, 第一个面板占比)
   const [paneRatios, setPaneRatios] = useState<Record<string, number>>({});
+  /**
+   * 鼠标正停在哪根分屏条上。旧写法是在 onMouseEnter 里直接改节点的 inline style，
+   * React 之后不会再写回同一个值（属性没变就跳过），高亮可能留在原地；
+   * 而且它用的是 e.target —— 分隔条一旦有了子节点，被改样式的就不是它本身。
+   */
+  const [hoverSplitter, setHoverSplitter] = useState<string | null>(null);
   const draggingRef = useRef(false);
 
   useEffect(() => {
@@ -997,19 +1003,17 @@ function AppInner() {
                                   style={{
                                     width: direction === "horizontal" ? 4 : "auto",
                                     height: direction === "horizontal" ? "auto" : 4,
-                                    background: token.colorBorderSecondary,
+                                    background:
+                                      hoverSplitter === `${tab.id}:${pane.id}`
+                                        ? token.colorPrimary
+                                        : token.colorBorderSecondary,
                                     cursor:
                                       direction === "horizontal" ? "col-resize" : "row-resize",
                                     flexShrink: 0,
                                     transition: "background 0.15s",
                                   }}
-                                  onMouseEnter={(e) => {
-                                    (e.target as HTMLElement).style.background = token.colorPrimary;
-                                  }}
-                                  onMouseLeave={(e) => {
-                                    (e.target as HTMLElement).style.background =
-                                      token.colorBorderSecondary;
-                                  }}
+                                  onMouseEnter={() => setHoverSplitter(`${tab.id}:${pane.id}`)}
+                                  onMouseLeave={() => setHoverSplitter(null)}
                                 />
                               )}
                               <div

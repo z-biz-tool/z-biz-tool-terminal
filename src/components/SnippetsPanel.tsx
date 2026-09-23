@@ -28,6 +28,8 @@ export default function SnippetsPanel() {
   const { snippets, addSnippet, updateSnippet, removeSnippet, executeSnippet, toggleSnippets } =
     useServerStore();
   const [searchText, setSearchText] = useState("");
+  // 悬停色由状态驱动：命令式改 inline style 之后，列表一过滤/重排，旧那行的背景会留在新行上
+  const [hoverSnippet, setHoverSnippet] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
   const [form] = Form.useForm();
@@ -115,13 +117,11 @@ export default function SnippetsPanel() {
         borderRadius: 4,
         cursor: "pointer",
         gap: 8,
+        // 悬停色改由状态驱动：列表一过滤/重排，旧那行的 inline 背景会留在新行上
+        background: hoverSnippet === snippet.id ? "var(--ant-color-bg-text-hover)" : "transparent",
       }}
-      onMouseEnter={(e) => {
-        (e.currentTarget as HTMLDivElement).style.background = "var(--ant-color-bg-text-hover)";
-      }}
-      onMouseLeave={(e) => {
-        (e.currentTarget as HTMLDivElement).style.background = "transparent";
-      }}
+      onMouseEnter={() => setHoverSnippet(snippet.id)}
+      onMouseLeave={() => setHoverSnippet(null)}
     >
       <div
         style={{ flex: 1, minWidth: 0, cursor: "pointer" }}

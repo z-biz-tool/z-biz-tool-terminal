@@ -87,6 +87,7 @@ export default function ServerList() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [initialGroup, setInitialGroup] = useState<string>("");
   const [searchText, setSearchText] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
   const [form] = Form.useForm();
   const [groupForm] = Form.useForm();
   const [renameForm] = Form.useForm();
@@ -766,18 +767,16 @@ export default function ServerList() {
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
           allowClear
-          style={{ 
+          style={{
             borderRadius: 10,
-            transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+            // 焦点光晕仍要（antd 的 :focus-visible 在鼠标点进来时不触发），但改成状态驱动：
+            // 原来在 onFocus/onBlur 里直接改节点 style，React 之后不会写回同一个值
+            transition: "box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s",
+            boxShadow: searchFocused ? "0 2px 8px rgba(102,126,234,0.15)" : "none",
+            borderColor: searchFocused ? "rgba(102,126,234,0.3)" : undefined,
           }}
-          onFocus={(e) => {
-            e.currentTarget.style.boxShadow = '0 2px 8px rgba(102,126,234,0.15)';
-            e.currentTarget.style.border = '1px solid rgba(102,126,234,0.3)';
-          }}
-          onBlur={(e) => {
-            e.currentTarget.style.boxShadow = 'none';
-            e.currentTarget.style.border = '';
-          }}
+          onFocus={() => setSearchFocused(true)}
+          onBlur={() => setSearchFocused(false)}
         />
       </div>
 

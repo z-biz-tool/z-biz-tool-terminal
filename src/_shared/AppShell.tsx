@@ -44,6 +44,9 @@ export function AppShell({
     return initialWidth;
   });
   const [dragging, setDragging] = useState(false);
+  // 拖拽条的 hover 高亮也走状态：inline style 被命令式改过之后，React 的属性 diff
+  // 认为 background 没变就不会再写回，高亮会留在原地
+  const [hoverHandle, setHoverHandle] = useState(false);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   // 持久化宽度
@@ -151,22 +154,18 @@ export function AppShell({
           style={{
             width: 4,
             cursor: "col-resize",
-            background: dragging ? token.colorPrimary : "transparent",
+            background: dragging
+              ? token.colorPrimary
+              : hoverHandle
+                ? token.colorBorderSecondary
+                : "transparent",
             flexShrink: 0,
             transition: dragging ? "none" : "background 0.15s ease",
             position: "relative",
             zIndex: 1,
           }}
-          onMouseEnter={(e) => {
-            if (!dragging) {
-              (e.currentTarget as HTMLDivElement).style.background = token.colorBorderSecondary;
-            }
-          }}
-          onMouseLeave={(e) => {
-            if (!dragging) {
-              (e.currentTarget as HTMLDivElement).style.background = "transparent";
-            }
-          }}
+          onMouseEnter={() => setHoverHandle(true)}
+          onMouseLeave={() => setHoverHandle(false)}
         />
         <Content style={{ overflow: "auto", background: token.colorBgLayout }}>{children}</Content>
       </Layout>
