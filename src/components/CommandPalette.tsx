@@ -78,6 +78,12 @@ export default function CommandPalette({
     useServerStore();
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  /**
+   * 鼠标悬停只影响样式。曾经它是 `onMouseEnter={() => setActiveIndex(idx)}`，
+   * 实测：键盘指向第 1 行、鼠标扫过第 2 行，回车执行的是**第 2 行**（SFTP 面板被打开）
+   * —— 鼠标路过就改了要执行的动作，这在会跑命令的面板里是误操作面。
+   */
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const inputRef = useRef<any>(null);
 
   const items: CommandItem[] = useMemo(() => {
@@ -279,6 +285,8 @@ export default function CommandPalette({
 
   useEffect(() => {
     if (activeIndex >= visible.length) setActiveIndex(0);
+    // 结果列表一变，鼠标停在"第 3 行"这件事就没有意义了（那一行已经换成了别的命令）
+    setHoverIndex(null);
   }, [visible, activeIndex]);
 
   const runItem = useCallback(
@@ -319,12 +327,14 @@ export default function CommandPalette({
   const renderItem = (item: CommandItem) => {
     const idx = indexById.get(item.id) ?? -1;
     const isActive = idx === activeIndex;
+    const isHovered = hoverIndex === idx && !isActive;
     const current = isCurrentTab(item, activeTabId);
     const [stateLabel, showState] = stateHint(item.tabState);
     return (
       <ItemRow
         key={item.id}
         active={isActive}
+        hovered={isHovered}
         rowRef={
           isActive
             ? (node) => {
@@ -332,7 +342,8 @@ export default function CommandPalette({
               }
             : undefined
         }
-        onMouseEnter={() => setActiveIndex(idx)}
+        onMouseEnter={() => setHoverIndex(idx)}
+        onMouseLeave={() => setHoverIndex(null)}
         onClick={() => runItem(item)}
         style={{ cursor: "pointer", margin: "2px 0" }}
         avatar={item.icon}
