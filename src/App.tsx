@@ -75,7 +75,6 @@ function AppInner() {
     servers,
     sftpVisible,
     toggleSftp,
-    listSftp,
     snippetsVisible,
     toggleSnippets,
     loadConfig,
@@ -183,13 +182,11 @@ function AppInner() {
       // Cmd/Ctrl + Shift + E - 切换 SFTP
       if (hit(e, "toggle-sftp", mac)) {
         e.preventDefault();
-        const { sftpVisible: sv, toggleSftp: ts, activeTabId: aId, listSftp: ls } = useServerStore.getState();
-        if (!sv && aId) {
-          ts(true);
-          ls(aId, "/").catch(() => {});
-        } else {
-          ts(false);
-        }
+        const { sftpVisible: sv, toggleSftp: ts, activeTabId: aId } = useServerStore.getState();
+        // 只负责开关：列目录归面板自己做（它才知道自己挂的是哪个会话）。
+        // 这里以前顺手 `ls(aId, "/")` —— 把 tab id 当 serverId 传，异常又被 catch(() => {}) 吞掉
+        if (!sv && aId) ts(true);
+        else ts(false);
         return;
       }
 
@@ -487,12 +484,11 @@ function AppInner() {
         (activeTab?.state === "connecting" ? "连接中" : activeTab?.state === "error" ? "错误" : "未连接");
 
   const handleSftpToggle = () => {
-    if (!sftpVisible && activeTabId) {
-      toggleSftp(true);
-      listSftp(activeTabId, "/").catch(() => {});
-    } else {
-      toggleSftp(false);
-    }
+    // 列目录交给面板：它按自己的 tabId 解析会话，失败会自己上屏。
+    // 这里那句 `listSftp(activeTabId, "/")` 传的也是 tab id（参数却叫 serverId），
+    // 而且 `.catch(() => {})` 把"永远列不出来"这件事一起吞掉了。
+    if (!sftpVisible && activeTabId) toggleSftp(true);
+    else toggleSftp(false);
   };
 
   const getTabContextMenu = (tabId: string, serverId: string, tabState: string): MenuProps["items"] => {
@@ -522,9 +518,9 @@ function AppInner() {
         icon: <FolderOpenOutlined />,
         label: "SFTP",
         onClick: () => {
-          if (!sftpVisible) toggleSftp(true);
-          listSftp(serverId, "/").catch(() => {});
+          // 先切到这一页，再由面板按新 activeTabId 去列自己的会话
           setActiveTab(tabId);
+          if (!sftpVisible) toggleSftp(true);
         },
       },
       {
@@ -1030,7 +1026,7 @@ function AppInner() {
                     flexShrink: 0,
                   }}
                 >
-                  <SftpPanel serverId={activeTabId} />
+                  <SftpPanel tabId={activeTabId} />
                 </div>
               </>
             )}

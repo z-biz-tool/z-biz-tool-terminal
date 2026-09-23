@@ -122,6 +122,14 @@ interface ServerStore {
   activePaneId: string | null;
   sftpEntries: SftpEntry[];
   sftpPath: string;
+  /**
+   * `sftpEntries` / `sftpPath` 属于哪个会话。列目录的结果和会话必须成对记：只存"最近一次列表"
+   * 而不存它是谁的，切标签页时就可能在旧会话的文件名上按下新会话的 sessionId。
+   * null = 还没成功列过。
+   */
+  sftpSessionId: string | null;
+  /** 每个会话各自浏览到哪一级(运行时记忆，不落盘)：切标签页不把人甩回 / */
+  sftpPathBySession: Record<string, string>;
   sftpVisible: boolean;
   snippets: Snippet[];
   snippetsVisible: boolean;
@@ -176,7 +184,7 @@ interface ServerStore {
   /** 在当前活动 tab 上执行命令（走 ssh_execute，结论会进后端审计） */
   executeCommand: (serverId: string, command: string, source?: CommandSource) => Promise<string>;
 
-  listSftp: (serverId: string, path: string) => Promise<void>;
+  listSftp: (sessionId: string, path: string) => Promise<void>;
   toggleSftp: (visible?: boolean) => void;
   toggleSnippets: (visible?: boolean) => void;
   addSnippet: (snippet: Omit<Snippet, "id">) => void;
@@ -353,6 +361,8 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   activePaneId: null,
   sftpEntries: [],
   sftpPath: "/",
+  sftpSessionId: null,
+  sftpPathBySession: {},
   sftpVisible: false,
   snippets: [],
   snippetsVisible: false,
@@ -881,8 +891,12 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     // 清理该 tab 相关 session 的采集信息
     set((state) => {
       const remaining = { ...state.serverInfos };
+      const remainingPaths = { ...state.sftpPathBySession };
       for (const pane of tab.panes) {
-        if (pane.sessionId) delete remaining[pane.sessionId];
+        if (pane.sessionId) {
+          delete remaining[pane.sessionId];
+          delete remainingPaths[pane.sessionId];
+        }
       }
       const remainingTabs = state.tabs.filter((t) => t.id !== tabId);
       const wasActive = state.activeTabId === tabId;
@@ -897,6 +911,12 @@ export const useServerStore = create<ServerStore>((set, get) => ({
             ? remainingTabs[0]?.panes[0]?.id || null
             : state.activePaneId,
         serverInfos: remaining,
+        sftpPathBySession: remainingPaths,
+        // 当前这份列表的会话刚刚断掉：留着它，面板就有一个"指向已消失会话"的行列表可画
+        sftpSessionId:
+          state.sftpSessionId && tab.panes.some((p) => p.sessionId === state.sftpSessionId)
+            ? null
+            : state.sftpSessionId,
       };
     });
     get().persistTabs();
@@ -959,19 +979,23 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     return result.output;
   },
 
-  listSftp: async (serverId, path) => {
-    const tab =
-      get().tabs.find((t) => t.serverId === serverId && t.id === get().activeTabId) ||
-      get().tabs.find((t) => t.serverId === serverId);
-    const activePane = tab?.panes.find((p) => p.id === get().activePaneId);
-    const sessionId = activePane?.sessionId || tab?.sessionId;
+  listSftp: async (sessionId, path) => {
+    // 身份由调用方给出（`pickTabSession` / `pickActiveSession`），这里不再自己"按 serverId 猜标签页"：
+    // 同一份查找被复制过三次、两种语义，结果是工具栏与 ⌘⇧E 两条路永远列不出目录。
     if (!sessionId) throw new Error("会话未连接");
     const result = await invoke<{ success: boolean; entries: SftpEntry[]; error?: string }>(
       "sftp_list",
       { sessionId, path }
     );
     if (result.success) {
-      set({ sftpEntries: result.entries, sftpPath: path });
+      // 列表和它的会话一起写：只写行不写"这是谁的行"，面板就没法判断手上的文件名能不能
+      // 配当前 sessionId 用（切标签页时那一次点击会是跨会话写入）。
+      set((state) => ({
+        sftpEntries: result.entries,
+        sftpPath: path,
+        sftpSessionId: sessionId,
+        sftpPathBySession: { ...state.sftpPathBySession, [sessionId]: path },
+      }));
     } else {
       throw new Error(result.error || "获取文件列表失败");
     }

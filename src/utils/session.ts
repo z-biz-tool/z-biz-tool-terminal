@@ -14,7 +14,21 @@ export function pickActiveSession(state: {
   activeTabId: string | null;
   activePaneId: string | null;
 }): string | undefined {
-  const tab = state.tabs.find((t) => t.id === state.activeTabId);
+  return pickTabSession(state, state.activeTabId);
+}
+
+/**
+ * 同上，但按**指定标签页**取会话（该标签页的活跃面板，回落主面板的 `sessionId`）。
+ *
+ * 给"只渲染某一个标签页"的面板用（SFTP 面板就是）。取不到就是 `undefined`，
+ * 调用方要如实报错 —— 这里绝不回落到"随便哪个同服务器的标签页"，因为多台主机下
+ * 那等于把 A 的文件列表画在 B 的面板上、把 A 的上传发去 B。
+ */
+export function pickTabSession(
+  state: { tabs: TerminalTab[]; activePaneId: string | null },
+  tabId: string | null | undefined
+): string | undefined {
+  const tab = state.tabs.find((t) => t.id === tabId);
   if (!tab) return undefined;
   const pane = tab.panes.find((p) => p.id === state.activePaneId);
   return pane?.sessionId || tab.sessionId;

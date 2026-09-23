@@ -55,9 +55,17 @@ import {
   type TransferKind,
 } from "../utils/sftpTransfer";
 import { editLocalPath } from "../utils/sftpEditPath";
+import { listingCandidates } from "../utils/sftpListing";
+import { pickTabSession } from "../utils/session";
 
 interface SftpPanelProps {
-  serverId: string;
+  /**
+   * 面板归属的**标签页 id**。旧名叫 `serverId`，但每个调用点传的东西并不一致：工具栏和
+   * ⌘⇧E 传的是 tab.id，只有标签页右键菜单传的是真 serverId —— 于是同一份"按 serverId 找标签页"
+   * 的查找在两条路上传入恒不匹配的值，面板既列不出目录也做不了任何操作。改叫 tabId 并统一由
+   * `pickTabSession` 解析身份，这个参数才只剩一种语义。
+   */
+  tabId: string;
 }
 
 /** 传输结束后进度条停留时长；摘掉时按 id 核对，晚到的定时器不得抹掉下一条传输 */
@@ -120,6 +128,11 @@ function TransferBanner({ transfer }: { transfer: Transfer }) {
 }
 
 interface EditingFile {
+  /**
+   * 这份副本属于哪个会话。远端路径不是全局唯一的：两台主机上都可以有 `/etc/hosts`，
+   * 只按 `remotePath` 认，A 的保存会把内容推到 B、并把两条编辑记录一起标成"已上传"。
+   */
+  sessionId: string;
   remotePath: string;
   localPath: string;
   filename: string;
@@ -130,11 +143,50 @@ interface EditingFile {
 type SortField = "name" | "size" | "modified" | "permissions";
 type SortOrder = "asc" | "desc";
 
-export default function SftpPanel({ serverId }: SftpPanelProps) {
+/** 列表不属于当前会话时用的常量：每次渲染新建 `[]` 会让下游 useMemo/useCallback 全部过期 */
+const NO_ENTRIES: SftpEntry[] = [];
+
+/** 远端文件所在目录：与拼 remotePath 时同一套规则（根目录不重复斜杠） */
+function dirnameOf(remotePath: string): string {
+  const at = remotePath.lastIndexOf("/");
+  return at <= 0 ? "/" : remotePath.slice(0, at);
+}
+
+/**
+ * 该会话是否还挂在某个标签页/面板上。编辑监听器用它判断"我这份内容还能不能回传"——
+ * 不能按"面板当前有没有会话"判断：副本属于开它时的那台主机，跟人后来切到哪没关系。
+ */
+function isSessionAlive(sessionId: string): boolean {
+  const { tabs } = useServerStore.getState();
+  return tabs.some(
+    (t) => t.sessionId === sessionId || t.panes.some((p) => p.sessionId === sessionId)
+  );
+}
+
+export default function SftpPanel({ tabId }: SftpPanelProps) {
   const { token } = theme.useToken();
-  const { sftpEntries, sftpPath, listSftp, toggleSftp } = useServerStore();
+  const {
+    sftpEntries: listedEntries,
+    sftpPath: listedPath,
+    sftpSessionId,
+    sftpPathBySession,
+    listSftp,
+    toggleSftp,
+  } = useServerStore();
+
+  // 身份只有一个来源：本标签页的活跃面板，没有则回落该标签页主面板的会话（`pickTabSession`）。
+  const activeSessionId = pickTabSession(useServerStore.getState(), tabId);
+  // 全局只有一份列表，所以必须连"它属于哪个会话"一起读：归属对不上就当作还没列过。
+  // 否则切标签页的一瞬间，旧会话的文件名会配上新会话的 sessionId —— 下载、删除、编辑回传
+  // 全变成跨会话写入（P-3），而屏幕上根本看不出换了会话。
+  const listingMatches = !!activeSessionId && sftpSessionId === activeSessionId;
+  const sftpEntries = listingMatches ? listedEntries : NO_ENTRIES;
+  const sftpPath = listingMatches ? listedPath : "/";
+
   const [pathInput, setPathInput] = useState(sftpPath);
   const [loading, setLoading] = useState(false);
+  // 上一次列目录为什么没成：列表空着的原因必须上屏，不能只闪过一条 toast
+  const [listError, setListError] = useState<string | null>(null);
   const [selectedEntries, setSelectedEntries] = useState<Set<string>>(new Set());
   const [lastClickedName, setLastClickedName] = useState<string | null>(null);
   const [focusedIndex, setFocusedIndex] = useState(-1);
@@ -169,25 +221,36 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
 
   useEffect(() => {
     setPathInput(sftpPath);
-  }, [sftpPath]);
+  }, [sftpPath, activeSessionId]);
 
   // Clear selection when directory changes
+  // 会话换了也要清：两个会话可以停在同一个 `/`，只按 `sftpPath` 判断就选不中"换了主机"这件事，
+  // 上一台勾的名字会跟着面板一起留在选中集合里。
   useEffect(() => {
     setSelectedEntries(new Set());
     setLastClickedName(null);
     setFocusedIndex(-1);
-  }, [sftpPath]);
+    setListError(null);
+  }, [sftpPath, activeSessionId]);
 
-  const getSessionId = useCallback(() => {
-    const state = useServerStore.getState();
-    const tab = state.tabs.find((t) => t.serverId === serverId);
-    const activePane = tab?.panes.find((p) => p.id === state.activePaneId);
-    return activePane?.sessionId || tab?.sessionId;
-  }, [serverId]);
+  // 动作发生那一刻再取一次身份：渲染到点击之间人可能已经切了标签页/面板，
+  // 用渲染期的 `activeSessionId` 会把上一条操作发到一个已经不显示的会话上。
+  const getSessionId = useCallback(
+    () => pickTabSession(useServerStore.getState(), tabId),
+    [tabId]
+  );
 
-  // 本面板当前对应的会话：进度订阅按它分发（P-3 会话隔离），重连换了 id 会自动改挂。
-  const activeSessionId = getSessionId();
   const nextTransferId = useRef(createTransferIds()).current;
+
+  // 编辑条目属于哪台主机：副本列表跨标签页存活，切走后条上的文件名若不带主机名，
+  // 人会把"另一台会话的编辑中"当成眼前这一台的。
+  const hostOf = useCallback((sessionId: string) => {
+    const { tabs, servers } = useServerStore.getState();
+    const tab = tabs.find(
+      (t) => t.sessionId === sessionId || t.panes.some((p) => p.sessionId === sessionId)
+    );
+    return tab ? servers.find((s) => s.id === tab.serverId)?.name : undefined;
+  }, []);
 
   useEffect(() => {
     if (!activeSessionId) return;
@@ -269,17 +332,45 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
 
   const navigateTo = useCallback(
     async (path: string) => {
+      // 取不到会话就如实说"会话未连接"：旧写法把身份传错、抛出来的异常被调用方 `.catch(() => {})`
+      // 吞掉，人只看到列表永远是空的。
+      const sessionId = getSessionId();
+      if (!sessionId) {
+        setPathInput(sftpPath);
+        message.error("会话未连接，无法打开 SFTP 文件浏览器");
+        return false;
+      }
       setLoading(true);
       try {
-        await listSftp(serverId, path);
+        await listSftp(sessionId, path);
+        setListError(null);
+        return true;
       } catch (e) {
-        message.error(`获取文件列表失败: ${String(e)}`);
+        // 路径没列成，输入框不能停在列不上去的那一级（否则显示的是没生效的地址）
+        setPathInput(sftpPath);
+        const reason = String(e);
+        setListError(reason);
+        message.error(`获取文件列表失败: ${reason}`);
+        return false;
       } finally {
         setLoading(false);
       }
     },
-    [serverId, listSftp]
+    [getSessionId, listSftp, sftpPath]
   );
+
+  // 打开面板/切标签页时自己把列表对齐到本会话：旧实现从不主动列目录，全靠调用方在别处
+  // 顺手 `listSftp`，而那些调用传的是错的 id —— 面板于是永远空着。
+  // 每个会话回到自己上次浏览的那一级（`sftpPathBySession`）；那一级已经被删掉时退回根，
+  // 不然一次失败提示闪过之后面板就只剩空白，人不知道还能不能用。
+  useEffect(() => {
+    if (!activeSessionId || listingMatches) return;
+    void (async () => {
+      for (const p of listingCandidates(sftpPathBySession[activeSessionId])) {
+        if (await navigateTo(p)) break;
+      }
+    })();
+  }, [activeSessionId, listingMatches, navigateTo, sftpPathBySession]);
 
   const handleEntryClick = useCallback(
     (entry: SftpEntry, e?: React.MouseEvent) => {
@@ -645,7 +736,9 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         ? sftpPath + entry.name
         : sftpPath + "/" + entry.name;
 
-      const alreadyEditing = editingFiles.find((f) => f.remotePath === remotePath);
+      const alreadyEditing = editingFiles.some(
+        (f) => f.sessionId === sessionId && f.remotePath === remotePath
+      );
       if (alreadyEditing) {
         message.info(`${entry.name} 已在编辑中`);
         return;
@@ -672,39 +765,56 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         await invoke("open_file_with_default_app", { path: localPath });
         message.success(`已打开 ${entry.name} 进行编辑`);
 
+        // 比较基准要能被监听器自己推进：过去它比的是闭包里那个 const `lastModified`，
+        // 而"成功后推进"只写进了 React 状态那份（监听器从不读回来），于是本地保存一次之后
+        // 每一轮都判定"有新内容" —— 同一个文件被反复推回远端（实测 13 s 内 8 次上传 + 8 条成功提示）。
+        let pushedModified = lastModified;
+        // 一次上传可能比 3 s 的轮询间隔还久：不挡住下一轮的话，同一份内容会被并发推两遍
+        let pushing = false;
+
         const watcherId = window.setInterval(async () => {
+          if (pushing) return;
           try {
             const currentStat = await invoke<{ modified: number }>("get_file_modified_time", { path: localPath }).catch(() => ({ modified: 0 }));
-            if (currentStat.modified && currentStat.modified > lastModified) {
-              const currentSessionId = getSessionId();
-              if (!currentSessionId) {
+            if (!currentStat.modified || currentStat.modified <= pushedModified) return;
+            pushing = true;
+            try {
+              // 回传只用**开编辑时那份**会话：这里过去读的是"面板当前"的会话，
+              // 而人完全可能在保存之前切走标签页 —— 本地这份 A 主机的内容会被推成 B 主机的同名路径。
+              if (!isSessionAlive(sessionId)) {
                 stopWatching(watcherId);
+                message.warning(`${entry.name} 的编辑监听已停止：该会话已断开，改动不会自动回传`);
                 return;
               }
-              const pushed = await runTransfer(
-                "upload",
-                entry.name,
-                currentSessionId,
-                (transferId) =>
-                  invoke("sftp_upload", {
-                    sessionId: currentSessionId,
-                    localPath,
-                    remotePath,
-                    transferId,
-                  })
+              const pushed = await runTransfer("upload", entry.name, sessionId, (transferId) =>
+                invoke("sftp_upload", { sessionId, localPath, remotePath, transferId })
               );
-              // 失败不能推进 lastModified：推进了就再也不会重试，远端却还拿着旧内容
+              // 失败不能推进基准：推进了就再也不会重试，远端却还拿着旧内容
               if (pushed !== null) {
                 message.error(`自动上传失败: ${entry.name}: ${pushed}`);
                 return;
               }
+              pushedModified = currentStat.modified;
               message.success(`${entry.name} 已自动上传更新`);
               setEditingFiles((prev) =>
                 prev.map((f) =>
-                  f.remotePath === remotePath ? { ...f, lastModified: currentStat.modified } : f
+                  f.sessionId === sessionId && f.remotePath === remotePath
+                    ? { ...f, lastModified: currentStat.modified }
+                    : f
                 )
               );
-              navigateTo(sftpPath);
+              // 刷新只针对"人此刻正看着的那一份列表"：按 store 现值核对，不经过闭包里的
+              // navigateTo/getSessionId —— 那两个是开编辑那一次渲染的，切了标签页之后它们
+              // 仍指向旧标签页，结果是把旧会话的列表又列了一遍，顺手把正在看的这台顶回根目录
+              // （实测：一次自动上传引发 sess-2 → sess-1 → sess-2 三次列目录 + 面板闪一下）。
+              const shown = useServerStore.getState();
+              if (shown.sftpSessionId === sessionId && shown.sftpPath === dirnameOf(remotePath)) {
+                await listSftp(sessionId, shown.sftpPath).catch((e) => {
+                  message.error(`刷新列表失败: ${String(e)}`);
+                });
+              }
+            } finally {
+              pushing = false;
             }
           } catch {
             // File might have been deleted or is temporarily unavailable during save
@@ -712,6 +822,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         }, 3000) as unknown as number;
 
         const editEntry: EditingFile = {
+          sessionId,
           remotePath,
           localPath,
           filename: entry.name,
@@ -724,7 +835,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         message.error(`编辑文件失败: ${String(e)}`);
       }
     },
-    [sftpPath, getSessionId, editingFiles, navigateTo, stopWatching, runTransfer]
+    [sftpPath, getSessionId, editingFiles, listSftp, stopWatching, runTransfer]
   );
 
   // 卸载清理见 watchersRef 那个 effect
@@ -1405,21 +1516,32 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
           <span style={{ fontSize: 12, color: token.colorTextSecondary, flexShrink: 0 }}>
             编辑中:
           </span>
-          {editingFiles.map((f) => (
-            <Tag
-              key={f.remotePath}
-              icon={<EditOutlined />}
-              color="blue"
-              closable
-              onClose={() => {
-                if (f.watcher !== null) stopWatching(f.watcher);
-                setEditingFiles((prev) => prev.filter((ef) => ef.remotePath !== f.remotePath));
-              }}
-              style={{ fontSize: 11 }}
-            >
-              {f.filename}
-            </Tag>
-          ))}
+          {editingFiles.map((f) => {
+            // 身份 = (会话, 远端路径)：两台主机可以有同名同路径的文件，只用 `remotePath`
+            // 当 key 会撞 key，关闭其中一个也会把另一条从列表里抹掉 —— 而它的定时器还在跑，
+            // 变成一个看不见、还在往远端写的上传器。
+            const key = `${f.sessionId}\n${f.remotePath}`;
+            const foreign = f.sessionId !== activeSessionId;
+            return (
+              <Tag
+                key={key}
+                icon={<EditOutlined />}
+                color={foreign ? "default" : "blue"}
+                closable
+                onClose={() => {
+                  if (f.watcher !== null) stopWatching(f.watcher);
+                  setEditingFiles((prev) =>
+                    prev.filter((ef) => !(ef.sessionId === f.sessionId && ef.remotePath === f.remotePath))
+                  );
+                }}
+                title={foreign ? `${f.remotePath}（不在当前会话）` : f.remotePath}
+                style={{ fontSize: 11 }}
+              >
+                {f.filename}
+                {foreign ? ` @${hostOf(f.sessionId) || "其他会话"}` : ""}
+              </Tag>
+            );
+          })}
         </div>
       )}
 
@@ -1462,6 +1584,24 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         )}
         {loading ? (
           <LoadingState tip="加载文件列表..." minHeight={120} />
+        ) : !activeSessionId ? (
+          // 没有会话时不能写"目录为空"：那是"我看过了，确实没有东西"的意思，
+          // 而这里什么都没看成。
+          <EmptyState
+            title="会话未连接"
+            description="这一台还没有可用的 SSH 会话，连上之后这里会自动列出远端目录"
+            icon={
+              <FolderOutlined style={{ fontSize: 48, color: "var(--ant-color-text-tertiary)" }} />
+            }
+          />
+        ) : listError ? (
+          <EmptyState
+            title="无法读取目录"
+            description={`${sftpPath}：${listError}`}
+            icon={
+              <FolderOutlined style={{ fontSize: 48, color: "var(--ant-color-text-tertiary)" }} />
+            }
+          />
         ) : sftpEntries.length === 0 ? (
           <EmptyState
             title="目录为空"
