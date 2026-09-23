@@ -127,6 +127,8 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  // 供"设置变更"那条 effect 补一次 fit：它拿不到 mount effect 闭包里的 fitAddon/term
+  const refitRef = useRef<() => void>(() => {});
   const [searchOpen, setSearchOpen] = useState(false);
   const [zmodemState, setZmodemState] = useState<ZmodemState>({
     active: false,
@@ -349,16 +351,29 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
     });
 
     // Handle resize
-    const handleResize = () => {
+    // fit 只在几何真的变了时才回传 PTY：面板拖动和字号调整都走这里，重复通知同一个
+    // cols/rows 对 PTY 是幂等的，但会让"到底有没有重新量过"这件事在日志里糊成一片。
+    let lastCols = 0;
+    let lastRows = 0;
+    const refit = () => {
       try {
         fitAddon.fit();
-        if (term.cols > 0 && term.rows > 0) {
-          invoke("ssh_pty_resize", { sessionId, cols: term.cols, rows: term.rows }).catch(() => {});
-        }
-      } catch {}
+      } catch {
+        return; // 隐藏面板（display:none）量不出尺寸，fit 本来就是 no-op
+      }
+      if (
+        term.cols > 0 &&
+        term.rows > 0 &&
+        (term.cols !== lastCols || term.rows !== lastRows)
+      ) {
+        lastCols = term.cols;
+        lastRows = term.rows;
+        invoke("ssh_pty_resize", { sessionId, cols: term.cols, rows: term.rows }).catch(() => {});
+      }
     };
+    refitRef.current = refit;
 
-    const ro = new ResizeObserver(handleResize);
+    const ro = new ResizeObserver(refit);
     ro.observe(terminalRef.current);
     resizeObserverRef.current = ro;
 
@@ -366,6 +381,7 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
       disposed = true;
       ro.disconnect();
       resizeObserverRef.current = null;
+      refitRef.current = () => {};
       unsubscribe();
       writer.dispose();
       renderer.dispose();
@@ -400,6 +416,14 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
       term.options.theme = themePreset;
     }
   }, [settings]);
+
+  // 字号/字体一改，字符格子就变了，但容器像素尺寸没变 —— ResizeObserver 不会自己触发。
+  // 不显式补一次 fit，cols/rows 会一直停在旧值：内容被横向切掉，vim/htop 画错，
+  // 远端 PTY 也还按旧几何在输出。必须排在上面那条设置 effect 之后（effect 按声明顺序跑，
+  // 得先让新字号落到 term.options 上，fit 量出来的才是新格子）。
+  useEffect(() => {
+    refitRef.current();
+  }, [settings.font_size, settings.font_family]);
 
   // copy_on_select: 选中时自动复制到剪贴板
   useEffect(() => {
