@@ -97,6 +97,31 @@ pub fn part_path_for(target: &std::path::Path, transfer_id: u64) -> std::path::P
     target.with_file_name(name)
 }
 
+/// 远端分片路径：与目标同一个"目录"、加 `.part` 后缀。
+///
+/// 只按 `/` 拆 —— SFTP 的路径是远端服务器的路径，本机是 Windows 也不能拿 `\` 去切它。
+pub fn remote_part_path(remote: &str, transfer_id: u64) -> String {
+    let at = remote.rfind('/');
+    let (dir, name) = match at {
+        Some(0) => ("/".to_string(), remote[1..].to_string()),
+        Some(i) => (remote[..i].to_string(), remote[i + 1..].to_string()),
+        None => (String::new(), remote.to_string()),
+    };
+    let name = if name.is_empty() {
+        "file".to_string()
+    } else {
+        name
+    };
+    let joined = format!("{}.{}.part", name, transfer_id);
+    if dir.is_empty() {
+        joined
+    } else if dir.ends_with('/') {
+        format!("{}{}", dir, joined)
+    } else {
+        format!("{}/{}", dir, joined)
+    }
+}
+
 /// 把临时分片提升到正式路径：同目录 `rename`，POSIX 上是原子的 —— 用户要么看到完整的
 /// 文件，要么什么都看不到，不会看到半截。
 pub async fn commit_part(part: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
@@ -1046,17 +1071,33 @@ impl SshSession {
             let local_file = tokio::fs::File::open(local_path).await?;
             // 大小读不到就报 0：前端只会显示"大小未知"，不会猜一个百分比
             let total = local_file.metadata().await.map(|m| m.len()).unwrap_or(0);
-            let remote_file = sftp.create(remote_path).await?;
-            self.pump_with_progress(
-                app,
-                "upload",
-                &base_name(local_path),
-                transfer_id,
-                local_file,
-                remote_file,
-                total,
-            )
-            .await
+            // 先写远端分片，全部写完再 rename 到位：中断或失败都不会把远端原文件截断
+            let part = remote_part_path(remote_path, transfer_id);
+            let remote_file = sftp.create(&part).await?;
+            match self
+                .pump_with_progress(
+                    app,
+                    "upload",
+                    &base_name(local_path),
+                    transfer_id,
+                    local_file,
+                    remote_file,
+                    total,
+                )
+                .await
+            {
+                Ok(()) => {
+                    sftp.rename(&part, remote_path).await?;
+                    Ok(())
+                }
+                Err(e) => {
+                    // 清不掉也只报告原始错误：分片留在远端比谎报"已取消"更诚实，但别吞掉真因
+                    if let Err(ce) = sftp.remove_file(&part).await {
+                        eprintln!("清理远端分片 {} 失败: {}", part, ce);
+                    }
+                    Err(e)
+                }
+            }
         } else {
             Err("SFTP 子系统未初始化".into())
         }
@@ -1971,6 +2012,32 @@ mod tests {
             root.to_string_lossy().ends_with(".part"),
             "拿不到文件名时也要给出可用路径"
         );
+    }
+
+    #[test]
+    fn remote_part_path_keeps_the_remote_directory() {
+        // 带目录：分片必须落在同一个远端目录里，否则 rename 跨目录就不是原子的了
+        assert_eq!(
+            remote_part_path("/etc/nginx/nginx.conf", 4),
+            "/etc/nginx/nginx.conf.4.part"
+        );
+        // 根目录下、隐藏文件、以及没有目录的相对路径都要给出可用名字
+        assert_eq!(remote_part_path("/hosts", 1), "/hosts.1.part");
+        assert_eq!(remote_part_path(".bashrc", 2), ".bashrc.2.part");
+        // 以 / 结尾的"文件路径"其实是目录，给个可用的兜底名字而不是造出 `.3.part` 这种隐藏文件
+        assert_eq!(remote_part_path("/tmp/", 3), "/tmp/file.3.part");
+        // 关键不变量：分片与目标同名不同路径、且以目标所在目录为前缀
+        for p in ["/etc/nginx/nginx.conf", "/hosts", ".bashrc", "/a/b/c/d.txt"] {
+            let part = remote_part_path(p, 9);
+            assert!(part.ends_with(".part"), "{} -> {}", p, part);
+            let dir_of = |s: &str| {
+                s.rsplit_once('/')
+                    .map(|(d, _)| d.to_string())
+                    .unwrap_or_default()
+            };
+            assert_eq!(dir_of(&part), dir_of(p), "分片必须与目标同目录: {}", part);
+            assert_ne!(part, p);
+        }
     }
 
     #[tokio::test]

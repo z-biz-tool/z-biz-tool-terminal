@@ -106,9 +106,8 @@ export function summarizeBatch(
     // 两种方向的"剩下什么"不一样，措辞必须分开：下载写的是临时分片（已丢弃），
     // 上传则是远端被截断的文件（要重传覆盖），说成"已丢弃"就是假承诺
     parts.push(
-      action === "下载"
-        ? `已中断 ${o.aborted.length} 个（半截分片已丢弃，未写出目标文件）：${nameList(o.aborted.map((p) => p.remoteName))}`
-        : `已中断 ${o.aborted.length} 个（远端已写入部分可能不完整，需重传覆盖）：${nameList(o.aborted.map((p) => p.remoteName))}`
+      // 两个方向现在都是"先写分片、成功才 rename"，所以话说得一样：原文件没被碰过
+      `已中断 ${o.aborted.length} 个（分片已丢弃，原文件未被改写）：${nameList(o.aborted.map((p) => p.remoteName))}`
     );
   }
   if (o.failed.length > 0) {

@@ -209,11 +209,12 @@ eq("编辑副本那条路径不受影响（仍走 prepare_write）",
   const aborted = [plan("big.iso")];
   const dl = summarizeBatch({ saved: [plan("a.txt")], existing: [], failed: [], aborted }, "/D");
   eq("下载有中断不能算 success", dl.kind, "warning");
-  ok("下载说清半截分片已丢弃", dl.text.includes("已中断 1 个（半截分片已丢弃，未写出目标文件）：big.iso"));
-  ok("下载不扯远端截断这种不相干的话", !dl.text.includes("远端已写入部分"));
+  ok("下载说清分片已丢弃、原文件未改写",
+    dl.text.includes("已中断 1 个（分片已丢弃，原文件未被改写）：big.iso"));
+  ok("不再出现「需重传覆盖」这种旧措辞", !dl.text.includes("需重传覆盖"));
   const up = summarizeBatch({ saved: [], existing: [], failed: [], aborted }, "/up", "上传");
-  ok("上传说清远端可能留半截、需重传",
-    up.text.includes("远端已写入部分可能不完整，需重传覆盖") && up.text.includes("big.iso"));
+  ok("上传方向同样只丢分片、不碰远端原文件",
+    up.text.includes("已中断 1 个（分片已丢弃，原文件未被改写）：big.iso"));
   // 用户自己按的取消不该报成红色"出错"：只有真失败才升级成 error
   eq("全中断（没有任何真失败）⇒ warning，不是 error", up.kind, "warning");
   const realFail = summarizeBatch({ saved: [], existing: [], failed: [{ plan: plan("x"), reason: "会话已断开" }], aborted }, "/up", "上传");

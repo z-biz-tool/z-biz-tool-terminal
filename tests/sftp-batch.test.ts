@@ -323,6 +323,13 @@ eq("上传那条不猜总字节（本地文件大小这里拿不到）",
   ok("下载写分片、成功才提升", dl.includes("part_path_for(") && /commit_part\(&part,/.test(dl));
   ok("下载失败或取消必须丢分片（否则半截文件会冒充完成，还会被「已存在即拒写」挡住重试）",
     /discard_part\(&part\)\.await;/.test(dl));
+  const ul = shipped.slice(shipped.indexOf("pub async fn sftp_upload"), shipped.indexOf("pub async fn sftp_download"));
+  ok("上传也先写远端分片、成功才 rename（中断不再截断远端原文件）",
+    ul.includes("remote_part_path(remote_path, transfer_id)") &&
+    /sftp\.create\(&part\)/.test(ul) &&
+    /sftp\.rename\(&part, remote_path\)/.test(ul));
+  ok("上传失败或取消要清掉远端分片，且不能吞掉原始错误",
+    /sftp\.remove_file\(&part\)/.test(ul) && /Err\(e\) => \{[\s\S]{0,280}Err\(e\)/.test(ul));
   ok("取消命令按 transfer_id 走并已注册",
     /pub async fn sftp_cancel_transfer\(transfer_id: u64\)/.test(readFileSync("src-tauri/src/commands.rs", "utf8")) &&
     /commands::sftp_cancel_transfer,/.test(readFileSync("src-tauri/src/lib.rs", "utf8")));
