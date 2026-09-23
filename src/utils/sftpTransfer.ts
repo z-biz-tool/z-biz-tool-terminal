@@ -24,6 +24,13 @@ export interface Transfer {
   total: number;
   phase: TransferPhase;
   error?: string;
+  /**
+   * 起表时刻（毫秒，由调用方的时钟给出）。缺省 = 不知道什么时候开始，
+   * 那么用时/速度/剩余一律不显示 —— 宁可少说，也不编一个"看起来在动"的数字。
+   */
+  startedAt?: number;
+  /** 结算时刻，只有 phase 为 done/failed 时才有 */
+  endedAt?: number;
 }
 
 /**
@@ -66,9 +73,19 @@ export function beginTransfer(
   id: number,
   sessionId: string,
   kind: TransferKind,
-  filename: string
+  filename: string,
+  startedAt?: number
 ): Transfer {
-  return { id, sessionId, kind, filename, transferred: 0, total: 0, phase: "running" };
+  return {
+    id,
+    sessionId,
+    kind,
+    filename,
+    transferred: 0,
+    total: 0,
+    phase: "running",
+    startedAt: Number.isFinite(startedAt) ? startedAt : undefined,
+  };
 }
 
 /**
@@ -104,16 +121,19 @@ export function settleTransfer(
   t: Transfer | null,
   id: number,
   ok: boolean,
-  error?: string
+  error?: string,
+  now?: number
 ): Transfer | null {
   if (!t || t.id !== id) return t;
+  const endedAt = Number.isFinite(now) ? now : undefined;
   // 判定层不编原因：没给就留空，由 describeTransfer 落到"未知原因"
-  if (!ok) return { ...t, phase: "failed", error: error?.trim() || undefined };
+  if (!ok) return { ...t, phase: "failed", error: error?.trim() || undefined, endedAt };
   return {
     ...t,
     phase: "done",
     transferred: t.total > 0 ? t.total : t.transferred,
     error: undefined,
+    endedAt,
   };
 }
 
@@ -130,6 +150,47 @@ export function percentOf(t: Transfer): number | null {
   return Math.floor((t.transferred / t.total) * 100);
 }
 
+/**
+ * 已用时（毫秒）。没有起表时刻、或时钟倒挂（系统改时间/跨端来源不一致）时返回 null，
+ * 由调用方选择"不显示"—— 显示一个负数或 0 秒都比没有更糟。
+ */
+export function elapsedOf(t: Transfer, now?: number): number | null {
+  const end = t.phase === "running" ? now : t.endedAt ?? now;
+  if (t.startedAt === undefined || end === undefined) return null;
+  const ms = end - t.startedAt;
+  return Number.isFinite(ms) && ms >= 0 ? ms : null;
+}
+
+/** 平均速度（字节/秒）：用时为 0 或还没传过一个字节都算不出来 */
+export function averageSpeedOf(t: Transfer, now?: number): number | null {
+  const ms = elapsedOf(t, now);
+  if (ms === null || ms <= 0 || t.transferred <= 0) return null;
+  return (t.transferred / ms) * 1000;
+}
+
+/**
+ * 预计剩余（毫秒）。只在"总大小已知 + 平均速度算得出 + 还没传完"三者同时成立时给出；
+ * 用的是**平均**速度（含起表的 IPC 往返与对端慢启动），所以它是粗估 —— 文案里必须带"约"。
+ */
+export function remainingOf(t: Transfer, now?: number): number | null {
+  const speed = averageSpeedOf(t, now);
+  if (speed === null || t.total <= 0 || t.transferred >= t.total) return null;
+  return ((t.total - t.transferred) / speed) * 1000;
+}
+
+/** 时长：不到 1 秒给毫秒，不到 1 分钟给一位小数，再往上给分/秒 */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "-";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+  // 先化成整秒再拆分：原来 `min = floor(ms/60000)` + `sec = round((ms%60000)/1000)` 会算出
+  // "14 分 60 秒"（实测卡住的传输就长这样），因为四舍五入进来的那 1 秒没有进位到分钟。
+  const total = Math.round(ms / 1000);
+  const min = Math.floor(total / 60);
+  const sec = total % 60;
+  return sec > 0 ? `${min} 分 ${sec} 秒` : `${min} 分钟`;
+}
+
 export function kindLabel(kind: TransferKind): string {
   return kind === "upload" ? "上传" : "下载";
 }
@@ -143,13 +204,25 @@ export function formatBytes(bytes: number): string {
 }
 
 /** 右侧状态文字：失败必须和失败一致，大小未知必须说不清 */
-export function describeTransfer(t: Transfer): string {
-  if (t.phase === "failed") return `失败: ${t.error || "未知原因"}`;
-  if (t.phase === "done") return `${kindLabel(t.kind)}完成`;
-  if (t.total > 0) {
-    return `${kindLabel(t.kind)} ${formatBytes(t.transferred)} / ${formatBytes(t.total)}`;
-  }
-  return `${kindLabel(t.kind)} ${formatBytes(t.transferred)} · 大小未知`;
+export function describeTransfer(t: Transfer, now?: number): string {
+  const elapsed = elapsedOf(t, now);
+  const took = elapsed === null ? "" : ` · 用时 ${formatDuration(elapsed)}`;
+  if (t.phase === "failed") return `失败: ${t.error || "未知原因"}${took}`;
+  if (t.phase === "done") return `${kindLabel(t.kind)}完成${took}`;
+
+  const parts =
+    t.total > 0
+      ? [`${kindLabel(t.kind)} ${formatBytes(t.transferred)} / ${formatBytes(t.total)}`]
+      : [`${kindLabel(t.kind)} ${formatBytes(t.transferred)} · 大小未知`];
+  if (elapsed !== null) parts.push(`用时 ${formatDuration(elapsed)}`);
+  const speed = averageSpeedOf(t, now);
+  if (speed !== null) parts.push(`均速 ${formatBytes(speed)}/s`);
+  const remaining = remainingOf(t, now);
+  // 剩余只由平均速度推出，带"约"；大小未知时干脆不给（不给 > 猜）
+  if (remaining !== null) parts.push(`约剩 ${formatDuration(remaining)}`);
+  // 一个字节都还没过去时明说，别用"0 B/s"糊弄过去
+  if (elapsed !== null && t.transferred === 0) parts.push("尚无数据");
+  return parts.join(" · ");
 }
 
 /**

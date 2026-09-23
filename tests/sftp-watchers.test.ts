@@ -65,8 +65,12 @@ eq("登记表增删一律原地做（splice/length=0），否则清理捕获的�
   /watchersRef\.current = /.test(src), false);
 
 // 3. 三条关闭路径都要走 stopWatching
-const clears = (src.match(/clearInterval\(/g) || []).length;
+// 登记表用的是裸 clearInterval(id)；横幅那个每秒重渲染的定时器是 window.clearInterval(h)，
+// 生命周期归 React effect 管（见 sftp-progress-speed.test.ts 里"定时器随 phase 卸载"那条）。
+const clears = (src.match(/(?<!window\.)clearInterval\(/g) || []).length;
 ok("clearInterval 只出现在登记表内部（登记 + 卸载清理）", clears === 2);
+ok("面板里另一个定时器（传输横幅的每秒重渲染）自带卸载",
+  /window\.setInterval\(\(\) => setTick/.test(src) && /return \(\) => window\.clearInterval\(h\);/.test(src));
 ok("创建即登记", src.includes("watchersRef.current.push(watcherId)"));
 ok("会话没了要摘掉", src.includes("stopWatching(watcherId)"));
 ok("手动关标签要摘掉", src.includes("stopWatching(f.watcher)"));

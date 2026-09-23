@@ -87,6 +87,14 @@ function TransferBanner({ transfer }: { transfer: Transfer }) {
   const pct = percentOf(transfer);
   const failed = transfer.phase === "failed";
   const done = transfer.phase === "done";
+  // 传输卡住时后端不再发事件，"用时"必须自己走：所以运行中每秒重渲染一次，
+  // 停在 3 秒不动的"用时"比"没有用时"更容易让人误判成还在正常传。
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (transfer.phase !== "running") return;
+    const h = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(h);
+  }, [transfer.phase]);
   return (
     <div
       style={{
@@ -127,7 +135,7 @@ function TransferBanner({ transfer }: { transfer: Transfer }) {
           color: failed ? token.colorError : token.colorTextSecondary,
         }}
       >
-        {describeTransfer(transfer)}
+        {describeTransfer(transfer, Date.now())}
       </span>
     </div>
   );
@@ -279,14 +287,14 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       call: (transferId: number) => Promise<unknown>
     ): Promise<string | null> => {
       const id = nextTransferId();
-      setTransfer(beginTransfer(id, sessionId, kind, filename));
+      setTransfer(beginTransfer(id, sessionId, kind, filename, Date.now()));
       let error: string | null = null;
       try {
         error = transferFailure(await call(id));
       } catch (e) {
         error = String(e);
       }
-      setTransfer((prev) => settleTransfer(prev, id, error === null, error ?? undefined));
+      setTransfer((prev) => settleTransfer(prev, id, error === null, error ?? undefined, Date.now()));
       setTimeout(() => setTransfer((prev) => clearFinished(prev, id)), TRANSFER_HOLD_MS);
       return error;
     },
