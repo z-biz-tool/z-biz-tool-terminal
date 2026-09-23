@@ -56,7 +56,7 @@
 | 功能 | 说明 |
 |------|------|
 | SFTP 浏览 | 真实 SFTP 协议浏览远程文件系统，兼容 ls 回退 |
-| 上传/下载 | 文件上传下载，传输进度指示 |
+| 上传/下载 | 传输按真实字节数显示进度：后端 32 KB 分块、250 ms 节流上报，总大小取不到时只标「大小未知」而不画猜出来的百分比；成败以 `ExecResult.success` 为准 |
 | 拖拽上传 | 拖拽本地文件到 SFTP 面板直接上传 |
 | 拖拽下载 | 拖拽远程文件到下载区域触发下载 |
 | 多选操作 | Shift/Ctrl 多选，Ctrl+A 全选 |
@@ -237,7 +237,7 @@ z-biz-tool-terminal/
 │   │   ├── ServerList.tsx        # 服务器列表（分组/搜索/拖拽排序/导入）
 │   │   ├── TerminalView.tsx      # 终端视图（xterm.js/主题/链接检测）
 │   │   ├── TerminalSearch.tsx    # 终端内搜索
-│   │   ├── SftpPanel.tsx         # SFTP 文件管理（多选/批量/编辑）
+│   │   ├── SftpPanel.tsx         # SFTP 文件管理（多选/批量/编辑 + 真实传输进度）
 │   │   ├── SnippetsPanel.tsx     # 快捷命令面板
 │   │   ├── CommandPalette.tsx    # 命令面板 (Cmd+K)
 │   │   ├── QuickConnectBar.tsx   # 快速连接栏
@@ -306,7 +306,7 @@ npm run tauri build
 
 ## 🧪 验证口径（哪些是跑过的，哪些没有）
 
-- 已实测通过：`npm run typecheck` 0 错误、`npm test` 8089 例（26 个文件：`palette-order` 6801 例命令面板序列不变量——对 1/2/3/4/6 个条目**穷举全部排列**逐条验幂等、同类连续、首项不被类别推翻，不是重复跑同一个用例、`shortcuts` 128 例快捷键漂移守卫（含 README 表与注册表逐字对账）、`close-guard` 113 例关闭确认闸、`reconnect-progress` 104 例重连进度与退避调度、`settings-sanity` 96 例配置取值闸、`terminal-search` 96 例终端搜索判定与落点几何、`search-staleness` 161 例搜索结果随新输出过期的锚点回找（含 574 例确定性 fuzz 的后条件：认得回来就必须落在同一行文本上，认不回来就必须是 `null`）、`confirm-queue` 60 例确认排队契约、`palette-session` 47 例命令面板会话陈述等，每轮另跑变异对照）、`npm run build`（单 chunk 1,902.41 kB / gzip 574.35 kB）、`cargo fmt --check`（在 `src-tauri/` 下跑：仓库根没有 `Cargo.toml`，在根上跑只会打印 usage 并以 1 退出）、`cargo test --lib` 73 例。
+- 已实测通过：`npm run typecheck` 0 错误、`npm test` 8454 例（27 个文件：`palette-order` 6801 例命令面板序列不变量——对 1/2/3/4/6 个条目**穷举全部排列**逐条验幂等、同类连续、首项不被类别推翻，不是重复跑同一个用例、`shortcuts` 128 例快捷键漂移守卫（含 README 表与注册表逐字对账）、`close-guard` 113 例关闭确认闸、`reconnect-progress` 104 例重连进度与退避调度、`settings-sanity` 96 例配置取值闸、`terminal-search` 96 例终端搜索判定与落点几何、`search-staleness` 161 例搜索结果随新输出过期的锚点回找（含 574 例确定性 fuzz 的后条件：认得回来就必须落在同一行文本上，认不回来就必须是 `null`）、`confirm-queue` 60 例确认排队契约、`palette-session` 47 例命令面板会话陈述、`sftp-progress` 365 例 SFTP 传输状态机（10 行认领矩阵、240 轮确定性属性序列、payload 键与 Rust `serde_json::json!` 逐字对账）等，每轮另跑变异对照）、`npm run build`（单 chunk 1,904.87 kB / gzip 575.20 kB）、`cargo fmt --check`（在 `src-tauri/` 下跑：仓库根没有 `Cargo.toml`，在根上跑只会打印 usage 并以 1 退出）、`cargo test --lib` 75 例。
 - **「主机信任」设置页已在浏览器里用 stub `invoke` 渲染真实组件跑过**：列表聚合、搜索命中/空态、撤销确认文案与调用参数、错误态与空态区分均已实测；但这仍不是 Tauri 运行时，真实 known_hosts 文件未对过样。
 - **「危险命令确认弹窗」与「环境标识」同样在浏览器里跑过真实组件**：走真实 `confirmDangerousCommand()` 入口弹框，实测生产机汇总台数、`[生产环境]` 加粗标红前缀、预发/未标注的差异化展示；`EnvBadge` 三色与"未标注不占任何 DOM 节点"实测；整棵 `App` 在 stub `__TAURI_INTERNALS__` 下渲染，确认只有生产 tab 带 `PROD` 徽标与红色顶边、切 tab 不漏染。这仍不是 Tauri 运行时。
 - **危险命令确认弹窗的排队语义已在浏览器里跑过真实 `DangerConfirmHost`**（走真实 `decideCommand`，`invoke` 只打桩收 `audit_event`）：三条并发 confirm 级请求按先后逐条上屏（标题带「还有 2 条 / 1 条待确认」），点完后三个 `await` 分别拿到 `true / false / true`、审计落 **3 条**且主机清单带环境前缀；两条 block 级之间逐字确认不串条（下一条上屏时 `input.value` 为空、按钮重新禁用）；宿主带着 2 条待确认被卸载时两条都拿到 `false`。对照组（同一探针下换回原来的单槽实现）里前两条命令**从未上屏**、`await` 永久挂起、审计只有 1 条。这仍不是 Tauri 运行时。
@@ -317,7 +317,8 @@ npm run tauri build
 - **搜索结果不再随新输出过期**（同一搜索通道，真 xterm + 真 `TerminalView` + 真 `ptyBus` 写入）：修复**前**先取证 —— 40 行里 `ERR_` 命中 3 条，追加 15 行后连按三次「下一条」，面板写 `1 / 3`…`3 / 3` 而 `activeSelection()` 回读到的是 `er-1`/`er-2`/`er-3` 这些从别的行上截出来的碎片（行唯一查询追加 8 行后两次都选中 `er-12 ok`）。修复**后**同一场景三次都逐字选中 `ERR_`，`ERR_gamma queue` 这条在追加 8 行后两次跳转仍回到 `ERR_gamma queue`；把锚点整行清掉（`ESC[3J` + `ESC[2J`）再按「下一条」，状态行如实变成「1 / 2 · 原结果已滚出缓冲区，清单是重新扫描的」，再按一次标注自动消失。回找半径不设上限的依据是实测：8,065 行 buffer 的一次全扫阻塞主线程 12.1/13.9 ms，而认不回来的回找就是同一量级。变异对照：把 `reanchorMatch` 改成「照旧坐标跳」⇒ 单测 80 红（fuzz 543/574 违例）且真实 DOM 复现「`1 / 1` 却选中 `er-20 ok`」；把同距候选顺序退回先试 `line - d` ⇒ 具名断言红（重复行跳到邻居），但 fuzz 后条件抓不到 —— 文本相同的两行本来就分不出来。这仍不是 Tauri 运行时。
 - **命令面板对"会话"的陈述已在浏览器里跑过真 antd `Modal` + 真 `serverStore`**（三条会话：connected(活跃)/connecting/error，`servers: []` 让标签回落到服务器 id）：整棵面板「当前」徽标的 DOM 计数 = **1** 且落在活跃那条（组名「已打开会话 · 3」，连接中标蓝「连接中」、失败中标红「连接失败」）；`setActive("t-2")` 后徽标跟着 store 搬家，原活跃条的徽标消失且说明句从「当前会话」退回「切换到此会话」，新活跃条同时带「当前」+「连接中」，总数仍 1；把活跃切到**连接失败**那条时，同一条上同时是「当前」+「连接失败」（红），不会因为"是当前"就藏掉"连不上"；把某条改成词表外的 `handshake-failed` 时标签**原样露出该词**且颜色退回 `default`（red/blue 计数 0）；三条都 connected 时状态标签全部不占版面。变异对照：把判断换回原来的 `item.tabId != null` 形状后，真实 DOM 里「当前」计数变成 **3**（标题被挤成 `srv-2当前连接中`）、单元守卫同时红 1 例（43/44）；还原后 `filecmp` 判逐字节一致、复跑 44/44。状态词表另有跨文件契约守卫：直接从 `src/types/index.ts` 解出 `ConnectionState`，要求除 `connected` 外每个状态都"标得出来且有说法"，词表多一个也算漂移。这仍不是 Tauri 运行时。
 - **命令面板的走位顺序也在同一通道里量过真实 DOM**（输入 `db` 命中 3 条：会话/服务器/片段各一条）：修复前抓到的现场是"起点高亮在**视觉第 3 行**，按一次 ↓ 反而跳到视觉第 1 行"——因为键盘走的是 score 序、屏幕按写死的类别顺序分块；修复后组序变成「代码片段 · 1 / 已打开会话 · 1 / 服务器 · 1」（首次出现序），**键盘下标与视觉行号逐条相等**，50 条命中时逐按 ↓ 高亮走位为视觉 2→3→4→5 且恒只有 1 行高亮，末位再按不回环、↑ 一次即回上一行，按键全程 `defaultPrevented: true`。滚动单独做了对照组：删掉 `scrollIntoView` 那一句后 50 条命中时 `scrollTop` **恒 0** 而高亮行顶边在 436/1082/1259 px，即"走到位却看不见"；留着时 `scrollTop` 与高亮行顶边始终重合（1613/1613 → 2144/2144）。**测量局限照实说**：探针跑在隐藏标签页里，`innerWidth/innerHeight = 0`、滚动容器 `clientHeight` 只有 16 px（行高 174 px），所以"像素意义上落进视口"这个判据当时**判不了**，用的都是相对关系；真实窗口下的观感仍需在 Tauri 里取样。
-- **其余 GUI 运行时未验证**：主机密钥确认弹窗、审计日志 tab、WebGL 渲染器能否在 WKWebView 里建起上下文，目前都只有单元与静态层面证据，`npm run tauri dev` 未在本机跑起来（需要真机 WebView 与真 SSH 服务端）。SFTP 与 PTY 的端到端行为同样没有测试覆盖。WebGL 的不确定风险已被回退路径兜住：建不起来或上下文丢失即退回 DOM 渲染，最坏情况等同改动前。
+- **SFTP 传输进度与成败已在浏览器里跑过真 `SftpPanel` + 真 antd `Progress` + 真 `serverStore`**（只有 IPC / 事件 / 对话框是桩）：后端一个事件都没发时屏上是「上传 0 B · 大小未知」且**没有进度条**（`barCount:0`，不画猜出来的百分比）；灌入本传输的真进度（1,500,000 / 3,000,000）后 `aria-valuenow="50"`、轨道宽 `50%`、文案 `上传 1.4 MB / 2.9 MB`；别会话与迟到 `transfer_id` 的事件逐字改不动屏幕；**头号缺陷**（上一条的 800 ms 收尾定时器抹掉后一条）实测为：A 结算后 B 起条，+1.6 s 时 B 的 banner 与字节一格没动，而把 `clearFinished` 的 `id` 核对拿掉的对照臂里同场景 `banner:null`、`pending:1` —— 命令还在跑，屏幕已经什么都没有了；后端回 `success:false + error` 时上屏 `失败: Read-only filesystem (os error 30)`（`ant-progress-status-exception`）**且不再弹「上传成功」**，而这一格在改动前写的就是「上传成功」。全程事件监听恰 1 个（单一总线）。探针口径修正记一条：antd v6 已无 `.ant-progress-bg`，进度只能读 `aria-valuenow` 与 `.ant-progress-track`。这仍不是 Tauri 运行时：真机 250 ms 节流下 45 MB 文件到底发几条、以及 `transfer_id` 与命令响应的真实到达顺序，都未取过样。
+- **其余 GUI 运行时未验证**：主机密钥确认弹窗、审计日志 tab、WebGL 渲染器能否在 WKWebView 里建起上下文，目前都只有单元与静态层面证据，`npm run tauri dev` 未在本机跑起来（需要真机 WebView 与真 SSH 服务端）。SFTP 的传输反馈形态已在浏览器里量过（上一条），但**传输/删除/改权限的端到端行为仍未对过真账号**，PTY 端到端同样没有覆盖。WebGL 的不确定风险已被回退路径兜住：建不起来或上下文丢失即退回 DOM 渲染，最坏情况等同改动前。
 - 安全网关是"防误操作"级别的前端防线：远端主机的真实权限边界仍在服务端，关掉开关即完全旁路（审计轨迹会记下 `command_gate_bypassed`）。
 - 进度、落地位置与有意偏离的口径见 [`doc/优化方案/07_实施进度.md`](doc/优化方案/07_实施进度.md)。
 

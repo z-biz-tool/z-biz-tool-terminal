@@ -754,12 +754,17 @@ pub async fn sftp_list(session_id: String, path: String) -> SftpListResult {
 /// SFTP 上传文件
 #[tauri::command]
 pub async fn sftp_upload(
+    app: tauri::AppHandle,
     session_id: String,
     local_path: String,
     remote_path: String,
+    transfer_id: u64,
 ) -> ExecResult {
     if let Some(sess) = get_session(&session_id).await {
-        match sess.sftp_upload(&local_path, &remote_path).await {
+        match sess
+            .sftp_upload(&local_path, &remote_path, transfer_id, &app)
+            .await
+        {
             Ok(_) => ExecResult {
                 success: true,
                 output: "上传成功".into(),
@@ -783,12 +788,17 @@ pub async fn sftp_upload(
 /// SFTP 下载文件
 #[tauri::command]
 pub async fn sftp_download(
+    app: tauri::AppHandle,
     session_id: String,
     remote_path: String,
     local_path: String,
+    transfer_id: u64,
 ) -> ExecResult {
     if let Some(sess) = get_session(&session_id).await {
-        match sess.sftp_download(&remote_path, &local_path).await {
+        match sess
+            .sftp_download(&remote_path, &local_path, transfer_id, &app)
+            .await
+        {
             Ok(_) => ExecResult {
                 success: true,
                 output: "下载成功".into(),

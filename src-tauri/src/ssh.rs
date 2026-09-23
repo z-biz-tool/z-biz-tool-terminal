@@ -24,6 +24,63 @@ const HOST_KEY_CONFIRM_TIMEOUT_SECS: u64 = 120;
 const PTY_BATCH_MAX_BYTES: usize = 64 * 1024;
 /// 会话日志通道深度：磁盘暂时落后时先缓冲，不阻塞终端读循环
 const LOG_CHANNEL_CAPACITY: usize = 256;
+/// SFTP 传输进度上报的最小间隔（毫秒）。32 KB 一块，快链路上一秒能跑上百块，
+/// 逐块 emit 会把事件通道和前端渲染打满；250 ms 在人眼看起来已经是连续的。
+const SFTP_PROGRESS_INTERVAL_MS: u64 = 250;
+
+/// 进度是否该上报：首块必报、传完必报，中间按间隔节流。
+///
+/// `total == 0` 有两种含义（空文件、远端不给大小），两种都不许被当成"已经传完"，
+/// 所以末尾判定要求 `total > 0`；大小未知时前端只会显示"大小未知"而不是猜一个百分比。
+fn should_emit_progress(
+    now_ms: u64,
+    last_emit_ms: Option<u64>,
+    transferred: u64,
+    total: u64,
+) -> bool {
+    let Some(last) = last_emit_ms else {
+        return true;
+    };
+    if total > 0 && transferred >= total {
+        return true;
+    }
+    now_ms.saturating_sub(last) >= SFTP_PROGRESS_INTERVAL_MS
+}
+
+/// 取路径最后一段：只用于上屏显示（Windows 的反斜杠也要认）
+fn base_name(path: &str) -> String {
+    match path.rsplit(['/', '\\']).next() {
+        Some("") | None => path.to_string(),
+        Some(name) => name.to_string(),
+    }
+}
+
+/// 把一次 SFTP 传输进度推给前端。事件名与载荷键是跨语言契约，
+/// `tests/sftp-progress.test.ts` 会拿这里与前端读取处逐键对账。
+///
+/// `transfer_id` 由前端发起传输时生成、原样回带：认领一条进度靠这个身份，不靠文件名 ——
+/// 批量上传两个同名文件时文件名会撞，靠名字匹配会把上一条的字节数画到下一条头上。
+fn emit_sftp_progress(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    kind: &str,
+    filename: &str,
+    transfer_id: u64,
+    transferred: u64,
+    total: u64,
+) {
+    let _ = app.emit(
+        "sftp-progress",
+        serde_json::json!({
+            "session_id": session_id,
+            "kind": kind,
+            "filename": filename,
+            "transfer_id": transfer_id,
+            "transferred": transferred,
+            "total": total,
+        }),
+    );
+}
 
 /// 会话日志落盘目标。
 ///
@@ -869,26 +926,75 @@ impl SshSession {
         Ok(entries)
     }
 
+    /// 32 KB 一块地搬运，并按 `SFTP_PROGRESS_INTERVAL_MS` 节流上报进度。
+    /// 读/写两端谁本地谁远端都行，进度判定只有一份（两条路径各写一遍必然分家）。
+    async fn pump_with_progress<R, W>(
+        &self,
+        app: &tauri::AppHandle,
+        kind: &str,
+        filename: &str,
+        transfer_id: u64,
+        mut reader: R,
+        mut writer: W,
+        total: u64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        R: AsyncReadExt + Unpin,
+        W: AsyncWriteExt + Unpin,
+    {
+        let mut buf = vec![0u8; 32768];
+        let mut transferred: u64 = 0;
+        let started = std::time::Instant::now();
+        let mut last_emit: Option<u64> = None;
+        loop {
+            let n = reader.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n]).await?;
+            transferred += n as u64;
+            let now_ms = started.elapsed().as_millis() as u64;
+            if should_emit_progress(now_ms, last_emit, transferred, total) {
+                last_emit = Some(now_ms);
+                emit_sftp_progress(
+                    app,
+                    &self.id,
+                    kind,
+                    filename,
+                    transfer_id,
+                    transferred,
+                    total,
+                );
+            }
+        }
+        writer.flush().await?;
+        Ok(())
+    }
+
     /// SFTP 上传文件
     pub async fn sftp_upload(
         &self,
         local_path: &str,
         remote_path: &str,
+        transfer_id: u64,
+        app: &tauri::AppHandle,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let sftp_lock = self.sftp.lock().await;
         if let Some(sftp) = sftp_lock.as_ref() {
-            let mut local_file = tokio::fs::File::open(local_path).await?;
-            let mut remote_file = sftp.create(remote_path).await?;
-            let mut buf = vec![0u8; 32768];
-            loop {
-                let n = local_file.read(&mut buf).await?;
-                if n == 0 {
-                    break;
-                }
-                remote_file.write_all(&buf[..n]).await?;
-            }
-            remote_file.flush().await?;
-            Ok(())
+            let local_file = tokio::fs::File::open(local_path).await?;
+            // 大小读不到就报 0：前端只会显示"大小未知"，不会猜一个百分比
+            let total = local_file.metadata().await.map(|m| m.len()).unwrap_or(0);
+            let remote_file = sftp.create(remote_path).await?;
+            self.pump_with_progress(
+                app,
+                "upload",
+                &base_name(local_path),
+                transfer_id,
+                local_file,
+                remote_file,
+                total,
+            )
+            .await
         } else {
             Err("SFTP 子系统未初始化".into())
         }
@@ -899,21 +1005,29 @@ impl SshSession {
         &self,
         remote_path: &str,
         local_path: &str,
+        transfer_id: u64,
+        app: &tauri::AppHandle,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let sftp_lock = self.sftp.lock().await;
         if let Some(sftp) = sftp_lock.as_ref() {
-            let mut remote_file = sftp.open(remote_path).await?;
-            let mut local_file = tokio::fs::File::create(local_path).await?;
-            let mut buf = vec![0u8; 32768];
-            loop {
-                let n = remote_file.read(&mut buf).await?;
-                if n == 0 {
-                    break;
-                }
-                local_file.write_all(&buf[..n]).await?;
-            }
-            local_file.flush().await?;
-            Ok(())
+            // 远端 stat 失败不影响下载本身，只是没有百分比可算
+            let total = sftp
+                .metadata(remote_path)
+                .await
+                .map(|m| m.size.unwrap_or(0))
+                .unwrap_or(0);
+            let remote_file = sftp.open(remote_path).await?;
+            let local_file = tokio::fs::File::create(local_path).await?;
+            self.pump_with_progress(
+                app,
+                "download",
+                &base_name(remote_path),
+                transfer_id,
+                remote_file,
+                local_file,
+                total,
+            )
+            .await
         } else {
             Err("SFTP 子系统未初始化".into())
         }
@@ -1617,6 +1731,45 @@ async fn socks5_read_connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 进度闸门：首块必报、传完必报、中间按间隔节流；大小未知时不许冒充"传完"
+    #[test]
+    fn sftp_progress_gate_emits_first_last_and_periodically() {
+        // 首块：没有上一次上报就一定报
+        assert!(should_emit_progress(0, None, 32768, 100_000));
+        // 间隔未到
+        assert!(!should_emit_progress(100, Some(0), 65536, 100_000));
+        // 间隔到了
+        assert!(should_emit_progress(
+            SFTP_PROGRESS_INTERVAL_MS,
+            Some(0),
+            65536,
+            100_000
+        ));
+        // 传完即报，哪怕间隔未到
+        assert!(should_emit_progress(10, Some(0), 100_000, 100_000));
+        assert!(should_emit_progress(10, Some(0), 120_000, 100_000));
+        // 大小未知（total = 0）：既不是"传完"，也只是普通的一帧 —— 已经报过首块，所以按间隔走
+        assert!(!should_emit_progress(10, Some(0), 32768, 0));
+        assert!(should_emit_progress(
+            SFTP_PROGRESS_INTERVAL_MS,
+            Some(0),
+            32768,
+            0
+        ));
+        // 时钟倒退（saturating）也不该 panic 或永久沉默
+        assert!(!should_emit_progress(5, Some(900), 32768, 100_000));
+    }
+
+    /// 文件名是两端认领进度事件的凭据之一，反斜杠路径（Windows）也要截对
+    #[test]
+    fn sftp_base_name_handles_both_separators() {
+        assert_eq!(base_name("/var/log/app.log"), "app.log");
+        assert_eq!(base_name("C:\\temp\\app.log"), "app.log");
+        assert_eq!(base_name("app.log"), "app.log");
+        // 截不出来就退回整条路径，别报一个空文件名（前端会因此认不到自己的传输）
+        assert_eq!(base_name("/var/log/"), "/var/log/");
+    }
 
     #[test]
     fn shell_escape_keeps_payload_inside_quotes() {

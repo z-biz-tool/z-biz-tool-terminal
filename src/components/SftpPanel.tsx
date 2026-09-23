@@ -38,15 +38,84 @@ import { EmptyState, LoadingState } from "@/_shared";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { subscribeSftpProgress } from "../services/sftpBus";
+import {
+  applyProgress,
+  basenameOf,
+  beginTransfer,
+  clearFinished,
+  createTransferIds,
+  describeTransfer,
+  formatBytes,
+  kindLabel,
+  percentOf,
+  settleTransfer,
+  transferFailure,
+  type Transfer,
+  type TransferKind,
+} from "../utils/sftpTransfer";
 
 interface SftpPanelProps {
   serverId: string;
 }
 
-interface TransferState {
-  type: "upload" | "download";
-  filename: string;
-  progress: number; // 0-100
+/** 传输结束后进度条停留时长；摘掉时按 id 核对，晚到的定时器不得抹掉下一条传输 */
+const TRANSFER_HOLD_MS = 800;
+
+/**
+ * 传输进度条。**数字只来自后端 `sftp-progress`**：旧实现是"开局写 0、IPC 返回就写 100"，
+ * 那条既不知道文件多大也不知道传了多久，任何一次传输都只会在结束时瞬间满格。
+ * 大小取不到时不画条（只显示已传字节 + "大小未知"），宁可少说也不猜一个百分比。
+ */
+function TransferBanner({ transfer }: { transfer: Transfer }) {
+  const { token } = theme.useToken();
+  const pct = percentOf(transfer);
+  const failed = transfer.phase === "failed";
+  const done = transfer.phase === "done";
+  return (
+    <div
+      style={{
+        padding: "4px 12px",
+        background: token.colorBgElevated,
+        borderBottom: `1px solid ${token.colorBorderSecondary}`,
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+      }}
+    >
+      <span style={{ fontSize: 12, color: token.colorTextSecondary, whiteSpace: "nowrap" }}>
+        {kindLabel(transfer.kind)}: {transfer.filename}
+      </span>
+      {pct === null ? (
+        <span
+          style={{
+            flex: 1,
+            height: 4,
+            borderRadius: 2,
+            background: token.colorFillSecondary,
+          }}
+        />
+      ) : (
+        <Progress
+          percent={pct}
+          size="small"
+          style={{ flex: 1, margin: 0 }}
+          status={failed ? "exception" : done ? "success" : "active"}
+          strokeColor={failed ? token.colorError : done ? token.colorSuccess : token.colorPrimary}
+          showInfo={false}
+        />
+      )}
+      <span
+        style={{
+          fontSize: 12,
+          whiteSpace: "nowrap",
+          color: failed ? token.colorError : token.colorTextSecondary,
+        }}
+      >
+        {describeTransfer(transfer)}
+      </span>
+    </div>
+  );
 }
 
 interface EditingFile {
@@ -68,7 +137,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
   const [selectedEntries, setSelectedEntries] = useState<Set<string>>(new Set());
   const [lastClickedName, setLastClickedName] = useState<string | null>(null);
   const [focusedIndex, setFocusedIndex] = useState(-1);
-  const [transfer, setTransfer] = useState<TransferState | null>(null);
+  const [transfer, setTransfer] = useState<Transfer | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [contextMenuEntry, setContextMenuEntry] = useState<SftpEntry | null>(null);
   const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
@@ -114,6 +183,45 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
     const activePane = tab?.panes.find((p) => p.id === state.activePaneId);
     return activePane?.sessionId || tab?.sessionId;
   }, [serverId]);
+
+  // 本面板当前对应的会话：进度订阅按它分发（P-3 会话隔离），重连换了 id 会自动改挂。
+  const activeSessionId = getSessionId();
+  const nextTransferId = useRef(createTransferIds()).current;
+
+  useEffect(() => {
+    if (!activeSessionId) return;
+    return subscribeSftpProgress(activeSessionId, (ev) => {
+      setTransfer((prev) => applyProgress(prev, ev));
+    });
+  }, [activeSessionId]);
+
+  /**
+   * 执行一次传输：进度只来自后端 `sftp-progress`，成功/失败只来自命令返回的 `success`
+   * （后端失败不 reject，只回 `{success:false,error}`，不读它就会把断线、只读目录报成"上传成功"）。
+   * `transferId` 交给调用方塞进 IPC 参数，后端原样回带，前端凭它认领进度。
+   * 返回 null 表示成功，否则返回可直接上屏的失败原因。
+   */
+  const runTransfer = useCallback(
+    async (
+      kind: TransferKind,
+      filename: string,
+      sessionId: string,
+      call: (transferId: number) => Promise<unknown>
+    ): Promise<string | null> => {
+      const id = nextTransferId();
+      setTransfer(beginTransfer(id, sessionId, kind, filename));
+      let error: string | null = null;
+      try {
+        error = transferFailure(await call(id));
+      } catch (e) {
+        error = String(e);
+      }
+      setTransfer((prev) => settleTransfer(prev, id, error === null, error ?? undefined));
+      setTimeout(() => setTransfer((prev) => clearFinished(prev, id)), TRANSFER_HOLD_MS);
+      return error;
+    },
+    [nextTransferId]
+  );
 
   // ---- Sorting ----
 
@@ -323,13 +431,6 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
     [pathInput, navigateTo, sortedEntries, focusedIndex, selectedEntries.size, handleSelectAll, handleGoUp]
   );
 
-  const formatSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-  };
-
   // ---- File operations ----
 
   const handleUpload = useCallback(
@@ -351,26 +452,17 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       }
 
       for (const localPath of filePaths) {
-        const filename = localPath.split("/").pop() || localPath.split("\\").pop() || "file";
+        const filename = basenameOf(localPath);
         const remotePath = sftpPath.endsWith("/") ? sftpPath + filename : sftpPath + "/" + filename;
-        setTransfer({ type: "upload", filename, progress: 0 });
-        try {
-          await invoke("sftp_upload", {
-            sessionId,
-            localPath,
-            remotePath,
-          });
-          setTransfer((prev) => (prev ? { ...prev, progress: 100 } : null));
-          message.success(`上传成功: ${filename}`);
-        } catch (e) {
-          message.error(`上传失败: ${String(e)}`);
-        } finally {
-          setTimeout(() => setTransfer(null), 800);
-        }
+        const error = await runTransfer("upload", filename, sessionId, (transferId) =>
+          invoke("sftp_upload", { sessionId, localPath, remotePath, transferId })
+        );
+        if (error === null) message.success(`上传成功: ${filename}`);
+        else message.error(`上传失败: ${filename}: ${error}`);
       }
       navigateTo(sftpPath);
     },
-    [sftpPath, getSessionId, navigateTo]
+    [sftpPath, getSessionId, navigateTo, runTransfer]
   );
 
   const handleDownload = useCallback(
@@ -397,22 +489,13 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       });
       if (!localPath) return;
 
-      setTransfer({ type: "download", filename: target.name, progress: 0 });
-      try {
-        await invoke("sftp_download", {
-          sessionId,
-          remotePath,
-          localPath,
-        });
-        setTransfer((prev) => (prev ? { ...prev, progress: 100 } : null));
-        message.success(`下载成功: ${target.name}`);
-      } catch (e) {
-        message.error(`下载失败: ${String(e)}`);
-      } finally {
-        setTimeout(() => setTransfer(null), 800);
-      }
+      const error = await runTransfer("download", target.name, sessionId, (transferId) =>
+        invoke("sftp_download", { sessionId, remotePath, localPath, transferId })
+      );
+      if (error === null) message.success(`下载成功: ${target.name}`);
+      else message.error(`下载失败: ${target.name}: ${error}`);
     },
-    [sftpPath, getSessionId]
+    [sftpPath, getSessionId, runTransfer]
   );
 
   // ---- Batch operations ----
@@ -452,22 +535,13 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       });
       if (!localPath) continue;
 
-      setTransfer({ type: "download", filename: entry.name, progress: 0 });
-      try {
-        await invoke("sftp_download", {
-          sessionId,
-          remotePath,
-          localPath,
-        });
-        setTransfer((prev) => (prev ? { ...prev, progress: 100 } : null));
-        message.success(`下载成功: ${entry.name}`);
-      } catch (e) {
-        message.error(`下载失败: ${entry.name}: ${String(e)}`);
-      } finally {
-        setTimeout(() => setTransfer(null), 800);
-      }
+      const error = await runTransfer("download", entry.name, sessionId, (transferId) =>
+        invoke("sftp_download", { sessionId, remotePath, localPath, transferId })
+      );
+      if (error === null) message.success(`下载成功: ${entry.name}`);
+      else message.error(`下载失败: ${entry.name}: ${error}`);
     }
-  }, [sftpPath, selectedEntries, sortedEntries, getSessionId]);
+  }, [sftpPath, selectedEntries, sortedEntries, getSessionId, runTransfer]);
 
   const handleBatchDelete = useCallback(() => {
     const sessionId = getSessionId();
@@ -581,13 +655,15 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         const editDir = `${tempDir}/z-terminal-edit`;
         const localPath = `${editDir}/${entry.name}`;
 
-        setTransfer({ type: "download", filename: entry.name, progress: 0 });
-        await invoke("sftp_download", {
-          sessionId,
-          remotePath,
-          localPath,
-        });
-        setTransfer(null);
+        const pulled = await runTransfer("download", entry.name, sessionId, (transferId) =>
+          invoke("sftp_download", { sessionId, remotePath, localPath, transferId })
+        );
+        // 拉不下来就别打开编辑器：编辑一份不存在（或是上一次残留）的本地文件，
+        // 保存回去会覆盖远端内容
+        if (pulled !== null) {
+          message.error(`编辑文件失败: ${entry.name}: ${pulled}`);
+          return;
+        }
 
         const statResult = await invoke<{ modified: number }>("get_file_modified_time", { path: localPath }).catch(() => ({ modified: Date.now() }));
         const lastModified = statResult.modified || Date.now();
@@ -604,22 +680,30 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
                 stopWatching(watcherId);
                 return;
               }
-              try {
-                await invoke("sftp_upload", {
-                  sessionId: currentSessionId,
-                  localPath,
-                  remotePath,
-                });
-                message.success(`${entry.name} 已自动上传更新`);
-                setEditingFiles((prev) =>
-                  prev.map((f) =>
-                    f.remotePath === remotePath ? { ...f, lastModified: currentStat.modified } : f
-                  )
-                );
-                navigateTo(sftpPath);
-              } catch (e) {
-                message.error(`自动上传失败: ${String(e)}`);
+              const pushed = await runTransfer(
+                "upload",
+                entry.name,
+                currentSessionId,
+                (transferId) =>
+                  invoke("sftp_upload", {
+                    sessionId: currentSessionId,
+                    localPath,
+                    remotePath,
+                    transferId,
+                  })
+              );
+              // 失败不能推进 lastModified：推进了就再也不会重试，远端却还拿着旧内容
+              if (pushed !== null) {
+                message.error(`自动上传失败: ${entry.name}: ${pushed}`);
+                return;
               }
+              message.success(`${entry.name} 已自动上传更新`);
+              setEditingFiles((prev) =>
+                prev.map((f) =>
+                  f.remotePath === remotePath ? { ...f, lastModified: currentStat.modified } : f
+                )
+              );
+              navigateTo(sftpPath);
             }
           } catch {
             // File might have been deleted or is temporarily unavailable during save
@@ -636,11 +720,10 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         watchersRef.current.push(watcherId);
         setEditingFiles((prev) => [...prev, editEntry]);
       } catch (e) {
-        setTransfer(null);
         message.error(`编辑文件失败: ${String(e)}`);
       }
     },
-    [sftpPath, getSessionId, editingFiles, navigateTo, stopWatching]
+    [sftpPath, getSessionId, editingFiles, navigateTo, stopWatching, runTransfer]
   );
 
   // 卸载清理见 watchersRef 那个 effect
@@ -1104,7 +1187,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       dataIndex: "size",
       key: "size",
       width: 100,
-      render: (size: number, record: SftpEntry) => (record.is_dir ? "-" : formatSize(size)),
+      render: (size: number, record: SftpEntry) => (record.is_dir ? "-" : formatBytes(size)),
     },
     {
       title: (
@@ -1303,32 +1386,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
       </div>
 
       {/* 传输进度指示器 */}
-      {transfer && (
-        <div
-          style={{
-            padding: "4px 12px",
-            background: token.colorBgElevated,
-            borderBottom: `1px solid ${token.colorBorderSecondary}`,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
-          <span style={{ fontSize: 12, color: token.colorTextSecondary, whiteSpace: "nowrap" }}>
-            {transfer.type === "upload" ? "上传" : "下载"}: {transfer.filename}
-          </span>
-          <Progress
-            percent={transfer.progress}
-            size="small"
-            style={{ flex: 1, margin: 0 }}
-            strokeColor={token.colorPrimary}
-            showInfo={false}
-          />
-          <span style={{ fontSize: 12, color: token.colorTextSecondary, whiteSpace: "nowrap" }}>
-            {transfer.progress < 100 ? "传输中..." : "完成"}
-          </span>
-        </div>
-      )}
+      {transfer && <TransferBanner transfer={transfer} />}
 
       {/* 编辑中的文件指示器 */}
       {editingFiles.length > 0 && (
@@ -1494,7 +1552,7 @@ export default function SftpPanel({ serverId }: SftpPanelProps) {
         {selectedEntries.size > 0 && (
           <span>
             已选 {selectedEntries.size} 项
-            {selectedTotalSize > 0 && ` · ${formatSize(selectedTotalSize)}`}
+            {selectedTotalSize > 0 && ` · ${formatBytes(selectedTotalSize)}`}
           </span>
         )}
       </div>
