@@ -3,6 +3,7 @@ name = "z-biz-tool-terminal"
 version = "0.2.0"
 description = "服务器连接管理器 - 对标Xshell/Tabby"
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "z_biz_tool_terminal_lib"
