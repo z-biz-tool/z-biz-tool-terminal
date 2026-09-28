@@ -34,7 +34,7 @@ import {
 import type { MenuProps } from "antd";
 import { useServerStore } from "../stores/serverStore";
 import type { SftpEntry } from "../types";
-import { EmptyState, LoadingState } from "@/_shared";
+import { EmptyState, ListSkeleton } from "@/_shared";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -61,7 +61,14 @@ import {
   summarizeBatch,
   type BatchOutcome,
 } from "../utils/sftpDownloadPlan";
-import { listingCandidates } from "../utils/sftpListing";
+import { listingCandidates, scrollRowIntoView } from "../utils/sftpListing";
+import {
+  decidePoll,
+  pauseReasonOf,
+  shouldStopFor,
+  tickAllowed,
+  type PollSignal,
+} from "../utils/pollPolicy";
 import {
   beginBatch,
   describeBatch,
@@ -86,6 +93,9 @@ interface SftpPanelProps {
 
 /** 传输结束后进度条停留时长；摘掉时按 id 核对，晚到的定时器不得抹掉下一条传输 */
 const TRANSFER_HOLD_MS = 800;
+
+/** 表头加边框：虚拟体的 `y` 要从容器高度里扣掉这些，否则容器会出现第二条滚动条 */
+const TABLE_CHROME_H = 46;
 
 /**
  * 传输进度条。**数字只来自后端 `sftp-progress`**：旧实现是"开局写 0、IPC 返回就写 100"，
@@ -258,6 +268,14 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
   // 闭包里那份数组永远是挂载时的空表，后来开的监听器一个都关不掉（3 s 一次 IPC，命中还会往远端上传）。
   const watchersRef = useRef<number[]>([]);
   /**
+   * 轮询门闸的当前信号（纯逻辑见 `utils/pollPolicy`）。编辑监听器每 3 s 一次 IPC，
+   * 过去只要面板挂着就跑，窗口在后台、会话早就断了都照跑。
+   */
+  const pollRef = useRef<PollSignal>({ documentHidden: false, paneActive: true, connected: false });
+  /** 虚拟列表的可视高度：容器是 `flex:1`，只有量出来才知道一次该渲染多少行 */
+  const [listHeight, setListHeight] = useState(0);
+
+  /**
    * 面板还在不在。批量传输的循环、进度条的收尾定时器都会跨越卸载活下来：
    * 实测旧行为是"关掉面板 → 剩下两个文件照传 → 弹一条没有人看的汇总提示"。
    */
@@ -297,6 +315,18 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
   useEffect(() => {
     setPathInput(sftpPath);
   }, [sftpPath, activeSessionId]);
+
+  // 虚拟列表需要一个确定的像素高度才知道渲染几行，而容器是 `flex:1`（高度来自父布局），
+  // 只能量出来：拖动 SFTP 面板上边界、切换分屏都会改它。
+  useEffect(() => {
+    const el = tableRef.current;
+    if (!el) return;
+    const measure = () => setListHeight(el.clientHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Clear selection when directory changes
   // 会话换了也要清：两个会话可以停在同一个 `/`，只按 `sftpPath` 判断就选不中"换了主机"这件事，
@@ -458,6 +488,36 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
     },
     [getSessionId, listSftp, sftpPath]
   );
+
+  // 轮询门闸：把"这一拍该不该发"从定时器里抽出来（判定逻辑是纯函数，见 utils/pollPolicy）。
+  // 断线要彻底摘掉监听器而不是缓一拍 —— 留着它，重连成功后会把一个已经没人看的文件推回去。
+  useEffect(() => {
+    const prev = pollRef.current;
+    const next: PollSignal = { ...prev, connected: Boolean(activeSessionId) };
+    if (next.connected === prev.connected) return;
+    pollRef.current = next;
+    if (shouldStopFor(pauseReasonOf(next))) {
+      watchersRef.current.slice().forEach((id) => stopWatching(id));
+      setEditingFiles((list) =>
+        list.map((f) => (f.watcher === null ? f : { ...f, watcher: null }))
+      );
+    }
+  }, [activeSessionId, stopWatching]);
+
+  // 回到前景的那一刻补一次列目录：门闸关掉的那几分钟里远端可能早就变了，
+  // 人回来看到的却还是离开时那一屏，比不刷新更糟。
+  useEffect(() => {
+    const onVisibility = () => {
+      const prev = pollRef.current;
+      const next: PollSignal = { ...prev, documentHidden: document.hidden };
+      if (next.documentHidden === prev.documentHidden) return;
+      pollRef.current = next;
+      const decision = decidePoll(prev, next);
+      if (decision.runNow && decision.phase === "running") void navigateTo(sftpPath);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [navigateTo, sftpPath]);
 
   // 打开面板/切标签页时自己把列表对齐到本会话：旧实现从不主动列目录，全靠调用方在别处
   // 顺手 `listSftp`，而那些调用传的是错的 id —— 面板于是永远空着。
@@ -1031,6 +1091,8 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
 
         const watcherId = window.setInterval(async () => {
           if (pushing) return;
+          // 门闸：窗口在后台时这一拍一次 IPC 都不发（断线由上面那个 effect 摘表）
+          if (!tickAllowed(pollRef.current)) return;
           try {
             const currentStat = await invoke<{ modified: number }>("get_file_modified_time", {
               path: localPath,
@@ -1521,6 +1583,25 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
   const dirCount = useMemo(() => sortedEntries.filter((e) => e.is_dir).length, [sortedEntries]);
   const fileCount = useMemo(() => sortedEntries.filter((e) => !e.is_dir).length, [sortedEntries]);
 
+  // ↓/↑ 换高亮行时，虚拟列表里看不见的那一行根本不在 DOM 里，scrollIntoView 无从下手；
+  // 于是按行号算 scrollTop（算式是纯函数，见 utils/sftpListing.scrollRowIntoView）。
+  useEffect(() => {
+    if (focusedIndex < 0) return;
+    const host = tableRef.current;
+    if (!host) return;
+    const scroller =
+      host.querySelector<HTMLElement>(".rc-virtual-list") ??
+      host.querySelector<HTMLElement>(".ant-table-body");
+    if (!scroller) return;
+    const row = host.querySelector<HTMLElement>(".ant-table-row");
+    const rowHeight = row?.getBoundingClientRect().height || 33;
+    scroller.scrollTop = scrollRowIntoView(focusedIndex, {
+      rowHeight,
+      viewHeight: scroller.clientHeight,
+      currentTop: scroller.scrollTop,
+    });
+  }, [focusedIndex, sortedEntries.length]);
+
   // ---- Table columns ----
 
   const renderSortIcon = useCallback(
@@ -1903,7 +1984,8 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
           </div>
         )}
         {loading ? (
-          <LoadingState tip="加载文件列表..." minHeight={120} />
+          // 骨架屏而不是转圈：这一屏接下来就是"一叠行"，形状先给出来，人眼不用重新学一遍排布
+          <ListSkeleton rows={Math.max(4, Math.floor(listHeight / 33))} minHeight={120} />
         ) : !activeSessionId ? (
           // 没有会话时不能写"目录为空"：那是"我看过了，确实没有东西"的意思，
           // 而这里什么都没看成。
@@ -1937,6 +2019,10 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
             rowKey="name"
             size="small"
             pagination={false}
+            // 家目录动辄上千项：全量渲染时每次勾选/排序都要把上千行重画一遍。
+            // `virtual` 是 antd v6 Table 自带的，按 scroll 的可视区只画看得见的那几行。
+            virtual
+            scroll={{ x: 720, y: Math.max(160, listHeight - TABLE_CHROME_H) }}
             onRow={(record, index) => ({
               onClick: (e) => {
                 handleEntryClick(record, e);

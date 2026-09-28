@@ -42,7 +42,7 @@ import DangerConfirmHost from "./components/DangerConfirm";
 import HostKeyPrompt from "./components/HostKeyPrompt";
 import { activeRecentOutput, activeSelection, feedActiveTerminal } from "./services/terminalFeeds";
 import { useServerStore } from "./stores/serverStore";
-import { AppShell, ThemeProvider, EmptyState } from "@/_shared";
+import { AppShell, ThemeProvider, EmptyState, AppErrorBoundary, PanelErrorBoundary } from "@/_shared";
 import { auditEvent } from "./services/auditLog";
 import { commandGuard } from "./utils/commandGuard";
 import { attemptKey } from "./utils/reconnectPolicy";
@@ -983,7 +983,9 @@ function AppInner() {
                       }}
                     >
                       {tab.panes.length <= 1 ? (
-                        <TerminalView tabId={tab.id} paneId={tab.panes[0]?.id} />
+                        <PanelErrorBoundary label="终端面板">
+                          <TerminalView tabId={tab.id} paneId={tab.panes[0]?.id} />
+                        </PanelErrorBoundary>
                       ) : (
                         tab.panes.map((pane, i) => {
                           // 每一格只写「关闭此分屏」时读屏听到 N 个同名按钮，分不清关的是哪一格：
@@ -1026,7 +1028,9 @@ function AppInner() {
                                 }}
                                 onMouseDown={() => setActivePane(tab.id, pane.id)}
                               >
-                                <TerminalView tabId={tab.id} paneId={pane.id} />
+                                <PanelErrorBoundary label="终端面板">
+                                  <TerminalView tabId={tab.id} paneId={pane.id} />
+                                </PanelErrorBoundary>
                                 {tab.panes.length > 1 && (
                                   <div
                                     style={{
@@ -1097,7 +1101,9 @@ function AppInner() {
                       flexShrink: 0,
                     }}
                   >
-                    <SftpPanel tabId={activeTabId} />
+                    <PanelErrorBoundary label="文件传输面板">
+                      <SftpPanel tabId={activeTabId} />
+                    </PanelErrorBoundary>
                   </div>
                 </>
               )}
@@ -1228,9 +1234,13 @@ function AppInner() {
 }
 
 export default function App() {
+  // 顶层兜底：React 的 render 抛错默认把整棵树卸掉，用户只剩"重启应用"一条路。
+  // 面板级边界（终端/文件传输）已经把爆炸半径收小，这里接住的是壳子自己。
   return (
-    <ThemeProvider>
-      <AppInner />
-    </ThemeProvider>
+    <AppErrorBoundary>
+      <ThemeProvider>
+        <AppInner />
+      </ThemeProvider>
+    </AppErrorBoundary>
   );
 }

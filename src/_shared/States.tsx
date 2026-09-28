@@ -1,4 +1,4 @@
-import { Spin, Result, Button } from "antd";
+import { Spin, Result, Button, Skeleton } from "antd";
 import { InboxOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ReactNode } from "react";
 
@@ -49,6 +49,27 @@ export function LoadingState({ tip = "加载中...", minHeight = 240 }: LoadingS
       }}
     >
       <Spin description={tip} size="large" />
+    </div>
+  );
+}
+
+/**
+ * 列表骨架屏：形状就是"接下来会出现的东西"。
+ *
+ * 一个居中的转圈不告诉用户要出现多少行、列宽如何，读秒之后视野里的排布还得重新学一遍；
+ * 而列表/文件面板这类"马上会有一大片行"的位置闪一下空白最难受。行数由调用方按可视高度给，
+ * 骨架铺满即可。
+ */
+export function ListSkeleton({
+  rows = 8,
+  minHeight = 160,
+}: {
+  rows?: number;
+  minHeight?: number;
+}) {
+  return (
+    <div style={{ minHeight, padding: "8px 12px" }}>
+      <Skeleton active title={false} paragraph={{ rows, width: "100%" }} />
     </div>
   );
 }

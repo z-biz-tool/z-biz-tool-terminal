@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
-import type { ILinkProvider, ILink, IBufferRange, IBufferCellPosition } from "@xterm/xterm";
+import type {
+  ILinkProvider,
+  ILink,
+  IBufferRange,
+  IBufferCellPosition,
+  ITheme,
+} from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { useServerStore } from "../stores/serverStore";
@@ -14,21 +19,22 @@ import { useNow } from "../utils/useNow";
 import TerminalSearch from "./TerminalSearch";
 import { LineInputGuard, type PushOptions } from "../utils/inputGuard";
 import { createBackpressuredWriter } from "../utils/terminalWriter";
-import { attachWebglRenderer } from "../utils/webglRenderer";
+import { attachWebglRenderer, type AttachedRenderer } from "../utils/webglRenderer";
+import {
+  buildTerminalOptions,
+  normalizeCursorStyle,
+  proposedOptionsOf,
+  withAlphaBackground,
+} from "../utils/terminalOptions";
 import { ensurePtyListening, subscribePtyOutput } from "../services/ptyBus";
 import { approveCommand, guardEnabled, paneTargets } from "../services/commandGate";
 import { registerTerminal } from "../services/terminalFeeds";
 import { hit, isMacPlatform } from "../utils/shortcuts";
 import ZmodemOverlay, { isZmodemHandshake, type ZmodemState, type ZmodemTransferType } from "./ZmodemOverlay";
 
-const THEMES: Record<string, {
-  background: string; foreground: string; cursor: string;
-  selectionBackground: string; selectionForeground: string;
-  black: string; red: string; green: string; yellow: string;
-  blue: string; magenta: string; cyan: string; white: string;
-  brightBlack: string; brightRed: string; brightGreen: string; brightYellow: string;
-  brightBlue: string; brightMagenta: string; brightCyan: string; brightWhite: string;
-}> = {
+// 每个预设都过一遍 ITheme：名字拼错 = 多余属性，编译期就报出来（原先手写的字段清单
+// 只是"看起来像" xterm 的主题接口）。background 单独要求必有：半透明背景要拼字母。
+const THEMES: Record<string, ITheme & { background: string }> = {
   dark: {
     background: "#1e1e1e", foreground: "#d4d4d4", cursor: "#d4d4d4",
     selectionBackground: "#264f78", selectionForeground: "#ffffff",
@@ -126,6 +132,9 @@ interface TerminalViewProps {
   paneId?: string;
 }
 
+/** 粘贴标记的有效期：xterm 在同一波事件里就把文本交回 onData，超过这个窗就当我多标了一次 */
+const PASTE_MARK_WINDOW_MS = 400;
+
 export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -143,6 +152,8 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   });
   const zmodemBufferRef = useRef<string>("");
   const zmodemActiveRef = useRef(false);
+  /** 最近一次浏览器把剪贴板交给我们（⌘V / 中键 / 右键粘贴）的时刻，用于给输入标来源 */
+  const pastedAtRef = useRef(0);
 
   const {
     tabs,
@@ -234,39 +245,41 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
     // Don't re-init if terminal already exists for this pane
     if (termRef.current) return;
 
+    const host = terminalRef.current;
+
     const themePreset = THEMES[settings.theme] || THEMES.dark;
     const initTheme = settings.background_image
-      ? { ...themePreset, background: themePreset.background + 'cc' }
+      ? withAlphaBackground(themePreset, "cc")
       : themePreset;
 
-    const term = new Terminal({
-      fontSize: settings.font_size,
-      fontFamily: settings.font_family,
-      scrollback: settings.scrollback,
-      cursorBlink: settings.cursor_blink,
-      cursorStyle: (settings.cursor_style as any) || "block",
-      fontLigatures: settings.font_ligatures || false,
-      bellStyle: settings.bell ? "sound" : "none",
-      theme: initTheme,
-      convertEol: true,
-      allowProposedApi: true,
-    } as any);
+    // 选项装配走 utils/terminalOptions：整包 `as any` 会让拼错的选项名静默失效
+    // （用户看到的"设置了没反应"就是这么来的），只有 d.ts 未登记的两项在那里窄化。
+    const term = new Terminal(buildTerminalOptions(settings, initTheme));
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(terminalRef.current);
     fitAddon.fit();
 
-    // WebGL 渲染（T-3-7）：刷屏时明显比 DOM 渲染省。装不上或中途丢上下文都会
-    // 自动退回 DOM 渲染器，因此这里只 warn，不让终端变成空白。
-    const renderer = attachWebglRenderer(
-      term,
-      {
-        enabled: settings.webgl_renderer !== false,
-        onFallback: (reason) => console.warn(`[terminal ${tabId}:${paneId ?? "main"}] ${reason}`),
-      },
-      () => new WebglAddon(),
-    );
+    // WebGL 渲染（T-3-7）：刷屏时明显比 DOM 渲染省。装不上或中途丢上下文都会自动退回
+    // DOM 渲染器，因此只 warn，不让终端变成空白。
+    // addon 走动态 import：它依赖浏览器 `self`，静态引入等于把整个模块图绑在它身上 ——
+    // 一旦解析失败，连"退回 DOM 渲染"这条路都没有。装载策略仍然是注入的（见 webglRenderer），
+    // 所以这里只交出工厂，不在模块顶层求值它。
+    let renderer: AttachedRenderer | null = null;
+    let rendererGone = false;
+    const onFallback = (reason: string) =>
+      console.warn(`[terminal ${tabId}:${paneId ?? "main"}] ${reason}`);
+    void import("@xterm/addon-webgl")
+      .then(({ WebglAddon }) => {
+        if (rendererGone) return;
+        renderer = attachWebglRenderer(
+          term,
+          { enabled: settings.webgl_renderer !== false, onFallback },
+          () => new WebglAddon(),
+        );
+      })
+      .catch((e) => onFallback(`WebGL 不可用，已退回 DOM 渲染：${String(e)}`));
 
     termRef.current = term;
     fitRef.current = fitAddon;
@@ -374,8 +387,15 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
       if (rest) await feedInput(rest, opts);
     };
     term.onData((data) => {
-      void feedInput(data);
+      // ⌘V / 中键粘贴由 xterm 自己接走，再从 onData 吐回来时不带"这是粘贴"的标记；
+      // 捕获阶段先记一笔，审计里的来源才分得清手输与粘贴。
+      const pasted = Date.now() - pastedAtRef.current < PASTE_MARK_WINDOW_MS;
+      void feedInput(data, pasted ? { paste: true } : {});
     });
+    const markPaste = () => {
+      pastedAtRef.current = Date.now();
+    };
+    host.addEventListener("paste", markPaste, true);
     feedInputRef.current = feedInput;
     // AI 建议的命令只能填入命令行、不能自动执行（P-1）：复用同一条带网关的输入通道。
     // 同时把"读"侧(选区/最近输出)暴露出去，供命令解释与错误分析取分析对象（T-2-3）。
@@ -423,12 +443,14 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
 
     return () => {
       disposed = true;
+      rendererGone = true;
+      renderer?.dispose();
+      host.removeEventListener("paste", markPaste, true);
       ro.disconnect();
       resizeObserverRef.current = null;
       refitRef.current = () => {};
       unsubscribe();
       writer.dispose();
-      renderer.dispose();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
@@ -443,10 +465,12 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
     const term = termRef.current;
     if (!term) return;
 
-    const opts = term.options as any;
-    opts.cursorStyle = settings.cursor_style || "block";
-    opts.fontLigatures = settings.font_ligatures;
-    opts.bellStyle = settings.bell ? "sound" : "none";
+    // 只改这一项以外的选项都直接写在 term.options 上（xterm 的 options 是可写的）；
+    // 那两个 d.ts 未登记的走 terminalOptions 里的同一处窄化，不再整包 as any。
+    term.options.cursorStyle = normalizeCursorStyle(settings.cursor_style);
+    const proposed = proposedOptionsOf(term.options);
+    proposed.fontLigatures = settings.font_ligatures;
+    proposed.bellStyle = settings.bell ? "sound" : "none";
     term.options.fontSize = settings.font_size;
     term.options.fontFamily = settings.font_family;
     term.options.scrollback = settings.scrollback;
@@ -455,7 +479,7 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
     // 当有背景图片时，修改主题背景为半透明
     const themePreset = THEMES[settings.theme] || THEMES.dark;
     if (settings.background_image) {
-      term.options.theme = { ...themePreset, background: themePreset.background + 'cc' };
+      term.options.theme = withAlphaBackground(themePreset, "cc");
     } else {
       term.options.theme = themePreset;
     }
@@ -735,13 +759,42 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
   // 否则按一次 Cmd+F 会给每个隐藏面板都打开一条搜索栏。
   useEffect(() => {
     const mac = isMacPlatform();
+    const terminalHasFocus = (): boolean => {
+      const host = terminalRef.current;
+      const el = document.activeElement;
+      return !!host && !!el && host.contains(el);
+    };
     const onKey = (e: KeyboardEvent) => {
-      if (!hit(e, "terminal-search", mac)) return;
+      const search = hit(e, "terminal-search", mac);
+      const copy = hit(e, "terminal-copy", mac);
+      const clear = hit(e, "terminal-clear", mac);
+      if (!search && !copy && !clear) return;
       const { activeTabId, activePaneId } = useServerStore.getState();
       if (tabId !== activeTabId) return;
       if (paneId && activePaneId && paneId !== activePaneId) return;
+      // 复制/清屏还要求焦点真的在这个终端里：AI 输入框、SFTP 地址栏里的 ⌘C 必须是普通复制，
+      // 否则人在别处连一个字都拷不出来（⌘F 没有这个问题——搜索栏本来就归当前面板）。
+      if (!search && !terminalHasFocus()) return;
       e.preventDefault();
-      setSearchOpen(true);
+      if (search) {
+        setSearchOpen(true);
+        return;
+      }
+      if (clear) {
+        // 只清屏，不调 focus()：焦点本来就在这一格里
+        termRef.current?.clear();
+        return;
+      }
+      const term = termRef.current;
+      if (!term) return;
+      if (term.hasSelection()) {
+        const text = term.getSelection();
+        if (text) void navigator.clipboard.writeText(text).catch(() => {});
+        return;
+      }
+      // 没有选区时 ⌘C 是中断信号（Xshell/Tabby 的老习惯）：不接管的话 WKWebView 什么都不做，
+      // 人会觉得"卡住的命令停不下来"。走同一条带闸门的通道，闸门自己把它当行作废。
+      void feedInputRef.current?.("\x03");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

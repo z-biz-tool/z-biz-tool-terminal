@@ -18,6 +18,7 @@ import {
 } from "@ant-design/icons";
 import { useServerStore } from "../stores/serverStore";
 import type { ServerSystemInfo } from "../types";
+import { decidePoll, tickAllowed, type PollSignal } from "../utils/pollPolicy";
 
 const REFRESH_INTERVAL_MS = 30_000;
 
@@ -52,12 +53,45 @@ export default function ServerStatsPanel() {
   const sessionId = activePane?.sessionId;
   const isConnected = activePane?.state === "connected";
 
-  // 连接后首次拉取 + 30s 定时刷新
+  // 连接后首次拉取 + 30 s 定时刷新。刷新受同一份门闸管（utils/pollPolicy）：
+  // 窗口在后台时一次 SSH 命令都不发，回到前景立刻补一次，而不是让人等下一个 30 s。
   useEffect(() => {
     if (!sessionId || !isConnected) return;
-    fetchServerInfo(sessionId);
-    const t = setInterval(() => fetchServerInfo(sessionId, true), REFRESH_INTERVAL_MS);
-    return () => clearInterval(t);
+    let timer: number | null = null;
+    let last: PollSignal = { documentHidden: false, paneActive: true, connected: true };
+    const start = () => {
+      if (timer !== null) return;
+      timer = window.setInterval(
+        () => void fetchServerInfo(sessionId, true),
+        REFRESH_INTERVAL_MS,
+      );
+    };
+    const stop = () => {
+      if (timer === null) return;
+      window.clearInterval(timer);
+      timer = null;
+    };
+    last = { documentHidden: document.hidden, paneActive: true, connected: true };
+    if (tickAllowed(last)) {
+      fetchServerInfo(sessionId);
+      start();
+    }
+    const onVisibility = () => {
+      const next: PollSignal = { documentHidden: document.hidden, paneActive: true, connected: true };
+      const decision = decidePoll(last, next);
+      last = next;
+      if (decision.phase === "paused") {
+        stop();
+        return;
+      }
+      void fetchServerInfo(sessionId, true);
+      start();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [sessionId, isConnected, fetchServerInfo]);
 
   const info = sessionId ? serverInfos[sessionId] : undefined;

@@ -119,6 +119,21 @@ const SHORTCUTS = [
     wiredIn: "src/components/TerminalView.tsx",
   },
   {
+    id: "terminal-copy",
+    group: "input",
+    label: "复制选区（无选区时发送中断信号）",
+    combo: { key: "C", mod: true },
+    wiredIn: "src/components/TerminalView.tsx",
+  },
+  {
+    id: "terminal-clear",
+    group: "input",
+    label: "清空终端屏幕与回滚缓冲区",
+    // ⌘K 已经是命令面板，清屏让位给 ⌘⇧K
+    combo: { key: "K", mod: true, shift: true },
+    wiredIn: "src/components/TerminalView.tsx",
+  },
+  {
     id: "toggle-sftp",
     group: "layout",
     label: "切换 SFTP 面板",

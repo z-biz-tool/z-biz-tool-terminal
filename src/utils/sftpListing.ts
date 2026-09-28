@@ -11,3 +11,24 @@ export function listingCandidates(remembered: string | undefined): string[] {
   // 记住的那一级可能已经被删掉/换主机后不存在：退回根，不然一次失败提示闪过就只剩空白
   return [remembered, "/"];
 }
+
+/**
+ * 虚拟列表里把某一行滚进可视区该用的 scrollTop。
+ *
+ * 开了 `virtual` 之后，看不见的行压根不在 DOM 里 —— 于是"把高亮行 scrollIntoView"这条
+ * 老路走不通（查不到节点，什么也不动，键盘 ↓ 到底时高亮就此消失）。行高均匀时可以按行号
+ * 直接算，所以把算术抽成纯函数：只保证两件事 —— 目标行进入 [top, top+view)，以及
+ * 已经在视野里时绝不无谓地动一下。
+ */
+export function scrollRowIntoView(
+  index: number,
+  geo: { rowHeight: number; viewHeight: number; currentTop: number },
+): number {
+  const { rowHeight, viewHeight, currentTop } = geo;
+  if (index < 0 || rowHeight <= 0 || viewHeight <= 0) return currentTop;
+  const top = index * rowHeight;
+  const bottom = top + rowHeight;
+  if (top < currentTop) return Math.max(0, top);
+  if (bottom > currentTop + viewHeight) return bottom - viewHeight;
+  return currentTop;
+}

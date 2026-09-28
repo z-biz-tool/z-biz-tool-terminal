@@ -180,6 +180,8 @@
 | `Ctrl+Shift+P` | 命令面板（VSCode 风格） |
 | `Ctrl+Shift+Y` | 命令历史检索（只填入、不执行） |
 | `Ctrl+F` | 在当前终端里搜索（栏内 Enter 下一条 / Shift+Enter 上一条） |
+| `Ctrl+C` | 复制选区（无选区时发送中断信号） |
+| `Ctrl+Shift+K` | 清空终端屏幕与回滚缓冲区 |
 | `Ctrl+Shift+E` | 切换 SFTP 面板 |
 | `Ctrl+Shift+S` | 切换命令片段面板 |
 | `Ctrl+Shift+H` | 水平分屏 |
