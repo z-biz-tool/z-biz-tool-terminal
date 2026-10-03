@@ -24,9 +24,9 @@ jobs:
           node-version: 22
           cache: npm
 
-      # lockfile 里 z-biz-tool-shared 的 resolved 指向 npmmirror，保持一致
+      # lockfile 的 resolved 已统一指向 registry.npmjs.org（2026-10-03），无需钉 registry
       - name: Install dependencies
-        run: npm ci --registry=https://registry.npmmirror.com
+        run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
