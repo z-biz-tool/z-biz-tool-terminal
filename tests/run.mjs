@@ -55,8 +55,14 @@ for (const file of cases) {
   );
   if (built.status !== 0) {
     failed++;
-    summary.push([file, "打包失败"]);
-    process.stdout.write(built.stderr || built.stdout);
+    summary.push([file, built.error ? "打包器缺失" : "打包失败"]);
+    // 打包器本身找不到时（没跑 npm ci），stderr/stdout 都是 undefined，
+    // 直接 write 会抛 ERR_INVALID_ARG_TYPE —— 错误处理分支自己先崩，
+    // 把"esbuild 不存在"这条真正有用的信息盖成一个 stream 报错。
+    process.stdout.write(
+      [built.stderr, built.stdout, built.error && String(built.error)]
+        .filter(Boolean).join("\n") + "\n"
+    );
     continue;
   }
   const ran = spawnSync(process.execPath, [bundle], { encoding: "utf8", timeout: 60_000 });
