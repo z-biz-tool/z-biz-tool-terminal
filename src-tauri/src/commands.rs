@@ -7,14 +7,18 @@ use tokio::sync::RwLock;
 use crate::hostkeys::HostKeyPolicy;
 use crate::ssh::{shell_escape, SftpEntry, SshSession};
 
+/// 会话表：session_id -> Arc<SshSession>
+type SessionMap = HashMap<String, Arc<SshSession>>;
+/// 全局会话表句柄：OnceCell 包一层，保证只初始化一次
+type SessionStore = Arc<RwLock<SessionMap>>;
+
 /// SSH会话存储: session_id -> SshSession
 ///
 /// 用 RwLock 保护映射表本身（增删查极快），会话以 `Arc<SshSession>` 存放。
 /// 取会话时克隆 Arc 后立即释放全局锁，避免远程 IO 期间阻塞其它会话（P-3 会话隔离）。
-static SESSIONS: tokio::sync::OnceCell<Arc<RwLock<HashMap<String, Arc<SshSession>>>>> =
-    tokio::sync::OnceCell::const_new();
+static SESSIONS: tokio::sync::OnceCell<SessionStore> = tokio::sync::OnceCell::const_new();
 
-async fn sessions() -> &'static Arc<RwLock<HashMap<String, Arc<SshSession>>>> {
+async fn sessions() -> &'static SessionStore {
     SESSIONS
         .get_or_init(|| async { Arc::new(RwLock::new(HashMap::new())) })
         .await
@@ -1163,17 +1167,15 @@ pub async fn tcp_probe(host: String, port: u16, timeout_ms: Option<u64>) -> TcpP
                         trimmed_host, port
                     )
                 }
-                std::io::ErrorKind::TimedOut => {
-                    format!("连接超时: 网络不通或防火墙拦截")
-                }
+                std::io::ErrorKind::TimedOut => "连接超时: 网络不通或防火墙拦截".to_string(),
                 std::io::ErrorKind::NetworkUnreachable => {
-                    format!("网络不可达: 请检查本机网络或路由")
+                    "网络不可达: 请检查本机网络或路由".to_string()
                 }
                 std::io::ErrorKind::HostUnreachable => {
-                    format!("主机不可达: 服务器关机 / 防火墙拦截 / 网关配置错误")
+                    "主机不可达: 服务器关机 / 防火墙拦截 / 网关配置错误".to_string()
                 }
                 std::io::ErrorKind::PermissionDenied => {
-                    format!("权限不足: 检查本机防火墙或 SELinux/AppArmor 策略")
+                    "权限不足: 检查本机防火墙或 SELinux/AppArmor 策略".to_string()
                 }
                 _ => format!("连接失败: {}", e),
             };

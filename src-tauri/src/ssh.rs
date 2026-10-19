@@ -215,6 +215,9 @@ pub struct SftpEntry {
 }
 
 /// SSH会话
+/// PTY 窗口尺寸：(列数, 行数)
+type WindowSize = (u32, u32);
+
 pub struct SshSession {
     pub id: String,
     pub host: String,
@@ -226,7 +229,7 @@ pub struct SshSession {
     /// PTY 数据写入通道
     pty_writer: Arc<Mutex<Option<tokio::sync::mpsc::Sender<String>>>>,
     /// PTY 窗口大小调整通道
-    pty_resize_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<(u32, u32)>>>>,
+    pty_resize_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<WindowSize>>>>,
     /// 会话日志写入通道：真正的磁盘写由独立 task 承担（T-3-2）
     log_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<LogCommand>>>>,
     /// 活跃的端口转发任务: forward_id -> (JoinHandle, 描述)
@@ -248,9 +251,17 @@ struct ClientHandler {
 /// 转发的通道信息
 pub struct ForwardedChannel {
     pub channel: Channel<client::Msg>,
+    // 这四个字段是**诊断信息**：转发建立时记录下来，但当前没有消费方
+    // （前端只显示转发列表，不逐条显示通道的对端地址）。
+    // 保留它们是因为排查"端口转发连到了哪里"时需要这份信息，
+    // 而重新加回来要重新在转发建立路径上埋点。
+    #[allow(dead_code)]
     pub connected_address: String,
+    #[allow(dead_code)]
     pub connected_port: u32,
+    #[allow(dead_code)]
     pub originator_address: String,
+    #[allow(dead_code)]
     pub originator_port: u32,
 }
 
@@ -708,6 +719,10 @@ async fn authenticate_session(
 
 impl SshSession {
     /// 连接SSH服务器
+    // 参数多是有意的：连接两端的 host/port/username/认证 各成一组，
+    // 打包成结构体会把这个函数拆成"构造结构体 + 用结构体"两步，
+    // 反而更难看出哪几个参数属于哪一端。
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         host: &str,
         port: u16,
@@ -769,6 +784,10 @@ impl SshSession {
     }
 
     /// 通过跳板机连接SSH服务器 (ProxyJump)
+    // 参数多是有意的：连接两端的 host/port/username/认证 各成一组，
+    // 打包成结构体会把这个函数拆成"构造结构体 + 用结构体"两步，
+    // 反而更难看出哪几个参数属于哪一端。
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_via_jump(
         jump_host: &str,
         jump_port: u16,
@@ -936,13 +955,10 @@ impl SshSession {
                 let attrs = entry.metadata();
                 let is_dir = attrs.is_dir();
                 let size = attrs.size.unwrap_or(0);
-                let modified = attrs
-                    .mtime
-                    .map(|t| {
-                        chrono::DateTime::from_timestamp(t as i64, 0)
-                            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                    })
-                    .flatten();
+                let modified = attrs.mtime.and_then(|t| {
+                    chrono::DateTime::from_timestamp(t as i64, 0)
+                        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                });
                 let permissions = attrs.permissions.map(format_permission);
                 entries.push(SftpEntry {
                     name,
@@ -1006,6 +1022,10 @@ impl SshSession {
 
     /// 32 KB 一块地搬运，并按 `SFTP_PROGRESS_INTERVAL_MS` 节流上报进度。
     /// 读/写两端谁本地谁远端都行，进度判定只有一份（两条路径各写一遍必然分家）。
+    // 参数多是有意的：连接两端的 host/port/username/认证 各成一组，
+    // 打包成结构体会把这个函数拆成"构造结构体 + 用结构体"两步，
+    // 反而更难看出哪几个参数属于哪一端。
+    #[allow(clippy::too_many_arguments)]
     async fn pump_with_progress<R, W>(
         &self,
         app: &tauri::AppHandle,
@@ -1602,7 +1622,7 @@ impl SshSession {
                 };
 
                 // SOCKS5 握手
-                if let Err(_) = socks5_handshake(&mut tcp_stream).await {
+                if socks5_handshake(&mut tcp_stream).await.is_err() {
                     let _ = tcp_stream.shutdown().await;
                     continue;
                 }

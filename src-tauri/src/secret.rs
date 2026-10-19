@@ -91,8 +91,10 @@ pub fn decrypt_with(key: &[u8; KEY_LEN], value: &str) -> Result<String, String> 
     if !is_encrypted(value) {
         return Ok(value.to_string());
     }
+    // ENC_PREFIX 是纯 ASCII 前缀且 is_encrypted 已确认过前缀，
+    // 所以 value[ENC_PREFIX.len()..] 必然落在字符边界上。
     let raw = data_encoding::BASE64
-        .decode(value[ENC_PREFIX.len()..].as_bytes())
+        .decode(&value.as_bytes()[ENC_PREFIX.len()..])
         .map_err(|e| format!("密文 base64 解析失败: {}", e))?;
     if raw.len() < NONCE_LEN {
         return Err("密文长度不足, 已损坏".into());
@@ -184,7 +186,7 @@ mod tests {
         let key = test_key();
         let sealed = encrypt_with(&key, "secret").unwrap();
         let mut bytes = data_encoding::BASE64
-            .decode(sealed[ENC_PREFIX.len()..].as_bytes())
+            .decode(&sealed.as_bytes()[ENC_PREFIX.len()..])
             .unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;

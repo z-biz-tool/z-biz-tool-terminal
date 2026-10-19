@@ -240,7 +240,7 @@ fn csv_cell(raw: &str) -> String {
         Some('=' | '+' | '-' | '@' | '\t' | '\r') => format!("'{}", raw),
         _ => raw.to_string(),
     };
-    let single_line = guarded.replace('\n', " ").replace('\r', " ");
+    let single_line = guarded.replace(['\n', '\r'], " ");
     format!("\"{}\"", single_line.replace('"', "\"\""))
 }
 
@@ -392,6 +392,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // 这把自己的锁**故意**跨 await 持有：它串行化的是会改进程级环境变量的测试，
+    // 锁在 await 期间不释放正是串行的含义。
+    #[allow(clippy::await_holding_lock)]
     async fn records_return_newest_first_and_export_leaves_trail() {
         let _guard = lock_env();
         let dir = isolated_dir("export");
@@ -428,6 +431,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // 这把自己的锁**故意**跨 await 持有：它串行化的是会改进程级环境变量的测试，
+    // 锁在 await 期间不释放正是串行的含义。
+    #[allow(clippy::await_holding_lock)]
     async fn export_refuses_paths_outside_whitelist() {
         let _guard = lock_env();
         let dir = isolated_dir("export-guard");

@@ -182,15 +182,30 @@ fn mask_secret_assignments(line: &str) -> String {
 /// 找到第一处 `敏感键 <分隔> 值` 并替换其值；没有命中返回 None
 fn mask_one_assignment(line: &str) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
-    let lower: String = chars.iter().flat_map(|c| c.to_lowercase()).collect();
-    let lower = lower.as_str();
+    // 只按 ASCII 小写比较，且保持**逐字符对齐**。
+    //
+    // 原来这里把 chars 拼回一个 String 再用**字节下标**去切（`lower[from..]`），
+    // 而 `from` 却是**字符下标**（chars 的下标）—— 两套坐标系混用。
+    // 只要同一行里 from 之前出现过任何非 ASCII 字符（本项目日志几乎条条带中文），
+    // 字节偏移与字符下标就对不上：
+    //   - `lower[from..]` 切在字符中间 → panic；
+    //   - 切得动时，`start` 是字节偏移却被当成字符下标去取 `chars[start - 1]`
+    //     → `index out of bounds` panic（实测：中文 + "password=" 直接打挂）。
+    //
+    // 同一个坑在 `mask_bearer_tokens` 里已经修过（见那里的注释），
+    // 这里沿用同样的范式：ASCII 小写 + `Vec<char>`，全程字符下标。
+    //
+    // 顺带修掉一个更隐蔽的对齐破坏：`to_lowercase()` 对 'İ'(U+0130) 会展开成
+    // **两个**字符（'i' + U+0307），用 flat_map 拼出来的 lower 字符数就和 chars
+    // 不再一一对应了。`to_ascii_lowercase()` 恒为 1:1。
+    let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
 
     for key in SECRET_KEYS {
-        let kb = key.as_bytes();
+        let kchars: Vec<char> = key.chars().collect();
         let mut from = 0usize;
-        while let Some(rel) = find_sub(lower[from..].as_bytes(), kb) {
+        while let Some(rel) = find_sub_chars(&lower[from..], &kchars) {
             let start = from + rel;
-            let end = start + kb.len();
+            let end = start + kchars.len();
             let before_ok = start == 0 || !is_word_char(chars[start - 1]);
             let after_ok = end >= chars.len()
                 || !is_word_char(chars[end])
@@ -249,13 +264,6 @@ fn mask_one_assignment(line: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || hay.len() < needle.len() {
-        return None;
-    }
-    (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
 }
 
 fn skip_spaces(chars: &[char], mut i: usize) -> usize {
@@ -474,11 +482,7 @@ fn mask_public_key_blobs(line: &str) -> String {
         if lower.contains(prefix) {
             if let Some(rel) = lower.find(prefix) {
                 let value_start = rel + prefix.len();
-                let blob = line[value_start..]
-                    .trim_start()
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("");
+                let blob = line[value_start..].split_whitespace().next().unwrap_or("");
                 if looks_like_base64(blob) {
                     let cut = value_start
                         + (line[value_start..].len() - line[value_start..].trim_start().len());
@@ -531,6 +535,163 @@ mod tests {
             let out = redact_once(case.0);
             assert!(!out.contains(case.1), "leaked {:?} -> {:?}", case.0, out);
         }
+    }
+
+    /// 中文行 + 敏感键赋值：脱敏器扫关键词时必须**全程用字符下标**。
+    ///
+    /// 修之前的实现把 chars 拼回 String 后用**字节下标**去切（`lower[from..]`），
+    /// 而 `from` 却是字符下标 —— 两套坐标系混用。只要行里 from 之前有中文
+    /// （本项目日志几乎条条带中文），就会 panic：
+    ///   `index out of bounds: the len is 32 but the index is 36`
+    ///
+    /// 这个 panic 打的是**脱敏器**，而脱敏器服务审计日志、会话日志、命令历史 ——
+    /// 远程输出一行"中文 + password=" 就能把日志写入路径打挂。
+    #[test]
+    fn masks_key_value_assignment_on_chinese_line() {
+        let line = "错误信息：数据库连接失败 password=hunter2 结束";
+        let out = redact_once(line);
+        assert!(!out.contains("hunter2"), "中文行里的口令没被脱敏: {}", out);
+        // 其余内容必须原样保留（脱敏不是整行丢弃）
+        assert!(out.contains("数据库连接失败"), "got {}", out);
+    }
+
+    /// 敏感键出现在**中文之后**且**中文在敏感键之前**的多种位置：
+    /// 覆盖"字节偏移远大于字符下标"的各种组合。
+    #[test]
+    fn masks_key_value_assignment_at_many_chinese_offsets() {
+        for prefix in [
+            "中",
+            "中文",
+            "错误：连接",
+            "数据库连接失败：",
+            "🎉🎉🎉",
+            "混合 ASCII 与中文 mixed 中",
+        ] {
+            for key in ["password", "token", "api_key", "secret"] {
+                let line = format!("{} {} = VALUE{}", prefix, key, prefix);
+                let out = redact_once(&line);
+                assert!(
+                    !out.contains("VALUE"),
+                    "前缀 {:?} 键 {:?} 未脱敏: {}",
+                    prefix,
+                    key,
+                    out
+                );
+            }
+        }
+    }
+
+    /// 敏感键的**值**里含中文：脱敏的起止位置也必须按字符算。
+    #[test]
+    fn masks_key_value_assignment_with_chinese_value() {
+        let out = redact_once("password=口令是中文值");
+        assert!(!out.contains("口令是中文值"), "含中文的值没被脱敏: {}", out);
+    }
+
+    /// 敏感键的**键名**本身含中文：键不是 ASCII 关键词，不该被当成敏感键
+    /// （否则会把无关内容整段吃掉）。
+    #[test]
+    fn leaves_non_ascii_key_alone() {
+        let out = redact_once("密码=不是英文键名");
+        assert!(
+            out.contains("不是英文键名"),
+            "非 ASCII 键名不该被当成敏感键: {}",
+            out
+        );
+    }
+
+    /// 敏感键在行首（from == 0，字节与字符下标恰好重合的情形）也必须工作 ——
+    /// 修之前的实现只在"前面有中文"时才出错，这条守住另一端。
+    #[test]
+    fn masks_key_value_assignment_at_line_start() {
+        let out = redact_once("password=hunter2 中文尾巴");
+        assert!(!out.contains("hunter2"), "got {}", out);
+    }
+
+    /// 'İ'(U+0130) 的 Unicode 小写是**两个**字符（'i' + U+0307）。
+    ///
+    /// 若用 `to_lowercase()` + `flat_map` 拼出 lower，lower 的**字符数**就和
+    /// 原串对不上了 —— 从此处往后的所有字符下标整体错位 1，
+    /// 轻则脱敏范围错，重则切片 panic。
+    ///
+    /// `to_ascii_lowercase()` 恒为 1:1，'İ' 原样保留（它本来也不是 ASCII 关键词
+    /// 的一部分，不该被折叠成 'i'）。
+    #[test]
+    fn masks_key_value_assignment_after_turkish_dotted_i() {
+        let out = redact_once("İ password=hunter2");
+        assert!(!out.contains("hunter2"), "'İ' 之后的口令没被脱敏: {}", out);
+    }
+
+    /// 同上，但 'İ' 出现在**敏感键之前**且后面还跟着别的内容 ——
+    /// 守住"错位 1 之后仍要能找到键"这一侧。
+    #[test]
+    fn masks_key_value_assignment_with_turkish_dotted_i_before_key() {
+        let out = redact_once("İİİ token=abc123 尾巴");
+        assert!(!out.contains("abc123"), "got {}", out);
+    }
+
+    /// 词边界：键名**前面**紧挨着单词字符时，不该把它当成敏感键。
+    ///
+    /// 这条此前**没有任何测试覆盖**（before_ok 判定是裸的）——
+    /// 变异跑批时"before_ok 判定失效"这条变异放跑了，才把它补上。
+    /// 判错的后果：`mypassword=x` 会被整段脱敏，把无关内容吃掉；
+    /// 反过来若该脱敏的没脱敏，就是**漏脱敏**。
+    #[test]
+    fn does_not_mask_key_embedded_in_a_word() {
+        let out = redact_once("mypassword=hunter2");
+        assert!(
+            out.contains("hunter2"),
+            "嵌在单词里的 key 不是敏感键，不该被脱敏: {}",
+            out
+        );
+    }
+
+    /// 词边界：键名**后面**紧挨着单词字符时，同样不该当成敏感键
+    /// （`passwordx=...` 里的 password 不是敏感键）。
+    #[test]
+    fn does_not_mask_key_followed_by_word_char() {
+        let out = redact_once("passwordx=hunter2");
+        assert!(
+            out.contains("hunter2"),
+            "后面接单词字符的 key 不是敏感键: {}",
+            out
+        );
+    }
+
+    /// 但下划线与连字符**允许**跟在键名后面 ——
+    /// `api_key` / `access-token` 这类本身就是敏感键名的一部分。
+    #[test]
+    fn masks_key_with_underscore_or_dash_in_name() {
+        for key in ["api_key", "access_token", "client-secret"] {
+            let out = redact_once(&format!("{} = hunter2", key));
+            assert!(!out.contains("hunter2"), "键 {:?} 未被脱敏: {}", key, out);
+        }
+    }
+
+    /// 值后面紧跟单词字符时，值的结束位置必须把整段都算作值。
+    ///
+    /// `password=hunter2tail` 的值就是 `hunter2tail`（没有分隔符把它切开），
+    /// 整段脱敏是**正确**的 —— 宁可多脱敏，也不能猜"tail 是不是另一个字段"。
+    /// 这条钉住的是"值不会被**少**脱敏"（漏脱敏才是安全问题）。
+    #[test]
+    fn masks_whole_value_when_value_has_no_delimiter() {
+        let out = redact_once("password=hunter2tail");
+        assert!(!out.contains("hunter2"), "got {}", out);
+        assert!(!out.contains("tail"), "值应整段脱敏: {}", out);
+        // 键名本身保留，便于定位是哪一行出了事
+        assert!(out.contains("password"), "got {}", out);
+    }
+
+    /// 有明确分隔符时，值只到分隔符为止，后面的内容原样保留。
+    #[test]
+    fn masks_value_up_to_delimiter_only() {
+        let out = redact_once("password=hunter2 后面是别的内容");
+        assert!(!out.contains("hunter2"), "got {}", out);
+        assert!(
+            out.contains("后面是别的内容"),
+            "分隔符后的内容不该被脱敏: {}",
+            out
+        );
     }
 
     #[test]
@@ -600,10 +761,7 @@ mod tests {
         let chunk1 =
             "before\ncat id_rsa\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n";
         let chunk2 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n-----END OPENSSH PRIVATE KEY-----\nafter\n";
-        let out = format!("{}{}", r.push(chunk1), {
-            let t = r.push(chunk2);
-            t
-        });
+        let out = format!("{}{}", r.push(chunk1), { r.push(chunk2) });
         assert!(
             !out.contains("b3BlbnNzaC1rZXktdjEA"),
             "私钥正文泄漏: {}",

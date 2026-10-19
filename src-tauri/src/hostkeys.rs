@@ -435,7 +435,7 @@ mod tests {
             blob_b64: public.public_key_base64(),
         };
         assert_eq!(
-            verify(&[e.clone()], "[example.com]:2222", &public),
+            verify(std::slice::from_ref(&e), "[example.com]:2222", &public),
             Verdict::Trusted
         );
         assert_eq!(
@@ -603,6 +603,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // 这把自己的锁**故意**跨 await 持有：它串行化的是会改进程级环境变量的测试，
+    // 锁在 await 期间不释放正是串行的含义。
+    #[allow(clippy::await_holding_lock)]
     async fn remove_revokes_only_the_named_host() {
         let _guard = crate::config::lock_config_dir_env();
         let dir =
@@ -631,6 +634,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // 这把自己的锁**故意**跨 await 持有：它串行化的是会改进程级环境变量的测试，
+    // 锁在 await 期间不释放正是串行的含义。
+    #[allow(clippy::await_holding_lock)]
     async fn remove_rejects_malformed_host_spec() {
         let _guard = crate::config::lock_config_dir_env();
         for bad in [

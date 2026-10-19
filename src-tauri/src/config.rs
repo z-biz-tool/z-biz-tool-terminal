@@ -289,11 +289,9 @@ pub fn get_config_dir() -> PathBuf {
     }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = home.join(".z-terminal");
-    if !dir.exists() {
-        if fs::create_dir_all(&dir).is_ok() {
-            // 目录本身也要挡同机其他用户, 否则 config.json 的 0600 只是第二道门
-            restrict_private_dir(&dir);
-        }
+    if !dir.exists() && fs::create_dir_all(&dir).is_ok() {
+        // 目录本身也要挡同机其他用户, 否则 config.json 的 0600 只是第二道门
+        restrict_private_dir(&dir);
     }
     dir
 }
@@ -528,9 +526,9 @@ pub async fn list_config_backups() -> Result<Vec<ConfigBackup>, String> {
         let modified = metadata
             .modified()
             .ok()
-            .and_then(|t| {
+            .map(|t| {
                 let dt: chrono::DateTime<chrono::Local> = t.into();
-                Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                dt.format("%Y-%m-%d %H:%M:%S").to_string()
             })
             .unwrap_or_default();
         entries.push(ConfigBackup {
@@ -915,7 +913,6 @@ mod tests {
     }
 
     /// 落盘加密相关测试会改环境变量和临时目录, 必须串行（锁定义在模块级，跨文件共用）
-
     fn test_server(password: Option<&str>, private_key: Option<&str>) -> ServerConfig {
         ServerConfig {
             id: "server-1".into(),
@@ -953,11 +950,13 @@ mod tests {
     }
 
     fn config_with(password: Option<&str>) -> AppConfig {
-        let mut config = AppConfig::default();
-        config.servers = vec![test_server(
-            password,
-            Some("-----BEGIN PRIVATE KEY-----abc"),
-        )];
+        let mut config = AppConfig {
+            servers: vec![test_server(
+                password,
+                Some("-----BEGIN PRIVATE KEY-----abc"),
+            )],
+            ..Default::default()
+        };
         config.ai = Some(AiConfig {
             provider: "openai".into(),
             api_key: password.map(|_| "sk-secret-key".into()),
@@ -1037,6 +1036,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // 这把自己的锁**故意**跨 await 持有：它串行化的是会改进程级环境变量的测试，
+    // 锁在 await 期间不释放正是串行的含义。
+    #[allow(clippy::await_holding_lock)]
     async fn export_never_writes_plaintext_credentials() {
         let _guard = lock_config_dir_env();
         let dir = isolated_config_dir("export");
@@ -1078,6 +1080,9 @@ mod tests {
 
     /// 导入必须交回"能直接用的那份"，且坏文件不得把现有配置冲掉
     #[tokio::test]
+    // 这把自己的锁**故意**跨 await 持有：它串行化的是会改进程级环境变量的测试，
+    // 锁在 await 期间不释放正是串行的含义。
+    #[allow(clippy::await_holding_lock)]
     async fn import_returns_the_usable_view_and_never_wipes_on_error() {
         let _guard = lock_config_dir_env();
         let dir = isolated_config_dir("import");

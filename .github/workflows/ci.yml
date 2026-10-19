@@ -63,7 +63,13 @@ jobs:
       - name: Tests
         run: cargo test --lib
 
-      # 仓库存量 warning 未清零，先只做可见性不卡门禁；清零后改成 -D warnings
-      - name: Clippy (non-gating)
-        continue-on-error: true
-        run: cargo clippy --all-targets -- -W warnings
+      # 2026-10-20：clippy 存量 warning 已清零（--all-targets 下 0 条），
+      # 从"只做可见性不卡门禁"改成真正的门禁。
+      #
+      # 此前是 continue-on-error，理由是"存量 17 条未清零"——
+      # 那个理由现在不成立了，而门禁放着不卡，等于没有门禁：
+      # 下一个人新引入 100 条 warning，CI 照样绿。
+      #
+      # -D warnings：任何 warning 都让这一步失败。
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
