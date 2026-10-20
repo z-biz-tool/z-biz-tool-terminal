@@ -25,6 +25,9 @@ export const PROVIDER_PRESETS: Record<AIProvider, Partial<AIConfig>> = {
   gemini: { baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-2.0-flash' },
   ollama: { baseUrl: 'http://127.0.0.1:11434', model: 'llama3.2' },
   custom: {},
+  // MiniMax 开放平台（国内站）：OpenAI 兼容协议，走 /chat/completions。
+  // 2026-10-20 实测该端点连通（HTTP 200，返回非空内容）。
+  minimax: { baseUrl: 'https://api.minimaxi.com/v1', model: 'MiniMax-M3.1-Flash' },
 };
 
 /**
@@ -43,6 +46,35 @@ export function withProvider(config: AIConfig, provider: AIProvider): AIConfig {
     model: isPreset(config.model, 'model') ? preset.model ?? config.model : config.model,
   };
 }
+
+/**
+ * 各 provider 的输入框占位文案。
+ *
+ * 此前只有「openai → OpenAI 地址 / 其它 → Anthropic 地址」两档，
+ * 于是选 Gemini / Ollama / 自建网关时占位符也在骗人（显示 Anthropic 的地址）。
+ * 占位符是用户填地址时**唯一**的参照 —— 骗人一次，用户就会照着填错地址。
+ * 2026-10-20 改成按 provider 逐个给。
+ */
+export const PROVIDER_PLACEHOLDERS: Record<
+  AIProvider,
+  { baseUrl: string; model: string }
+> = {
+  openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  claude: {
+    baseUrl: "https://api.anthropic.com/v1",
+    model: "claude-3-5-sonnet-20240620",
+  },
+  gemini: {
+    baseUrl: "https://generativelanguage.googleapis.com",
+    model: "gemini-2.0-flash",
+  },
+  ollama: { baseUrl: "http://127.0.0.1:11434", model: "llama3.2" },
+  custom: { baseUrl: "https://your-gateway.example.com/v1", model: "你的模型名" },
+  minimax: {
+    baseUrl: "https://api.minimaxi.com/v1",
+    model: "MiniMax-M3.1-Flash",
+  },
+};
 
 interface TerminalAIStore {
   config: AIConfig;

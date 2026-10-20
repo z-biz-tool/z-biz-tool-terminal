@@ -3,7 +3,7 @@ import { Modal, Button, Space, Tag, Tooltip, message, Input, Tabs } from "antd";
 import type { TabsProps } from "antd";
 import { SendOutlined, StopOutlined, SettingOutlined, PlusOutlined, DeleteOutlined } from "@ant-design/icons";
 import type { AIMessage, AIConfig, AIProvider } from "../types/ai";
-import { useAIStore, withProvider } from "../stores/aiStore";
+import { useAIStore, withProvider, PROVIDER_PLACEHOLDERS } from "../stores/aiStore";
 import { createAIClient } from "../services/aiClient";
 import { renderMarkdown } from "../utils/markdown";
 
@@ -320,14 +320,14 @@ function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave:
       <div style={{ marginBottom: "16px" }}>
         <label style={{ display: "block", marginBottom: "8px", fontWeight: "bold" }}>AI 提供商</label>
         <Space orientation="horizontal">
-          {(["openai", "claude", "gemini", "ollama", "custom"] as AIProvider[]).map((provider) => (
+          {(["openai", "claude", "gemini", "ollama", "custom", "minimax"] as AIProvider[]).map((provider) => (
             <Tag
               key={provider}
               color={formData.provider === provider ? "blue" : "default"}
               style={{ cursor: "pointer", padding: "8px 16px" }}
               onClick={() => setFormData(withProvider(formData, provider as AIProvider))}
             >
-              {({ openai: "OpenAI", claude: "Claude", gemini: "Gemini", ollama: "Ollama", custom: "自建网关" } as Record<AIProvider, string>)[provider]}
+              {({ openai: "OpenAI", claude: "Claude", gemini: "Gemini", ollama: "Ollama", custom: "自建网关", minimax: "MiniMax" } as Record<AIProvider, string>)[provider]}
             </Tag>
           ))}
         </Space>
@@ -349,7 +349,7 @@ function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave:
           <Input
             value={formData.baseUrl || ""}
             onChange={(e) => setFormData({ ...formData, baseUrl: e.target.value })}
-            placeholder={formData.provider === "openai" ? "https://api.openai.com/v1" : "https://api.anthropic.com/v1"}
+            placeholder={PROVIDER_PLACEHOLDERS[formData.provider]?.baseUrl ?? "请输入 Base URL"}
           />
         </div>
       )}
@@ -359,7 +359,7 @@ function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave:
         <Input
           value={formData.model}
           onChange={(e) => setFormData({ ...formData, model: e.target.value })}
-          placeholder={formData.provider === "openai" ? "gpt-4o-mini" : "claude-3-5-sonnet-20240620"}
+          placeholder={PROVIDER_PLACEHOLDERS[formData.provider]?.model ?? "请输入模型名称"}
         />
       </div>
 

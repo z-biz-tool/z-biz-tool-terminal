@@ -6,8 +6,20 @@
  * 且其 AIManager 仅实现了 openai 一种传输, 无法满足 claude/gemini/ollama)。
  */
 
-/** 支持的 AI 提供商; custom 表示 OpenAI 兼容的自建网关 */
-export type AIProvider = 'openai' | 'claude' | 'gemini' | 'ollama' | 'custom';
+/**
+ * 支持的 AI 提供商; custom 表示 OpenAI 兼容的自建网关
+ *
+ * 'minimax'：MiniMax 开放平台，**OpenAI 兼容**（与 custom 同协议），
+ * 但作为**第一方 provider** 单列 —— 好给它自己的默认 baseUrl 与默认模型，
+ * 用户点一下就能用，不必自己抄地址。2026-10-20 加入（实测端点连通）。
+ */
+export type AIProvider =
+  | "openai"
+  | "claude"
+  | "gemini"
+  | "ollama"
+  | "custom"
+  | "minimax";
 
 /** AI 配置 */
 export interface AIConfig {

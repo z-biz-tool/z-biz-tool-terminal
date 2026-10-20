@@ -51,7 +51,10 @@ export abstract class AIClientBase implements AIClient {
     };
 
     // 根据提供商设置认证头
-    if (provider === "openai" || provider === "custom") {
+    if (provider === "openai" || provider === "custom" || provider === "minimax") {
+      // minimax 与 openai/custom 同为 OpenAI 兼容协议 ⇒ 同一个 Bearer 鉴权。
+      // 不加这一支的话 minimax 会掉进下面的「都不匹配」分支 ⇒ **不带任何鉴权头**，
+      // 请求发出去只会被服务端 401，看起来像「配错了」，实际是这里漏了分支。
       headers["Authorization"] = `Bearer ${apiKey}`;
     } else if (provider === "claude") {
       url = `${baseUrl}/messages`;
@@ -367,6 +370,11 @@ export function createAIClient(config: AIConfig): AIClient {
       return new GeminiClient(config);
     case "ollama":
       return new OllamaClient(config);
+    case "minimax":
+      // MiniMax 开放平台是 OpenAI 兼容协议 ⇒ 与 openai 同一个客户端。
+      // 显式写这一支（而不是让它落进 default）—— 落进 default 虽然结果一样，
+      // 但「新 provider 忘了接」就会被 default 悄悄兜住，配置与实际行为脱节。
+      return new OpenAIClient(config);
     default:
       return new OpenAIClient(config);
   }
