@@ -60,13 +60,13 @@ for (const [name, re] of DEPRECATED) {
 }
 
 const all = sources.map((s) => s.src).join("\n");
-eq("destroyOnHidden 用上了（全仓 9 个 Modal：本轮改掉 7 处，另有 2 处本来就是新名）",
-  (all.match(/\bdestroyOnHidden\b/g) || []).length, 9);
+eq("destroyOnHidden 用上了（全仓 10 个 Modal：本轮改掉 7 处，另有 2 处本来就是新名，2026-10-26 更新弹窗新增 1）",
+  (all.match(/\bdestroyOnHidden\b/g) || []).length, 10);
 eq("mask.closable 用上了（3 处：危险确认框 + 主机密钥两态）",
   (all.match(/mask=\{\{ closable: false \}\}/g) || []).length, 3);
 eq("Spin 用 description", (all.match(/<Spin description=\{tip\}/g) || []).length, 1);
-// 9 处 Alert：关闭确认 / 快捷连接两态 / 历史检索 / 云代理 / 危险确认两处 / 主机密钥两处
-eq("Alert 用 title", (all.match(/<Alert[\s\S]{0,400}?\btitle=/g) || []).length, 9);
+// 10 处 Alert：关闭确认 / 快捷连接两态 / 历史检索 / 云代理 / 危险确认两处 / 主机密钥两处 / 更新完成
+eq("Alert 用 title", (all.match(/<Alert[\s\S]{0,400}?\btitle=/g) || []).length, 10);
 ok("Space 用 orientation 且两个方向都有",
   /<Space orientation="vertical"/.test(all) && /<Space orientation="horizontal"/.test(all));
 
