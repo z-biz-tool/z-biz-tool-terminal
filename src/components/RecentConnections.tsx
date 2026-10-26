@@ -33,7 +33,9 @@ export function saveRecentEntry(host: string, port: number, username: string, au
     const filtered = arr.filter((e) => `${e.host}:${e.port}:${e.username}` !== key);
     filtered.unshift({ host, port, username, authType, lastConnected: Date.now() });
     localStorage.setItem("z-terminal-recent", JSON.stringify(filtered.slice(0, 20)));
-  } catch {}
+  } catch (e) {
+    console.warn("保存最近连接失败（下次启动不会出现在列表里）:", e);
+  }
 }
 
 function saveRecent(entries: RecentEntry[]) {

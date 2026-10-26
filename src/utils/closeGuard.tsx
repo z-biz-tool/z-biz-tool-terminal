@@ -113,6 +113,7 @@ const modalAsk: AskClose = (plan) =>
       okText: "关闭",
       okButtonProps: { danger: true },
       cancelText: "取消",
+      focusable: { autoFocusButton: "cancel" },
       onOk: () => resolve(true),
       onCancel: () => resolve(false),
     });

@@ -360,7 +360,11 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
     const inputGuard = new LineInputGuard();
     let unregisterFeed: (() => void) | null = null;
     const writePty = (payload: string) => {
-      if (payload) invoke("ssh_pty_write", { sessionId, data: payload }).catch(() => {});
+      if (payload)
+        invoke("ssh_pty_write", { sessionId, data: payload }).catch((e) => {
+          // 每个按键都走这里，失败不能静默：否则用户只看到"终端没反应"
+          console.warn("终端输入写入失败（按键可能没有送到远端）:", e);
+        });
     };
     const feedInput = async (payload: string, opts: PushOptions = {}): Promise<void> => {
       if (!payload) return;
@@ -432,7 +436,9 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
       ) {
         lastCols = term.cols;
         lastRows = term.rows;
-        invoke("ssh_pty_resize", { sessionId, cols: term.cols, rows: term.rows }).catch(() => {});
+        invoke("ssh_pty_resize", { sessionId, cols: term.cols, rows: term.rows }).catch((e) => {
+          console.warn("同步终端尺寸到远端失败:", e);
+        });
       }
     };
     refitRef.current = refit;
@@ -502,7 +508,9 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
       if (settings.copy_on_select && term.hasSelection()) {
         const selection = term.getSelection();
         if (selection) {
-          navigator.clipboard.writeText(selection).catch(() => {});
+          navigator.clipboard.writeText(selection).catch((e) => {
+            console.warn("自动复制选中文本失败:", e);
+          });
         }
       }
     });
@@ -650,7 +658,9 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
             text: match[0],
             decorations: { underline: true, pointerCursor: true },
             activate: (_event: MouseEvent, text: string) => {
-              navigator.clipboard.writeText(text).catch(() => {});
+              navigator.clipboard.writeText(text).catch((e) => {
+                console.warn("复制到剪贴板失败:", e);
+              });
             },
             hover: (_event: MouseEvent, text: string) => {
               createTooltip(text, "点击复制", _event.clientX, _event.clientY);
@@ -682,7 +692,9 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
             text: match[0],
             decorations: { underline: true, pointerCursor: true },
             activate: (_event: MouseEvent, text: string) => {
-              navigator.clipboard.writeText(text).catch(() => {});
+              navigator.clipboard.writeText(text).catch((e) => {
+                console.warn("复制到剪贴板失败:", e);
+              });
             },
             hover: (_event: MouseEvent, text: string) => {
               createTooltip(text, "点击复制路径", _event.clientX, _event.clientY);
@@ -750,7 +762,9 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
 
   const handleZmodemWriteToPty = useCallback((data: string) => {
     if (paneSessionId) {
-      invoke("ssh_pty_write", { sessionId: paneSessionId, data }).catch(() => {});
+      invoke("ssh_pty_write", { sessionId: paneSessionId, data }).catch((e) => {
+        console.warn("ZMODEM 回写数据失败:", e);
+      });
     }
   }, [paneSessionId]);
 
@@ -789,7 +803,10 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
       if (!term) return;
       if (term.hasSelection()) {
         const text = term.getSelection();
-        if (text) void navigator.clipboard.writeText(text).catch(() => {});
+        if (text)
+          void navigator.clipboard.writeText(text).catch((e) => {
+            console.warn("复制到剪贴板失败:", e);
+          });
         return;
       }
       // 没有选区时 ⌘C 是中断信号（Xshell/Tabby 的老习惯）：不接管的话 WKWebView 什么都不做，
@@ -830,10 +847,14 @@ export default function TerminalView({ tabId, paneId }: TerminalViewProps) {
               // 终端实例尚未就绪：至少把整段文本整体判一次再写
               void approveCommand(text, paneTargets(tabId, paneId), "paste").then((ok) => {
                 if (ok) {
-                  invoke("ssh_pty_write", { sessionId: paneSessionId, data: text }).catch(() => {});
+                  invoke("ssh_pty_write", { sessionId: paneSessionId, data: text }).catch((e) => {
+                    console.warn("右键粘贴写入失败:", e);
+                  });
                 }
               });
-            }).catch(() => {});
+            }).catch((e) => {
+              console.warn("右键粘贴读取剪贴板失败:", e);
+            });
           }}
         />
         <TerminalSearch

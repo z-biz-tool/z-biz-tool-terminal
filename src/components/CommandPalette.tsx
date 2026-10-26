@@ -134,7 +134,9 @@ export default function CommandPalette({
         ].filter(Boolean),
         weight: 10,
         action: () => {
-          connectServer(server).catch(() => {});
+          connectServer(server).catch((e) => {
+            console.warn("命令面板发起连接失败:", e);
+          });
         },
       });
     }

@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import { envMeta, ENV_OPTIONS } from "../utils/environment";
 import EnvBadge from "./EnvBadge";
 import {
+  Alert,
   Button,
   Modal,
   Form,
@@ -76,6 +77,7 @@ export default function ServerList() {
     exportConfig,
     importConfig,
     loaded,
+    configError,
     addGroup,
     renameGroup,
     removeGroup,
@@ -213,6 +215,7 @@ export default function ServerList() {
                     okText: "删除",
                     okButtonProps: { danger: true },
                     cancelText: "取消",
+                    focusable: { autoFocusButton: "cancel" },
                     onOk: () => {
                       removeServer(s.id);
                       message.success("已删除");
@@ -352,6 +355,7 @@ export default function ServerList() {
                         okText: "删除",
                         okButtonProps: { danger: true },
                         cancelText: "取消",
+                        focusable: { autoFocusButton: "cancel" },
                         onOk: () => {
                           removeGroup(groupName);
                           message.success("已删除分组");
@@ -567,6 +571,7 @@ export default function ServerList() {
           okText: "替换并导入",
           okButtonProps: { danger: true },
           cancelText: "取消",
+          focusable: { autoFocusButton: "cancel" },
           onOk: () => resolve(true),
           onCancel: () => resolve(false),
         });
@@ -782,10 +787,19 @@ export default function ServerList() {
 
       {/* 服务器列表 */}
       <div style={{ flex: 1, overflow: "auto", padding: "4px 8px" }}>
+        {configError && (
+          <Alert
+            type="error"
+            showIcon
+            title="读取终端配置失败"
+            description={`${configError}。服务器列表与设置未能载入，且此时新增/修改可能覆盖原配置，请先检查配置文件。`}
+            style={{ marginBottom: 8 }}
+          />
+        )}
         {servers.length === 0 && customGroups.length === 0 ? (
           <EmptyState
             title="暂无服务器"
-            description="点击右上角 + 添加"
+            description="点击上方 + 添加"
             icon={
               <CloudServerOutlined
                 style={{ fontSize: 56, color: "var(--ant-color-text-tertiary)" }}

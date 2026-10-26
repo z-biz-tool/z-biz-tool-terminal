@@ -75,8 +75,9 @@ export function subscribePtyOutput(sessionId: string, handler: SessionHandler): 
     bySession.set(sessionId, set);
   }
   set.add(handler);
-  void ensurePtyListening().catch(() => {
-    /* 真正的错误由 await 的调用方处理，这里只保证不会 unhandled rejection */
+  void ensurePtyListening().catch((e) => {
+    // 订阅方是同步接口，没有 await 的调用方能替它报错，只能在这里留痕
+    console.warn("pty 输出监听建立失败，终端输出将不会到达:", e);
   });
   return () => {
     const current = bySession.get(sessionId);
@@ -89,7 +90,9 @@ export function subscribePtyOutput(sessionId: string, handler: SessionHandler): 
 /** 订阅所有会话的输出（批量执行面板这类全局观察者用） */
 export function subscribeAllPtyOutput(handler: AnyHandler): () => void {
   taps.add(handler);
-  void ensurePtyListening().catch(() => {});
+  void ensurePtyListening().catch((e) => {
+    console.warn("pty 输出监听建立失败，批量执行将收不到输出:", e);
+  });
   return () => {
     taps.delete(handler);
   };

@@ -975,6 +975,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
       okText: `删除 ${entries.length} 项`,
       okType: "danger",
       cancelText: "取消",
+      focusable: { autoFocusButton: "cancel" },
       onOk: async () => {
         let successCount = 0;
         let failCount = 0;
@@ -1280,6 +1281,7 @@ export default function SftpPanel({ tabId }: SftpPanelProps) {
         okText: "删除",
         okType: "danger",
         cancelText: "取消",
+        focusable: { autoFocusButton: "cancel" },
         onOk: async () => {
           const remotePath = sftpPath.endsWith("/")
             ? sftpPath + entry.name

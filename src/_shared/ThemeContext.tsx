@@ -31,6 +31,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, mode);
+    // CSS 变量的明暗切换靠这个属性；antd 只管自己的 token
+    document.documentElement.dataset.theme = mode;
   }, [mode]);
 
   const toggle = () => setMode((m) => (m === "light" ? "dark" : "light"));

@@ -61,8 +61,14 @@ export default function CommandHistoryModal({ open, onClose }: { open: boolean; 
 
   const fill = (entry: HistoryEntry) => {
     if (!feedActiveTerminal(entry.cmd)) {
-      message.warning("没有可用的活动终端，命令已复制到剪贴板");
-      navigator.clipboard.writeText(entry.cmd).catch(() => {});
+      // 先写剪贴板再报"已复制"：写失败还报成功就是假成功
+      navigator.clipboard
+        .writeText(entry.cmd)
+        .then(() => message.warning("没有可用的活动终端，命令已复制到剪贴板"))
+        .catch((e) => {
+          console.warn("复制命令到剪贴板失败:", e);
+          message.error(`没有可用的活动终端，且复制到剪贴板失败：${String(e)}`);
+        });
       return;
     }
     message.success("已填入命令行，未执行；确认无误后按回车");
@@ -159,8 +165,13 @@ export default function CommandHistoryModal({ open, onClose }: { open: boolean; 
                         icon={<CopyOutlined />}
                         onClick={(ev) => {
                           ev.stopPropagation();
-                          navigator.clipboard.writeText(e.cmd).catch(() => {});
-                          message.success("已复制");
+                          navigator.clipboard
+                            .writeText(e.cmd)
+                            .then(() => message.success("已复制"))
+                            .catch((err) => {
+                              console.warn("复制命令到剪贴板失败:", err);
+                              message.error(`复制失败：${String(err)}`);
+                            });
                         }}
                       />
                     </Tooltip>

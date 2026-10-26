@@ -149,6 +149,8 @@ interface ServerStore {
   snippetsVisible: boolean;
   settings: TerminalSettings;
   loaded: boolean;
+  /** 读配置失败的原因；null = 读取成功或还没读。界面据此给告警，不再静默空列表 */
+  configError: string | null;
   /** 正在重连的 tabId 集合(每个 tab 独立重连) */
   reconnectingTabs: Set<string>;
   /** 重连进度: `${tabId}:${paneId}` -> 进度。运行时投影，不落盘 */
@@ -382,6 +384,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   snippetsVisible: false,
   settings: defaultSettings,
   loaded: false,
+  configError: null,
   reconnectingTabs: new Set(),
   reconnectProgress: {},
   serverInfos: {},
@@ -400,9 +403,14 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         snippets: config.snippets || [],
         customGroups: config.custom_groups || [],
         loaded: true,
+        configError: null,
       });
-    } catch {
-      set({ loaded: true });
+    } catch (e) {
+      console.error("读取终端配置失败:", e);
+      set({
+        loaded: true,
+        configError: e instanceof Error ? e.message : String(e),
+      });
     }
     // Initialize pty-closed listener for auto-reconnect
     get().initPtyClosedListener();
@@ -550,7 +558,10 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   removeServer: (id) => {
     get()
       .disconnectServer(id)
-      .catch(() => {});
+      .catch((e) => {
+        // 服务器条目照删，但会话没断成功要留痕：否则远端会留一个没人认领的 sshd 会话
+        console.warn("删除服务器时断开会话失败:", e);
+      });
     set((state) => ({
       servers: state.servers.filter((s) => s.id !== id),
       tabs: state.tabs.filter((t) => t.serverId !== id),
@@ -781,7 +792,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         if (!get().tabs.find((t) => t.id === tabId)?.panes.some((p) => p.id === paneId)) {
           try {
             await invoke("ssh_disconnect", { sessionId: result.session_id });
-          } catch {}
+          } catch (e) {
+            console.warn("清理无归属会话失败（远端可能残留）:", e);
+          }
           forgetReconnect(key);
           return;
         }
@@ -910,7 +923,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
       if (pane.sessionId) {
         try {
           await invoke("ssh_disconnect", { sessionId: pane.sessionId });
-        } catch {}
+        } catch (e) {
+          console.warn("关闭标签页时断开会话失败（远端可能残留）:", e);
+        }
       }
     }
 
@@ -1182,7 +1197,9 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     if (pane?.sessionId) {
       try {
         await invoke("ssh_disconnect", { sessionId: pane.sessionId });
-      } catch {}
+      } catch (e) {
+        console.warn("关闭分屏面板时断开会话失败（远端可能残留）:", e);
+      }
     }
 
     const primaryPane = remainingPanes[0];
@@ -1274,6 +1291,8 @@ export const useServerStore = create<ServerStore>((set, get) => ({
           }
         }
       }
+    }).catch((e) => {
+      console.warn("pty-closed 订阅失败（自动重连与断开提示会缺失）：", e);
     });
   },
 

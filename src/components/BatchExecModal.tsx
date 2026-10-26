@@ -182,7 +182,9 @@ export default function BatchExecModal({ open, onClose }: Props) {
           tabs.find((t) => t.serverId === serverId && t.state === "connected");
         const sessionId = tab?.sessionId;
         if (sessionId) {
-          invoke("ssh_pty_write", { sessionId, data: "\x03" }).catch(() => {});
+          invoke("ssh_pty_write", { sessionId, data: "\x03" }).catch((e) => {
+            console.warn("发送中断信号失败，该服务器上的命令可能仍在运行:", e);
+          });
         }
         setOutputs((prev) => {
           const next = new Map(prev);

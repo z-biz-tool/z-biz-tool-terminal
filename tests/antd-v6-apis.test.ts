@@ -65,8 +65,8 @@ eq("destroyOnHidden 用上了（全仓 10 个 Modal：本轮改掉 7 处，另�
 eq("mask.closable 用上了（3 处：危险确认框 + 主机密钥两态）",
   (all.match(/mask=\{\{ closable: false \}\}/g) || []).length, 3);
 eq("Spin 用 description", (all.match(/<Spin description=\{tip\}/g) || []).length, 1);
-// 10 处 Alert：关闭确认 / 快捷连接两态 / 历史检索 / 云代理 / 危险确认两处 / 主机密钥两处 / 更新完成
-eq("Alert 用 title", (all.match(/<Alert[\s\S]{0,400}?\btitle=/g) || []).length, 10);
+// 11 处 Alert：关闭确认 / 快捷连接两态 / 历史检索 / 云代理 / 危险确认两处 / 主机密钥两处 / 更新完成 / 配置读取失败
+eq("Alert 用 title", (all.match(/<Alert[\s\S]{0,400}?\btitle=/g) || []).length, 11);
 ok("Space 用 orientation 且两个方向都有",
   /<Space orientation="vertical"/.test(all) && /<Space orientation="horizontal"/.test(all));
 

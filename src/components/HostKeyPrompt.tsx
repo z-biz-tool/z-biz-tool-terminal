@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Modal, Alert, Typography, Descriptions } from "antd";
+import { Modal, Alert, Typography, Descriptions, message } from "antd";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -54,7 +54,9 @@ export default function HostKeyPrompt() {
         }
         unlisten.push(...fns);
       })
-      .catch(() => {});
+      .catch((e) => {
+        console.warn("主机密钥事件订阅失败，首次连接将不会弹出指纹确认:", e);
+      });
 
     return () => {
       disposed = true;
@@ -64,7 +66,9 @@ export default function HostKeyPrompt() {
 
   const answer = (req: VerifyPayload, trusted: boolean) => {
     setPending((list) => list.filter((x) => x.request_id !== req.request_id));
-    invoke("ssh_resolve_host_key", { requestId: req.request_id, trusted }).catch(() => {});
+    invoke("ssh_resolve_host_key", { requestId: req.request_id, trusted }).catch((e) => {
+      message.error(`提交主机密钥裁决失败：${String(e)}`);
+    });
   };
 
   const current = pending[0];

@@ -54,7 +54,9 @@ export function AppShell({
     if (typeof window === "undefined") return;
     try {
       window.localStorage.setItem(STORAGE_KEY, String(siderWidth));
-    } catch {}
+    } catch (e) {
+      console.warn("侧栏宽度没能保存:", e);
+    }
   }, [siderWidth]);
 
   const startSiderDrag = useCallback(
