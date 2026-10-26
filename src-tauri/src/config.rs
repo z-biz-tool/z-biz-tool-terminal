@@ -604,15 +604,56 @@ pub async fn export_config(path: String, include_secrets: Option<bool>) -> Resul
     outcome
 }
 
-/// 读取 AI 配置（apiKey 为解密后的明文，只存在于进程内）
-#[tauri::command]
-pub async fn get_ai_config() -> Result<Option<AiConfig>, String> {
-    Ok(load_config().ai)
+/// AI 配置的对外视图：**apiKey 恒为空串**，是否已配置用 `hasApiKey` 表达。
+///
+/// 此前 `get_ai_config` 把解密后的明文 key 回传前端，key 长期驻留 webview
+/// 内存（React state、表单 formData）。现在明文不出 Rust：前端设置表单
+/// 显示「已保存」占位，留空表示保持不变，录入/修改时才随 `save_ai_config`
+/// 过一次 IPC（用户本来就在输入框里敲它，这次传输躲不掉）。
+fn public_ai_view(ai: &Option<AiConfig>) -> serde_json::Value {
+    match ai {
+        None => serde_json::Value::Null,
+        Some(c) => {
+            let has = c
+                .api_key
+                .as_deref()
+                .map(|k| !k.trim().is_empty())
+                .unwrap_or(false);
+            serde_json::json!({
+                "provider": c.provider,
+                "baseUrl": c.base_url,
+                "model": c.model,
+                "temperature": c.temperature,
+                "maxTokens": c.max_tokens,
+                "apiKey": "",
+                "hasApiKey": has,
+            })
+        }
+    }
 }
 
-/// 保存 AI 配置（apiKey 立即加密落盘）
+/// 读取 AI 配置（**脱敏视图**：apiKey 恒空，hasApiKey 表达是否已配置）
 #[tauri::command]
-pub async fn save_ai_config(config: AiConfig) -> Result<(), String> {
+pub async fn get_ai_config() -> Result<serde_json::Value, String> {
+    Ok(public_ai_view(&load_config().ai))
+}
+
+/// 保存 AI 配置（apiKey 立即加密落盘）。
+///
+/// 前端传来的 apiKey 为空 ⇒ **继承已保存的 key**（编辑其它字段时表单里
+/// 没有明文 key，留空是常态而不是「清除」）；要清除 key 走显式的
+/// 清除按钮（传空白串会把继承语义和清除混在一起，不提供）。
+#[tauri::command]
+pub async fn save_ai_config(mut config: AiConfig) -> Result<(), String> {
+    let empty_key = config
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty();
+    if empty_key {
+        config.api_key = load_config().ai.and_then(|old| old.api_key);
+    }
     let mut app = load_config();
     app.ai = Some(config);
     save_config(&app)
@@ -625,8 +666,11 @@ pub async fn save_ai_config(config: AiConfig) -> Result<(), String> {
 /// 导入后所有服务器连不上，且下一次 `save_servers` 会把这段密文再封一层。
 ///
 /// 与 `export_config` 对称，导入同样要留痕（它整份覆盖服务器、设置、片段与 AI 配置）。
+///
+/// 返回值同样过 `public_ai_view` 脱敏 —— 导入刚保存的 AI key 不能借回显
+/// 机会泄进 webview。
 #[tauri::command]
-pub async fn import_config(path: String) -> Result<AppConfig, String> {
+pub async fn import_config(path: String) -> Result<serde_json::Value, String> {
     let outcome: Result<AppConfig, String> = (|| {
         let content = fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
         let parsed: AppConfig =
@@ -650,13 +694,24 @@ pub async fn import_config(path: String) -> Result<AppConfig, String> {
             serde_json::json!({ "path": path, "success": false, "error": e }),
         ),
     }
-    outcome
+    let app = outcome?;
+    let mut v = serde_json::to_value(&app).map_err(|e| format!("序列化失败: {}", e))?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("ai".into(), public_ai_view(&app.ai));
+    }
+    Ok(v)
 }
 
-/// 获取配置
+/// 获取配置（ai 段为**脱敏视图**：apiKey 恒空、hasApiKey 表达已配置 ——
+/// 与 get_ai_config 同一约定，整份配置接口也不能成为明文 key 的旁路）
 #[tauri::command]
-pub async fn get_config() -> AppConfig {
-    load_config()
+pub async fn get_config() -> Result<serde_json::Value, String> {
+    let app = load_config();
+    let mut v = serde_json::to_value(&app).map_err(|e| format!("序列化失败: {}", e))?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("ai".into(), public_ai_view(&app.ai));
+    }
+    Ok(v)
 }
 
 /// 保存服务器列表
@@ -1097,24 +1152,32 @@ mod tests {
         let imported = import_config(with_secrets.to_string_lossy().to_string())
             .await
             .unwrap();
-        let pass = imported.servers[0].password.clone();
+        let pass = imported["servers"][0]["password"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         assert!(
-            pass.as_deref()
-                .map(|p| !p.starts_with("enc:v1:"))
-                .unwrap_or(false),
+            !pass.starts_with("enc:v1:"),
             "交回前端的凭证不得是磁盘态密文，实测 {:?}",
             pass
         );
         assert_eq!(
-            pass.as_deref(),
-            Some("export-pass"),
+            pass,
+            "export-pass",
             "同一台机器（同一主密钥）导入自己的导出件，密码应还原成明文可用"
         );
         assert_eq!(
-            load_config().servers[0].password,
-            pass,
+            load_config().servers[0].password.as_deref(),
+            Some(pass.as_str()),
             "返回的那份应与落盘后回读的一致（导入确实生效，而不是只改了内存）"
         );
+        // AI key 的脱敏视图：明文不出 Rust，是否已配置走 hasApiKey（2026-10-26）
+        assert_eq!(
+            imported["ai"]["apiKey"].as_str(),
+            Some(""),
+            "导入返回值里 AI apiKey 必须恒为空串"
+        );
+        assert_eq!(imported["ai"]["hasApiKey"].as_bool(), Some(true));
         let raw = fs::read_to_string(get_config_path()).unwrap();
         assert!(!raw.contains("export-pass"), "明文密码不得落盘");
 
@@ -1130,8 +1193,8 @@ mod tests {
             err
         );
         assert_eq!(
-            load_config().servers[0].password,
-            pass,
+            load_config().servers[0].password.as_deref(),
+            Some(pass.as_str()),
             "导入失败后现有配置必须一字未动"
         );
 

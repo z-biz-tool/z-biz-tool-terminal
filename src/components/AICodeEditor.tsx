@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Modal, Button, Typography, message, Tabs, Tag } from "antd";
 import { CodeOutlined, BulbOutlined } from "@ant-design/icons";
 import type { AIMessage } from "../types/ai";
-import { useAIStore } from "../stores/aiStore";
+import { isAIConfigured, useAIStore } from '../stores/aiStore';
 import { createAIClient, parseJsonReply } from "../services/aiClient";
 
 const { Title, Text, Paragraph } = Typography;
@@ -39,7 +39,7 @@ export default function AICodeEditor({ open, onClose, code, language, onCodeUpda
 
   const generateSuggestions = async () => {
     // 分析对象用编辑区的内容：原来读的是外部 code 属性，用户在编辑区改了什么都不生效
-    if (!editCode.trim() || !config.apiKey) {
+    if (!editCode.trim() || !isAIConfigured(config)) {
       message.warning("请输入代码并配置 API Key");
       return;
     }
@@ -151,7 +151,7 @@ export default function AICodeEditor({ open, onClose, code, language, onCodeUpda
                   icon={<BulbOutlined />}
                   onClick={generateSuggestions}
                   loading={loading}
-                  disabled={!editCode.trim() || !config.apiKey}
+                  disabled={!editCode.trim() || !isAIConfigured(config)}
                 >
                   {loading ? "生成建议中..." : "生成改进建议"}
                 </Button>

@@ -36,3 +36,5 @@ chrono = "0.4"
 sha2 = "0.10"
 data-encoding = "2"
 aes-gcm = "0.10.3"
+# 能力共享层：协议/鉴权/SSE/脱敏统一在 cap-llm，terminal 不再自建请求代码
+cap-llm = { path = "../../z-biz-tool-capability/crates/cap-llm" }

@@ -1,3 +1,4 @@
+mod ai;
 mod audit;
 mod commands;
 mod config;
@@ -78,6 +79,10 @@ pub fn run() {
             config::import_config,
             config::get_ai_config,
             config::save_ai_config,
+            // AI 请求收口到 Rust（cap-llm）：key 不回传 webview，前端不再直连
+            ai::ai_chat,
+            ai::ai_chat_stream,
+            ai::ai_stream_abort,
             config::get_session_logs,
             config::read_session_log,
             config::delete_session_log,

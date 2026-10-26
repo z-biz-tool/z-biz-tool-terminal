@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Modal, Button, Typography, message, Divider, Input } from "antd";
 import { GitlabOutlined } from "@ant-design/icons";
 import type { AIMessage } from "../types/ai";
-import { useAIStore } from "../stores/aiStore";
+import { isAIConfigured, useAIStore } from '../stores/aiStore';
 import { createAIClient, parseJsonReply } from "../services/aiClient";
 
 const { Title, Text, Paragraph } = Typography;
@@ -30,7 +30,7 @@ export default function AIGitCommit({ open, onClose, diff }: AIGitCommitProps) {
   }, [open, diff]);
 
   const generateCommitMessage = async () => {
-    if (!diffText.trim() || !config.apiKey) {
+    if (!diffText.trim() || !isAIConfigured(config)) {
       message.warning("请粘贴 diff 内容并配置 API Key");
       return;
     }
@@ -128,7 +128,7 @@ export default function AIGitCommit({ open, onClose, diff }: AIGitCommitProps) {
             icon={<GitlabOutlined />}
             onClick={generateCommitMessage}
             loading={loading}
-            disabled={!diffText.trim() || !config.apiKey}
+            disabled={!diffText.trim() || !isAIConfigured(config)}
             style={{ minWidth: "200px" }}
           >
             {loading ? "生成提交信息中..." : "生成提交信息"}

@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Modal, Button, Spin, Typography } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
 import type { CommandExplanation } from "../types/ai";
-import { useAIStore } from "../stores/aiStore";
+import { isAIConfigured, useAIStore } from '../stores/aiStore';
 import { createAIClient } from "../services/aiClient";
 
 const { Title, Text, Paragraph } = Typography;
@@ -20,7 +20,7 @@ export default function AICommandExplanation({ open, onClose, command }: AIComma
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (open && command && config.apiKey) {
+    if (open && command && isAIConfigured(config)) {
       setLoading(true);
       setExplanation(null);
       setError(null);
@@ -38,7 +38,7 @@ export default function AICommandExplanation({ open, onClose, command }: AIComma
           setLoading(false);
         });
     }
-  }, [open, command, config.apiKey]);
+  }, [open, command, isAIConfigured(config)]);
 
   if (!open) return null;
 

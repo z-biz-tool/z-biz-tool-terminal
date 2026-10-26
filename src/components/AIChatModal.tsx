@@ -3,7 +3,7 @@ import { Modal, Button, Space, Tag, Tooltip, message, Input, Tabs } from "antd";
 import type { TabsProps } from "antd";
 import { SendOutlined, StopOutlined, SettingOutlined, PlusOutlined, DeleteOutlined } from "@ant-design/icons";
 import type { AIMessage, AIConfig, AIProvider } from "../types/ai";
-import { useAIStore, withProvider, PROVIDER_PLACEHOLDERS } from "../stores/aiStore";
+import { useAIStore, withProvider, PROVIDER_PLACEHOLDERS, isAIConfigured } from "../stores/aiStore";
 import { createAIClient } from "../services/aiClient";
 import { renderMarkdown } from "../utils/markdown";
 
@@ -68,8 +68,8 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
   const handleSend = async () => {
     if (!input.trim() || isGenerating) return;
 
-    // 如果没有 API key，提示配置
-    if (!config.apiKey) {
+    // 如果 AI 还没配置好，提示去设置
+    if (!isAIConfigured(config)) {
       message.warning("请先在设置中配置 API Key");
       setShowSettings(true);
       return;
@@ -92,6 +92,11 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    // 「停止」的新语义（2026-10-26）：signal 触发后端 ai_stream_abort，流停在
+    // chunk 边界、chatStream **正常 resolve** 返回已生成的部分 —— 不再是
+    // AbortError。这里本地记一笔，resolve 时补上停止标记。
+    let stoppedLocally = false;
+    controller.signal.addEventListener("abort", () => { stoppedLocally = true; }, { once: true });
 
     let streamed = "";
     let scheduled = false;
@@ -124,7 +129,13 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
         onDelta,
       });
       flush();
-      persist([...conversation, { role: "assistant", content: streamed, timestamp: Date.now() }]);
+      if (stoppedLocally && streamed) {
+        const content = `${streamed}\n\n> 已停止生成`;
+        setMessages([...conversation, { role: "assistant", content, timestamp: Date.now() }]);
+        persist([...conversation, { role: "assistant", content, timestamp: Date.now() }]);
+      } else {
+        persist([...conversation, { role: "assistant", content: streamed, timestamp: Date.now() }]);
+      }
     } catch (error: any) {
       const aborted = error?.name === "AbortError";
       const suffix = aborted ? "已停止生成" : `❌ 错误: ${error?.message || "未知错误"}`;
@@ -339,7 +350,13 @@ function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave:
           type="password"
           value={formData.apiKey}
           onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
-          placeholder={formData.provider === "ollama" ? "留空使用本地 Ollama" : "请输入 API Key"}
+          placeholder={
+            config.hasApiKey
+              ? "已保存 · 留空保持不变（明文不再回传界面）"
+              : formData.provider === "ollama"
+                ? "留空使用本地 Ollama"
+                : "请输入 API Key"
+          }
         />
       </div>
 

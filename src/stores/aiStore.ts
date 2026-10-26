@@ -48,6 +48,18 @@ export function withProvider(config: AIConfig, provider: AIProvider): AIConfig {
 }
 
 /**
+ * 是否已配置到可用。
+ *
+ * 2026-10-26 起 apiKey 是**脱敏视图**（恒空串），明文不再回传前端 ——
+ * 判「已配置」用后端的 hasApiKey 布尔。hasApiKey 缺省（测试数据、未加载）
+ * 时退回看 apiKey 本身，语义兼容。
+ */
+export function isAIConfigured(config: AIConfig): boolean {
+  if (config.hasApiKey !== undefined) return config.hasApiKey;
+  return Boolean(config.apiKey);
+}
+
+/**
  * 各 provider 的输入框占位文案。
  *
  * 此前只有「openai → OpenAI 地址 / 其它 → Anthropic 地址」两档，
@@ -92,7 +104,7 @@ export const useAIStore = create<TerminalAIStore>((set, get) => ({
   updateConfig: (partial) =>
     set((state) => ({ config: { ...state.config, ...partial } })),
 
-  /** 从后端读取配置(apiKey 由后端解密后返回明文, 只存在于内存) */
+  /** 从后端读取配置（**脱敏视图**：apiKey 恒空串，hasApiKey 表达是否已配置） */
   loadFromStorage: async () => {
     try {
       const stored = await invoke<Partial<AIConfig> | null>('get_ai_config');
@@ -104,7 +116,7 @@ export const useAIStore = create<TerminalAIStore>((set, get) => ({
     }
   },
 
-  /** 写回后端; 未加载完成前拒绝写入, 避免默认值覆盖已保存的 Key */
+  /** 写回后端；apiKey 为空串时后端继承已保存的 key（编辑其它字段不必重填） */
   save: async () => {
     if (!get().loaded) {
       console.error('AI 配置尚未加载完成, 本次保存已忽略');

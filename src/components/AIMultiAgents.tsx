@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Modal, Button, Typography, message, Progress, Card, Input } from "antd";
 import { TeamOutlined } from "@ant-design/icons";
 import type { AIMessage } from "../types/ai";
-import { useAIStore } from "../stores/aiStore";
+import { isAIConfigured, useAIStore } from '../stores/aiStore';
 import { createAIClient } from "../services/aiClient";
 
 const { Title, Text, Paragraph } = Typography;
@@ -45,7 +45,7 @@ export default function AIMultiAgents({ open, onClose }: AIMultiAgentsProps) {
   }, [open]);
 
   const runMultiAgentTask = async () => {
-    if (!task.trim() || !config.apiKey) {
+    if (!task.trim() || !isAIConfigured(config)) {
       message.warning("请输入任务描述并配置 API Key");
       return;
     }
@@ -161,7 +161,7 @@ export default function AIMultiAgents({ open, onClose }: AIMultiAgentsProps) {
             icon={<TeamOutlined />}
             onClick={runMultiAgentTask}
             loading={loading}
-            disabled={!task.trim() || !config.apiKey}
+            disabled={!task.trim() || !isAIConfigured(config)}
             style={{ minWidth: "200px" }}
           >
             {loading ? "智能体协作中..." : "开始多智能体协作"}

@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Modal, Button, Spin, Typography } from "antd";
 import { BugOutlined, SolutionOutlined } from "@ant-design/icons";
 import type { ErrorAnalysis } from "../types/ai";
-import { useAIStore } from "../stores/aiStore";
+import { isAIConfigured, useAIStore } from '../stores/aiStore';
 import { createAIClient } from "../services/aiClient";
 
 const { Title, Text, Paragraph } = Typography;
@@ -20,7 +20,7 @@ export default function AIErrorAnalysis({ open, onClose, error }: AIErrorAnalysi
   const [errorText, setErrorText] = useState<string | null>(null);
 
   useEffect(() => {
-    if (open && error && config.apiKey) {
+    if (open && error && isAIConfigured(config)) {
       setLoading(true);
       setAnalysis(null);
       setErrorText(null);
@@ -38,7 +38,7 @@ export default function AIErrorAnalysis({ open, onClose, error }: AIErrorAnalysi
           setLoading(false);
         });
     }
-  }, [open, error, config.apiKey]);
+  }, [open, error, isAIConfigured(config)]);
 
   if (!open) return null;
 

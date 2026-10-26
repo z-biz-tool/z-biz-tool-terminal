@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Modal, Button, Spin, Typography, Input, message } from "antd";
 import { RobotOutlined } from "@ant-design/icons";
-import { useAIStore } from "../stores/aiStore";
+import { isAIConfigured, useAIStore } from '../stores/aiStore';
 import { createAIClient } from "../services/aiClient";
 
 const { Title, Text, Paragraph } = Typography;
@@ -28,7 +28,7 @@ export default function AINaturalLanguageCommand({ open, onClose, onCommandGener
   const handleGenerate = async () => {
     if (!input.trim()) return;
 
-    if (!config.apiKey) {
+    if (!isAIConfigured(config)) {
       message.warning("请先在设置中配置 API Key");
       onClose();
       return;

@@ -7,9 +7,14 @@ import type {
   ErrorAnalysis,
   StreamOptions,
 } from "../types/ai";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/** 请求参数：公开选项 + 内部流式/中止控制 */
-type RequestParams = ChatOptions & { stream?: boolean; signal?: AbortSignal };
+/** 命令参数：生成参数的临时覆盖（与 Rust ai::GenOverrides 对应） */
+type Overrides = { temperature?: number; maxTokens?: number };
+
+/** AI 流式 token 事件名（与 Rust ai.rs 一致） */
+const STREAM_EVENT = "ai-stream://token";
 
 /**
  * 模型被要求输出 JSON, 但实际常包一层 ```json 围栏、或前后带一句客套话。
@@ -26,144 +31,82 @@ export function parseJsonReply<T>(text: string): T {
   return JSON.parse(candidate) as T;
 }
 
+function overridesOf(options?: ChatOptions): Overrides {
+  const o: Overrides = {};
+  if (options?.temperature !== undefined) o.temperature = options.temperature;
+  if (options?.maxTokens !== undefined) o.maxTokens = options.maxTokens;
+  return o;
+}
+
 /**
- * AI 客户端基础类
+ * AI 客户端 —— 请求全部走 Rust 侧命令（cap-llm）。
+ *
+ * ## 为什么前端不再自己 fetch（2026-10-26）
+ *
+ * 原实现在这里维护着四套协议的 URL/鉴权头/请求体/SSE 解析（约 350 行），
+ * 且 apiKey 明文由 `get_ai_config` 回传、长期驻留 webview 内存 —— 任何一处
+ * 渲染疏漏都是泄露面。现在：协议/鉴权/流式解码/错误脱敏全部收口到后端
+ * `ai_chat` / `ai_chat_stream`（底层是家族能力层 cap-llm），key 只在设置
+ * 表单录入时过一次 IPC，此后存 Rust 加密区、请求不出后端进程。
+ *
+ * 本文件保留的只有 prompt 组装与结果解析 —— 那是产品语义，不是传输细节。
  */
-export abstract class AIClientBase implements AIClient {
-  protected config: AIConfig;
+class BackendAIClient implements AIClient {
+  // config 保留是为了兼容工厂签名与判空提示；apiKey 字段恒为空串（脱敏视图），
+  // 请求不会用到它 —— 后端从加密区自取。
+  constructor(private config: AIConfig) {}
 
-  constructor(config: AIConfig) {
-    this.config = config;
-  }
-
-  /**
-   * provider 的 endpoint / 鉴权差异都收敛在这里，返回最终 url；`custom` 走 OpenAI 兼容协议。
-   */
-  protected buildRequest(stream: boolean): { url: string; headers: Record<string, string> } {
-    const { provider, apiKey, baseUrl, model } = this.config;
-    // 四个 provider 的 url 都以 baseUrl 为基准，空值会拼出 "undefined/..." 这种请求
-    if (!baseUrl) throw new Error("请先在 AI 设置里填写 Base URL");
-    
-    // 各 provider 的 endpoint 与鉴权方式不同, 不能都套 OpenAI 的 /chat/completions
-    let url = `${baseUrl}/chat/completions`;
-    let headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-
-    // 根据提供商设置认证头
-    if (provider === "openai" || provider === "custom" || provider === "minimax") {
-      // minimax 与 openai/custom 同为 OpenAI 兼容协议 ⇒ 同一个 Bearer 鉴权。
-      // 不加这一支的话 minimax 会掉进下面的「都不匹配」分支 ⇒ **不带任何鉴权头**，
-      // 请求发出去只会被服务端 401，看起来像「配错了」，实际是这里漏了分支。
-      headers["Authorization"] = `Bearer ${apiKey}`;
-    } else if (provider === "claude") {
-      url = `${baseUrl}/messages`;
-      headers["x-api-key"] = apiKey;
-      headers["anthropic-version"] = "2023-06-01";
-      // 从 WebView 直连 Anthropic 必须显式声明, 否则预检被 CORS 拦掉
-      headers["anthropic-dangerous-direct-browser-access"] = "true";
-    } else if (provider === "gemini") {
-      // Key 走 header: 拼进 URL query 会落到网关/服务端访问日志里（P-4）
-      url = `${baseUrl}/v1beta/models/${model}:generateContent`;
-      headers["x-goog-api-key"] = apiKey;
-    } else if (provider === "ollama") {
-      url = `${baseUrl}/api/chat`;
+  private assertConfigured(): void {
+    if (this.config.hasApiKey === false) {
+      throw new Error("AI 未配置：请先在 AI 设置里填写 API Key");
     }
-
-    if (stream) url = this.streamEndpoint(url);
-    return { url, headers };
+    if (!this.config.baseUrl) throw new Error("请先在 AI 设置里填写 Base URL");
+    if (!this.config.model) throw new Error("请先在 AI 设置里填写模型名");
   }
 
-  protected async requestAI(messages: AIMessage[], options?: RequestParams): Promise<Response> {
-    const stream = options?.stream ?? false;
-    const { url, headers } = this.buildRequest(stream);
-    const body = this.buildRequestBody(messages, options);
-
-    return fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: options?.signal,
+  async chat(messages: AIMessage[], options?: ChatOptions): Promise<string> {
+    this.assertConfigured();
+    return invoke<string>("ai_chat", {
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      overrides: overridesOf(options),
     });
   }
 
-  /** 流式 endpoint: 只有 gemini 需要改写, 其余 provider 同一 URL 靠 body 里的 stream 区分 */
-  protected streamEndpoint(url: string): string {
-    return url;
-  }
-
-  protected abstract buildRequestBody(messages: AIMessage[], options?: RequestParams): any;
-
-  async chat(messages: AIMessage[], options?: ChatOptions): Promise<string> {
-    const response = await this.requestAI(messages, { ...options, stream: false });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`AI API error: ${response.status} ${errorText}`);
-    }
-
-    const data = await response.json();
-    return this.extractContent(data);
-  }
-
   /**
-   * 流式对话。此前 chat() 只有 stream:false 一条路径, 界面上的"实时流式"与"停止"
-   * 都不成立（T-2-2）；这里按行切 SSE/NDJSON 事件, 逐段回调, 并把 abort 透传给 fetch。
+   * 流式对话。token 经后端 `ai-stream://token` 事件推送，命令 resolve 时为
+   * 完整文本。`options.signal` 的语义从「断开 fetch 连接」变为「通知后端
+   * 停止生成」（ai_stream_abort）：后端停在下一个网络 chunk 边界，返回
+   * 已生成的部分 —— 监听器仍会收到既有 token，只是不再有新增。
    */
   async chatStream(messages: AIMessage[], options: StreamOptions): Promise<string> {
-    const response = await this.requestAI(messages, { ...options, stream: true });
-    if (!response.ok) {
-      throw new Error(`AI API error: ${response.status} ${await response.text()}`);
+    this.assertConfigured();
+
+    const unlisten: Promise<UnlistenFn> = listen<string>(STREAM_EVENT, (event) => {
+      options.onDelta?.(event.payload);
+    });
+
+    if (options.signal) {
+      const onAbort = () => {
+        invoke("ai_stream_abort").catch(() => {/* 后端已在收尾时忽略 */});
+      };
+      if (options.signal.aborted) onAbort();
+      else options.signal.addEventListener("abort", onAbort, { once: true });
     }
-    if (!response.body) throw new Error("AI 服务未返回可流式读取的响应体");
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let pending = "";
-    let full = "";
-    const emit = (line: string) => {
-      const delta = this.parseStreamLine(line);
-      if (!delta) return;
-      full += delta;
-      options.onDelta?.(delta);
-    };
-
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      pending += decoder.decode(value, { stream: true });
-      let nl = pending.indexOf("\n");
-      while (nl >= 0) {
-        // 半行留在 pending 里等下一个 chunk, 否则跨 chunk 的事件会被截断丢掉
-        emit(pending.slice(0, nl).trim());
-        pending = pending.slice(nl + 1);
-        nl = pending.indexOf("\n");
-      }
-    }
-    emit(pending.trim());
-    return full;
-  }
-
-  /** 默认按 OpenAI/Claude 风格的 SSE 解析；ollama 的 NDJSON 由子类覆盖 */
-  protected parseStreamLine(line: string): string {
-    if (!line.startsWith("data:")) return "";
-    const payload = line.slice(5).trim();
-    if (!payload || payload === "[DONE]") return "";
     try {
-      return this.extractDelta(JSON.parse(payload));
-    } catch {
-      return "";
+      return await invoke<string>("ai_chat_stream", {
+        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+        overrides: overridesOf(options),
+      });
+    } finally {
+      // 监听器跟随本次请求的生命周期；invoke 返回/抛错后不再有新事件
+      unlisten.then((fn) => fn()).catch(() => {});
     }
   }
-
-  protected abstract extractContent(data: any): string;
-
-  /** 从单个流式事件里取出增量文本, 非文本事件返回空串 */
-  protected abstract extractDelta(chunk: any): string;
 
   async explainCommand(command: string): Promise<CommandExplanation> {
     const prompt = `Please explain the following shell command:\n\nCommand: ${command}\n\nFormat as JSON:\n{\n  "description": "brief description",\n  "parameters": [\n    {"name": "param", "description": "description"}\n  ],\n  "example": "example usage",\n  "warnings": ["any warnings"]\n}`;
-    
+
     const messages: AIMessage[] = [
       { role: "system", content: "You are a shell command expert. Answer in JSON format.", timestamp: Date.now() },
       { role: "user", content: prompt, timestamp: Date.now() },
@@ -176,7 +119,7 @@ export abstract class AIClientBase implements AIClient {
 
   async analyzeError(error: string): Promise<ErrorAnalysis> {
     const prompt = `Please analyze this error message and provide solutions:\n\nError: ${error}\n\nFormat as JSON:\n{\n  "rootCause": "root cause",\n  "solutions": ["solution 1", "solution 2"],\n  "预防措施": ["prevention steps"]\n}`;
-    
+
     const messages: AIMessage[] = [
       { role: "system", content: "You are a debugging expert. Answer in JSON format.", timestamp: Date.now() },
       { role: "user", content: prompt, timestamp: Date.now() },
@@ -189,7 +132,7 @@ export abstract class AIClientBase implements AIClient {
 
   async commandFromNaturalLanguage(text: string): Promise<string> {
     const prompt = `Convert the following natural language request to a shell command:\n\nRequest: ${text}\n\nOutput only the shell command, no explanation.`;
-    
+
     const messages: AIMessage[] = [
       { role: "system", content: "You are a shell command expert. Output only the command, no explanation.", timestamp: Date.now() },
       { role: "user", content: prompt, timestamp: Date.now() },
@@ -201,181 +144,12 @@ export abstract class AIClientBase implements AIClient {
 }
 
 /**
- * OpenAI 客户端
- */
-export class OpenAIClient extends AIClientBase {
-  constructor(config: AIConfig) {
-    super(config);
-  }
-
-  protected buildRequestBody(messages: AIMessage[], options?: RequestParams): any {
-    return {
-      model: this.config.model,
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
-      temperature: options?.temperature ?? this.config.temperature,
-      max_tokens: options?.maxTokens ?? this.config.maxTokens,
-      stream: options?.stream ?? false,
-    };
-  }
-
-  protected extractContent(data: any): string {
-    return data.choices[0].message.content;
-  }
-
-  protected extractDelta(chunk: any): string {
-    return chunk.choices?.[0]?.delta?.content ?? "";
-  }
-}
-
-/**
- * Anthropic Claude 客户端
- */
-export class ClaudeClient extends AIClientBase {
-  constructor(config: AIConfig) {
-    super(config);
-  }
-
-  protected buildRequestBody(messages: AIMessage[], options?: RequestParams): any {
-    // 将 messages 转换为 Claude 格式
-    const systemMessage = messages.find(m => m.role === "system");
-    
-    let body: any = {
-      model: this.config.model,
-      messages: messages.filter(m => m.role !== "system").map(m => ({
-        role: m.role === "assistant" ? "assistant" : "user",
-        content: m.content,
-      })),
-      temperature: options?.temperature ?? this.config.temperature,
-      max_tokens: options?.maxTokens ?? this.config.maxTokens,
-      stream: options?.stream ?? false,
-    };
-
-    if (systemMessage) {
-      body.system = systemMessage.content;
-    }
-
-    return body;
-  }
-
-  protected extractContent(data: any): string {
-    return data.content[0]?.text || "";
-  }
-
-  protected extractDelta(chunk: any): string {
-    // claude 的事件类型很多(message_start/ping/…), 只有 content_block_delta 带正文
-    return chunk.type === "content_block_delta" ? chunk.delta?.text ?? "" : "";
-  }
-}
-
-/**
- * Google Gemini 客户端
- */
-export class GeminiClient extends AIClientBase {
-  constructor(config: AIConfig) {
-    super(config);
-  }
-
-  protected streamEndpoint(url: string): string {
-    // gemini 靠 endpoint 区分流式, 而不是 body 里的 stream 字段; alt=sse 才是 text/event-stream
-    return url.replace(":generateContent", ":streamGenerateContent?alt=sse");
-  }
-
-  protected buildRequestBody(messages: AIMessage[], options?: RequestParams): any {
-    const systemMessage = messages.find(m => m.role === "system");
-    const contents = messages.filter(m => m.role !== "system").map(m => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }],
-    }));
-
-    let body: any = {
-      contents,
-      generationConfig: {
-        temperature: options?.temperature ?? this.config.temperature,
-        maxOutputTokens: options?.maxTokens ?? this.config.maxTokens,
-      },
-    };
-
-    if (systemMessage) {
-      body.systemInstructions = {
-        parts: [{ text: systemMessage.content }],
-      };
-    }
-
-    return body;
-  }
-
-  protected extractContent(data: any): string {
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  }
-
-  protected extractDelta(chunk: any): string {
-    const parts = chunk.candidates?.[0]?.content?.parts;
-    if (!Array.isArray(parts)) return "";
-    return parts.map((p: any) => p.text ?? "").join("");
-  }
-}
-
-/**
- * Ollama 客户端
- */
-export class OllamaClient extends AIClientBase {
-  constructor(config: AIConfig) {
-    super(config);
-  }
-
-  protected buildRequestBody(messages: AIMessage[], options?: RequestParams): any {
-    return {
-      model: this.config.model,
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
-      // /api/chat 的采样参数在 options 里, 顶层同名字段会被忽略
-      options: {
-        temperature: options?.temperature ?? this.config.temperature,
-        num_predict: options?.maxTokens ?? this.config.maxTokens,
-      },
-      stream: options?.stream ?? false,
-    };
-  }
-
-  /** ollama 流式是换行分隔的裸 JSON, 不是 SSE; 经网关代理时才可能带 data: 前缀 */
-  protected parseStreamLine(line: string): string {
-    if (!line) return "";
-    if (line.startsWith("data:")) return super.parseStreamLine(line);
-    try {
-      return this.extractDelta(JSON.parse(line));
-    } catch {
-      return "";
-    }
-  }
-
-  protected extractContent(data: any): string {
-    return data.message?.content || "";
-  }
-
-  protected extractDelta(chunk: any): string {
-    if (chunk.done) return "";
-    return chunk.message?.content ?? "";
-  }
-}
-
-/**
- * 工厂函数：根据配置创建客户端
+ * 工厂函数：按配置创建客户端。
+ *
+ * provider 的协议差异（openai/claude/gemini/ollama/minimax…）已整体收口到
+ * 后端（`ai.rs::provider_kind`），前端不再需要按 provider 分发传输实现 ——
+ * 保留函数与签名是为了组件层零改动。
  */
 export function createAIClient(config: AIConfig): AIClient {
-  switch (config.provider) {
-    case "openai":
-      return new OpenAIClient(config);
-    case "claude":
-      return new ClaudeClient(config);
-    case "gemini":
-      return new GeminiClient(config);
-    case "ollama":
-      return new OllamaClient(config);
-    case "minimax":
-      // MiniMax 开放平台是 OpenAI 兼容协议 ⇒ 与 openai 同一个客户端。
-      // 显式写这一支（而不是让它落进 default）—— 落进 default 虽然结果一样，
-      // 但「新 provider 忘了接」就会被 default 悄悄兜住，配置与实际行为脱节。
-      return new OpenAIClient(config);
-    default:
-      return new OpenAIClient(config);
-  }
+  return new BackendAIClient(config);
 }

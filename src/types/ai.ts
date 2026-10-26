@@ -24,7 +24,14 @@ export type AIProvider =
 /** AI 配置 */
 export interface AIConfig {
   provider: AIProvider;
+  /**
+   * 2026-10-26 起为**脱敏视图**：后端 `get_ai_config` / `get_config` 返回的
+   * apiKey 恒为空串，明文 key 不再回传 webview（是否已配置看 `hasApiKey`）。
+   * 非空值只出现在设置表单录入/修改的那一刻，随 `save_ai_config` 直达后端。
+   */
   apiKey: string;
+  /** 后端是否已保存 key（脱敏视图的判空依据；本地未加载时为 undefined） */
+  hasApiKey?: boolean;
   baseUrl: string;
   model: string;
   temperature: number;
