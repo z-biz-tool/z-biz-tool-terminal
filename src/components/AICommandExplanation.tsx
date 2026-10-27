@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Modal, Button, Spin, Typography } from "antd";
+import { Modal, Button, Spin, Typography, theme } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
 import type { CommandExplanation } from "../types/ai";
 import { isAIConfigured, useAIStore } from '../stores/aiStore';
@@ -14,6 +14,7 @@ interface AICommandExplanationProps {
 }
 
 export default function AICommandExplanation({ open, onClose, command }: AICommandExplanationProps) {
+  const { token } = theme.useToken();
   const { config } = useAIStore();
   const [loading, setLoading] = useState(false);
   const [explanation, setExplanation] = useState<CommandExplanation | null>(null);
@@ -59,14 +60,14 @@ export default function AICommandExplanation({ open, onClose, command }: AIComma
       {loading ? (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px" }}>
           <Spin size="large" />
-          <Paragraph style={{ marginTop: "16px", color: "#666" }}>正在分析命令...</Paragraph>
+          <Paragraph style={{ marginTop: "16px", color: token.colorTextSecondary }}>正在分析命令...</Paragraph>
         </div>
       ) : error ? (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px" }}>
           <div style={{ fontSize: 36, color: "#ff4d4f" }}>
             <InfoCircleOutlined />
           </div>
-          <Paragraph style={{ marginTop: "16px", color: "#666" }}>分析失败: {error}</Paragraph>
+          <Paragraph style={{ marginTop: "16px", color: token.colorTextSecondary }}>分析失败: {error}</Paragraph>
         </div>
       ) : explanation ? (
         <div>

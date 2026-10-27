@@ -1,246 +1,226 @@
-import { OpenAIClient, ClaudeClient, GeminiClient, OllamaClient, parseJsonReply } from "../src/services/aiClient";
+// 前端 AI 客户端契约（2026-10-26 起传输层收口到 Rust ai.rs / cap-llm）
+//
+// 旧版这里测的是四套协议的前端 SSE 解析；apiKey 不再回传 webview 后，那些代码已删除。
+// 前端现在只剩 prompt 组装与结果解析，能钉的契约是：
+//   1. IPC 请求体只含 messages/overrides —— 任何 apiKey 字段都不许出现
+//   2. 后端 `ai-stream://token` 事件转发到 onDelta
+//   3. abort 语义 = 通知后端停止生成（ai_stream_abort），不再是断 fetch
+//   4. 监听器在 resolve / 抛错后都必须注销
+//   5. 未配置时一个请求都不发
+import { createAIClient, parseJsonReply } from "../src/services/aiClient";
+import { PROVIDER_PRESETS } from "../src/stores/aiStore";
 
-let pass = 0, fail = 0;
-const cfg = { provider: "openai", apiKey: "k", baseUrl: "https://x.test/v1", model: "m", temperature: 0.2, maxTokens: 100 };
+let pass = 0,
+  fail = 0;
 
-// 记录 fetch 收到的 url/signal/body
-let last = {};
-function stub(chunks, { delay = 0, abortAfter = null } = {}) {
-  globalThis.fetch = async (url, init) => {
-    last = { url, init };
-    const encoder = new TextEncoder();
-    let i = 0;
-    const body = new ReadableStream({
-      pull(controller) {
-        if (abortAfter !== null && i >= abortAfter) {
-          controller.error(Object.assign(new Error("The operation was aborted."), { name: "AbortError" }));
-          return;
-        }
-        if (i >= chunks.length) { controller.close(); return; }
-        const raw = chunks[i++];
-        // 按 3 字节切片入队：复现"一条 SSE 事件被拆到多个网络包"的真实情况
-        const bytes = encoder.encode(raw);
-        for (let off = 0; off < bytes.length; off += 3) {
-          controller.enqueue(bytes.slice(off, off + 3));
-        }
-        if (delay) return new Promise(r => setTimeout(r, delay));
-      },
-    });
-    return new Response(body, { status: 200 });
-  };
+async function t(name: string, fn: () => unknown) {
+  try {
+    await fn();
+    pass++;
+    console.log("  ok  ", name);
+  } catch (e) {
+    fail++;
+    console.log("  FAIL", name, "\n       ", (e as Error).message);
+  }
 }
 
-async function t(name, fn) {
-  try { await fn(); pass++; console.log("  ok  ", name); }
-  catch (e) { fail++; console.log("  FAIL", name, "\n       ", e.message); }
-}
-const eq = (a, b, what = "") => { if (a !== b) throw new Error(`${what} expected ${JSON.stringify(b)} got ${JSON.stringify(a)}`); };
-const msg = (s) => [{ role: "user", content: s, timestamp: 0 }];
+const eq = <T,>(a: T, b: T, what = "") => {
+  if (a !== b) throw new Error(`${what} expected ${JSON.stringify(b)} got ${JSON.stringify(a)}`);
+};
 
-// ---- OpenAI 风格 SSE ----
-await t("openai: 跨包拆分的 SSE 事件被完整重组", async () => {
-  stub([
-    'data: {"choices":[{"delta":{"content":"rm "}}]}\n\n',
-    'data: {"choices":[{"delta":{"content":"-rf"}}]}\n\n',
-    'data: {"choices":[{"delta":{"content":" /tmp"}}]}\n\n',
-    'data: [DONE]\n\n',
-  ]);
-  const deltas = [];
-  const full = await new OpenAIClient(cfg).chatStream(msg("hi"), { onDelta: d => deltas.push(d) });
-  eq(full, "rm -rf /tmp", "full");
-  eq(deltas.join(""), full, "deltas");
-  eq(deltas.length, 3, "delta count");
+const ok = (cond: unknown, what: string) => {
+  if (!cond) throw new Error(what);
+};
+
+type Call = { cmd: string; args: any };
+const calls: Call[] = [];
+let tokenHandler: ((e: { payload: string }) => void) | null = null;
+let unlistenCount = 0;
+let stream: { resolve: (s: string) => void; reject: (e: unknown) => void } | null = null;
+
+// 在 Node 里补齐 Tauri 运行时桥：invoke / transformCallback / 事件插件内部表都被 spy 接管
+(globalThis as any).window = {};
+(globalThis as any).window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+  unregisterListener: () => {
+    unlistenCount++;
+  },
+};
+(globalThis as any).window.__TAURI_INTERNALS__ = {
+  transformCallback: (cb: (e: { payload: string }) => void) => {
+    tokenHandler = cb;
+    return 1;
+  },
+  invoke: async (cmd: string, args: any) => {
+    calls.push({ cmd, args });
+    switch (cmd) {
+      case "plugin:event|listen":
+        return 7;
+      case "plugin:event|unlisten":
+        return null;
+      case "ai_chat":
+        return "ok";
+      case "ai_chat_stream":
+        return await new Promise<string>((resolve, reject) => {
+          stream = { resolve, reject };
+        });
+      case "ai_stream_abort":
+        return null;
+      default:
+        return null;
+    }
+  },
+};
+
+const cfg = {
+  provider: "openai" as const,
+  apiKey: "",
+  hasApiKey: true,
+  baseUrl: "https://x.test/v1",
+  model: "m",
+  temperature: 0.2,
+  maxTokens: 100,
+};
+const msg = (text: string) => [{ role: "user" as const, content: text, timestamp: 1 }];
+const flush = () => new Promise((r) => setTimeout(r, 0));
+const lastCall = (cmd: string) => [...calls].reverse().find((c) => c.cmd === cmd);
+
+await t("chatStream: 后端 token 事件按序转发给 onDelta", async () => {
+  calls.length = 0;
+  unlistenCount = 0;
+  const got: string[] = [];
+  const p = createAIClient(cfg).chatStream(msg("hi"), { onDelta: (d) => got.push(d) });
+  await flush();
+  ok(tokenHandler, "应注册 ai-stream://token 监听");
+  tokenHandler!({ payload: "he" });
+  tokenHandler!({ payload: "llo" });
+  stream!.resolve("hello");
+  eq(await p, "hello", "完整文本");
+  eq(got.join(""), "hello", "onDelta 拼接");
 });
 
-await t("openai: 非正文/坏 JSON 事件不产生增量也不中断", async () => {
-  stub([
-    'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
-    'data: {trunc\n',
-    ': keep-alive comment\n\n',
-    'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
-  ]);
-  eq(await new OpenAIClient(cfg).chatStream(msg("hi"), {}), "ok");
+await t("chatStream: IPC 参数只含 messages/overrides，apiKey 不得泄漏", async () => {
+  calls.length = 0;
+  const p = createAIClient({ ...cfg, apiKey: "sk-should-not-leak" }).chatStream(msg("hi"), {
+    onDelta: () => {},
+    temperature: 0.1,
+    maxTokens: 9,
+  });
+  await flush();
+  const call = lastCall("ai_chat_stream");
+  ok(call, "应发出 ai_chat_stream");
+  const raw = JSON.stringify(call!.args);
+  ok(!raw.includes("sk-should-not-leak"), "apiKey 明文进了 IPC 参数");
+  ok(!raw.includes("apiKey"), "payload 不应带 apiKey 字段");
+  eq(call!.args.messages[0].content, "hi", "messages[0].content");
+  eq(call!.args.overrides.temperature, 0.1, "overrides.temperature");
+  eq(call!.args.overrides.maxTokens, 9, "overrides.maxTokens");
+  stream!.resolve("x");
+  await p;
 });
 
-await t("openai: 事件无换行收尾时尾包不丢", async () => {
-  stub(['data: {"choices":[{"delta":{"content":"tail"}}]}']);
-  eq(await new OpenAIClient(cfg).chatStream(msg("hi"), {}), "tail");
-});
-
-await t("openai: 请求带 stream:true 且透传 AbortSignal", async () => {
-  stub(['data: {"choices":[{"delta":{"content":"a"}}]}\n\n']);
+await t("chatStream: abort 通知后端停止生成（ai_stream_abort）", async () => {
+  calls.length = 0;
   const ac = new AbortController();
-  await new OpenAIClient(cfg).chatStream(msg("hi"), { signal: ac.signal });
-  eq(last.init.stream, undefined, "stream 不进 fetch init");
-  eq(last.init.signal, ac.signal, "signal");
-  eq(JSON.parse(last.init.body).stream, true, "body.stream");
+  const p = createAIClient(cfg).chatStream(msg("hi"), { onDelta: () => {}, signal: ac.signal });
+  await flush();
+  ac.abort();
+  await flush();
+  ok(lastCall("ai_stream_abort"), "abort 后应调用 ai_stream_abort");
+  stream!.resolve("");
+  await p;
 });
 
-await t("openai: 中途 abort 时 chatStream 以 AbortError 失败", async () => {
-  stub(['data: {"choices":[{"delta":{"content":"a"}}]}\n\n', 'data: {"choices":[{"delta":{"content":"b"}}]}\n\n'], { abortAfter: 1 });
-  const got = [];
+await t("chatStream: resolve 后注销监听器", async () => {
+  unlistenCount = 0;
+  const p = createAIClient(cfg).chatStream(msg("hi"), { onDelta: () => {} });
+  await flush();
+  stream!.resolve("ok");
+  await p;
+  await flush();
+  eq(unlistenCount, 1, "unlisten 次数");
+});
+
+await t("chatStream: 后端抛错也注销监听器并向上抛", async () => {
+  unlistenCount = 0;
+  const p = createAIClient(cfg).chatStream(msg("hi"), { onDelta: () => {} });
+  await flush();
+  stream!.reject(new Error("boom"));
+  let threw = "";
   try {
-    await new OpenAIClient(cfg).chatStream(msg("hi"), { onDelta: d => got.push(d) });
-    throw new Error("应当抛出");
+    await p;
   } catch (e) {
-    if (e.message === "应当抛出") throw e;
-    eq(e.name, "AbortError", "error name");
+    threw = (e as Error).message;
   }
-  eq(got.join(""), "a", "已产出的增量保留");
+  eq(threw, "boom", "错误向上传播");
+  await flush();
+  eq(unlistenCount, 1, "unlisten 次数");
 });
 
-await t("openai: HTTP 非 2xx 抛出带状态码的错误", async () => {
-  globalThis.fetch = async () => new Response("slow down", { status: 429 });
+await t("chat: 未配置 key 时直接报错且一个请求都不发", async () => {
+  calls.length = 0;
+  let threw = "";
   try {
-    await new OpenAIClient(cfg).chatStream(msg("hi"), {});
-    throw new Error("应当抛出");
+    await createAIClient({ ...cfg, hasApiKey: false }).chat(msg("hi"));
   } catch (e) {
-    if (e.message === "应当抛出") throw e;
-    if (!/429/.test(e.message)) throw new Error(e.message);
+    threw = (e as Error).message;
+  }
+  if (!/未配置/.test(threw)) throw new Error(`错误应说明未配置，实际：${threw || "没报错"}`);
+  eq(calls.length, 0, "发起的 IPC 次数");
+});
+
+await t("chat: 缺 baseUrl / model 时分别给出可行动提示", async () => {
+  const missing: Array<[Partial<typeof cfg>, RegExp]> = [
+    [{ baseUrl: "" }, /Base URL/],
+    [{ model: "" }, /模型名/],
+  ];
+  for (const [patch, re] of missing) {
+    let threw = "";
+    try {
+      await createAIClient({ ...cfg, ...patch }).chat(msg("hi"));
+    } catch (e) {
+      threw = (e as Error).message;
+    }
+    if (!re.test(threw)) throw new Error(`${JSON.stringify(patch)} 应提示 ${re}，实际：${threw || "没报错"}`);
   }
 });
 
-await t("openai: 无 body 时明确报错而不是静默返回空", async () => {
-  globalThis.fetch = async () => new Response(null, { status: 200 });
-  try {
-    await new OpenAIClient(cfg).chatStream(msg("hi"), {});
-    throw new Error("应当抛出");
-  } catch (e) {
-    if (e.message === "应当抛出") throw e;
-    if (!/响应体/.test(e.message)) throw new Error(e.message);
+await t("createAIClient: provider 差异不再影响前端（同一工厂即可）", async () => {
+  for (const provider of Object.keys(PROVIDER_PRESETS)) {
+    calls.length = 0;
+    const client = createAIClient({ ...cfg, provider: provider as typeof cfg.provider });
+    eq(await client.chat(msg("hi")), "ok", provider);
+    eq(lastCall("ai_chat")?.args.messages[0].content, "hi", `${provider} payload`);
   }
-});
-
-// ---- Claude ----
-await t("claude: 只取 content_block_delta, 忽略其它事件类型", async () => {
-  stub([
-    'event: message_start\ndata: {"type":"message_start","message":{"id":"x"}}\n\n',
-    'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"he"}}\n\n',
-    'event: ping\ndata: {"type":"ping"}\n\n',
-    'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"llo"}}\n\n',
-    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
-  ]);
-  const c = new ClaudeClient({ ...cfg, provider: "claude", baseUrl: "https://claude.test/v1" });
-  eq(await c.chatStream(msg("hi"), {}), "hello");
-  eq(last.url, "https://claude.test/v1/messages", "claude url");
-});
-
-// ---- Gemini ----
-await t("gemini: 流式改写到 streamGenerateContent?alt=sse", async () => {
-  stub(['data: {"candidates":[{"content":{"parts":[{"text":"g1"}],"role":"model"}}]}\n\n']);
-  const c = new GeminiClient({ ...cfg, provider: "gemini", baseUrl: "https://gen.test" });
-  eq(await c.chatStream(msg("hi"), {}), "g1");
-  if (!c) throw new Error("unreachable");
-  eq(last.url, "https://gen.test/v1beta/models/m:streamGenerateContent?alt=sse", "url");
-});
-
-await t("gemini: 一个事件多个 part 时全部拼接", async () => {
-  stub(['data: {"candidates":[{"content":{"parts":[{"text":"a"},{"text":"b"}]}}]}\n\n']);
-  const c = new GeminiClient({ ...cfg, provider: "gemini", baseUrl: "https://gen.test" });
-  eq(await c.chatStream(msg("hi"), {}), "ab");
-});
-
-// ---- Ollama NDJSON ----
-await t("ollama: 裸 JSON 行按 NDJSON 解析, done 行不产出正文", async () => {
-  stub([
-    '{"message":{"role":"assistant","content":"o1"},"done":false}\n',
-    '{"message":{"role":"assistant","content":"o2"},"done":false}\n',
-    '{"message":{"role":"assistant","content":""},"done":true,"total_duration":1}\n',
-  ]);
-  const c = new OllamaClient({ ...cfg, provider: "ollama", baseUrl: "http://127.0.0.1:11434" });
-  eq(await c.chatStream(msg("hi"), {}), "o1o2");
-  eq(last.url, "http://127.0.0.1:11434/api/chat", "ollama url");
-});
-
-await t("ollama: 也接受经网关包了一层 data: 的行", async () => {
-  stub(['data: {"message":{"content":"z"},"done":false}\n\n']);
-  const c = new OllamaClient({ ...cfg, provider: "ollama", baseUrl: "http://127.0.0.1:11434" });
-  eq(await c.chatStream(msg("hi"), {}), "z");
-});
-
-// ---- 非流式路径不能被改坏 ----
-await t("chat(): 非流式仍走 JSON 且不带 stream", async () => {
-  globalThis.fetch = async (url, init) => {
-    last = { url, init };
-    return new Response(JSON.stringify({ choices: [{ message: { content: "plain" } }] }), { status: 200 });
-  };
-  eq(await new OpenAIClient(cfg).chat(msg("hi"), { temperature: 0.1 }), "plain");
-  eq(JSON.parse(last.init.body).stream, false, "body.stream");
 });
 
 // ---- parseJsonReply ----
+
 await t("parseJsonReply: 剥 ```json 围栏", () => {
-  eq(parseJsonReply('```json\n{"a":1}\n```').a, 1);
+  eq((parseJsonReply<{ a: number }>('```json\n{"a":1}\n```')).a, 1);
 });
+
 await t("parseJsonReply: 忽略前后客套话", () => {
-  eq(parseJsonReply('好的，结果如下：\n{"a":2}\n希望有帮助').a, 2);
+  eq((parseJsonReply<{ a: number }>('好的，结果如下：\n{"a":2}\n希望有帮助')).a, 2);
 });
+
 await t("parseJsonReply: 裸 JSON 与嵌套括号", () => {
-  const v = parseJsonReply('{"a":{"b":[1,2]},"c":"x{y}"}');
-  eq(v.a.b[1], 2);
-  eq(v.c, "x{y}");
+  const v = parseJsonReply<{ a: { b: number[] }; c: string }>('{"a":{"b":[1,2]},"c":"x{y}"}');
+  eq(v.a.b[1], 2, "nested");
+  eq(v.c, "x{y}", "花括号在字符串里");
 });
+
 await t("parseJsonReply: 完全不是 JSON 时抛错(由调用方兜底)", () => {
   let threw = false;
-  try { parseJsonReply("对不起，我无法解释"); } catch { threw = true; }
-  eq(threw, true, "should throw");
-});
-
-// ---- explainCommand 端到端: 围栏 JSON 也能出结构化结果 ----
-await t("explainCommand: 模型输出带围栏时仍解析成功并回填 command", async () => {
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    choices: [{ message: { content: '```json\n{"description":"删除","parameters":[{"name":"-r","description":"递归"}],"example":"rm -r x","warnings":["不可逆"]}\n```' } }],
-  }), { status: 200 });
-  const r = await new OpenAIClient(cfg).explainCommand("rm -r x");
-  eq(r.command, "rm -r x", "command 回填");
-  eq(r.description, "删除");
-  eq(r.warnings[0], "不可逆");
-});
-
-await t("analyzeError: 回填 errorMessage 供 UI 展示", async () => {
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    choices: [{ message: { content: '{"rootCause":"权限不足","solutions":["sudo"]}' } }],
-  }), { status: 200 });
-  const r = await new OpenAIClient(cfg).analyzeError("Permission denied (publickey)");
-  eq(r.errorMessage, "Permission denied (publickey)");
-  eq(r.rootCause, "权限不足");
-});
-
-// ---- 鉴权头不被流式改动破坏 (P-4: key 不进 URL) ----
-await t("流式请求里 API key 不出现在 URL", async () => {
-  stub(['data: {"choices":[{"delta":{"content":"x"}}]}\n\n']);
-  await new OpenAIClient({ ...cfg, apiKey: "sk-supersecret" }).chatStream(msg("hi"), {});
-  if (last.url.includes("sk-supersecret")) throw new Error("key 泄漏到 URL");
-  eq(last.init.headers.Authorization, "Bearer sk-supersecret");
-});
-
-await t("custom provider 未填 baseUrl 时明确报错而非拼 undefined", async () => {
-  let requested = "";
-  globalThis.fetch = async (url) => { requested = String(url); return new Response("{}", { status: 200 }); };
-  const c = new OpenAIClient({ ...cfg, provider: "custom", baseUrl: "" });
   try {
-    await c.chat(msg("hi"));
-    throw new Error("应当抛出");
-  } catch (e) {
-    if (e.message === "应当抛出") throw e;
-    if (!/Base URL/.test(e.message)) throw new Error(e.message);
+    parseJsonReply("对不起，我无法解释");
+  } catch {
+    threw = true;
   }
-  eq(requested, "", "不应发出请求");
-});
-
-await t("custom provider 填了 baseUrl 时走 OpenAI 兼容路径", async () => {
-  globalThis.fetch = async (url, init) => {
-    last = { url, init };
-    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
-  };
-  const c = new OpenAIClient({ ...cfg, provider: "custom", baseUrl: "https://gw.internal/v1" });
-  eq(await c.chat(msg("hi")), "ok");
-  eq(last.url, "https://gw.internal/v1/chat/completions", "url");
-  eq(last.init.headers.Authorization, "Bearer k", "鉴权头");
+  ok(threw, "应抛错");
 });
 
 await t("parseJsonReply: 数组返回（代码建议要求 JSON 数组）", () => {
-  const v = parseJsonReply('```json\n[{"title":"a"},{"title":"b"}]\n```');
+  const v = parseJsonReply<Array<{ title: string }>>('```json\n[{"title":"a"},{"title":"b"}]\n```');
   eq(v.length, 2, "len");
   eq(v[1].title, "b");
 });

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Modal, Button, Spin, Typography, Input, message } from "antd";
+import { Modal, Button, Spin, Typography, Input, message, theme } from "antd";
 import { RobotOutlined } from "@ant-design/icons";
 import { isAIConfigured, useAIStore } from '../stores/aiStore';
 import { createAIClient } from "../services/aiClient";
@@ -13,6 +13,7 @@ interface AINaturalLanguageCommandProps {
 }
 
 export default function AINaturalLanguageCommand({ open, onClose, onCommandGenerated }: AINaturalLanguageCommandProps) {
+  const { token } = theme.useToken();
   const { config } = useAIStore();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -46,9 +47,13 @@ export default function AINaturalLanguageCommand({ open, onClose, onCommandGener
       setLoading(false);
 
       // 自动复制到剪贴板
-      navigator.clipboard.writeText(command).then(() => {
-        message.success("命令已生成并复制到剪贴板！");
-      });
+      navigator.clipboard.writeText(command).then(
+        () => message.success("命令已生成并复制到剪贴板！"),
+        (e) => {
+          console.warn("[terminal] 自动复制命令失败:", e);
+          message.warning("命令已生成，但复制到剪贴板失败，请手动复制");
+        },
+      );
 
       // 生成后不碰终端：是否落地由用户点"填入终端"决定（P-1）
 
@@ -93,7 +98,7 @@ export default function AINaturalLanguageCommand({ open, onClose, onCommandGener
         {loading ? (
           <div style={{ padding: "40px" }}>
             <Spin size="large" />
-            <Paragraph style={{ marginTop: "16px", color: "#666" }}>正在生成命令...</Paragraph>
+            <Paragraph style={{ marginTop: "16px", color: token.colorTextSecondary }}>正在生成命令...</Paragraph>
           </div>
         ) : generatedCommand ? (
           <div style={{ background: "#1e1e1e", padding: "16px", borderRadius: "8px", marginBottom: "24px" }}>

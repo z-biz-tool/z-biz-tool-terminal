@@ -100,7 +100,9 @@ class BackendAIClient implements AIClient {
       });
     } finally {
       // 监听器跟随本次请求的生命周期；invoke 返回/抛错后不再有新事件
-      unlisten.then((fn) => fn()).catch(() => {});
+      unlisten
+        .then((fn) => fn())
+        .catch((e) => console.warn("[ai] 注销流式事件监听失败，可能泄漏一个监听器:", e));
     }
   }
 

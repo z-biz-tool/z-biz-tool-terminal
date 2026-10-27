@@ -64,6 +64,10 @@ const PRESET_COLORS = [
   "#666666",
 ];
 
+function isValidationError(e: unknown): boolean {
+  return !!e && typeof e === "object" && "errorFields" in e;
+}
+
 export default function ServerList() {
   const {
     servers,
@@ -501,7 +505,11 @@ export default function ServerList() {
         message.success("已添加");
       }
       setModalVisible(false);
-    } catch {}
+    } catch (e) {
+      if (isValidationError(e)) return; // 字段错误已由表单就地提示
+      console.warn("[serverList] 保存服务器失败:", e);
+      message.error("保存服务器失败，请稍后重试");
+    }
   };
 
   const handleAddGroup = async () => {
@@ -511,7 +519,11 @@ export default function ServerList() {
       groupForm.resetFields();
       setGroupModalVisible(false);
       message.success(`分组「${name}」已创建`);
-    } catch {}
+    } catch (e) {
+      if (isValidationError(e)) return;
+      console.warn("[serverList] 创建分组失败:", e);
+      message.error("创建分组失败，请稍后重试");
+    }
   };
 
   const openRename = (kind: "server" | "group", id: string | undefined, oldName: string) => {
@@ -535,7 +547,11 @@ export default function ServerList() {
         message.success("分组已重命名");
       }
       setRenameModal((s) => ({ ...s, visible: false }));
-    } catch {}
+    } catch (e) {
+      if (isValidationError(e)) return;
+      console.warn("[serverList] 重命名失败:", e);
+      message.error("重命名失败，请稍后重试");
+    }
   };
 
   const handleExport = async () => {
