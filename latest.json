@@ -1,0 +1,23 @@
+{
+  "version": "0.2.1",
+  "notes": "See the assets below to download this version.",
+  "pub_date": "2026-10-28T17:48:32Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://github.com/z-biz-tool/z-biz-tool-terminal/releases/download/v0.2.1/z-biz-tool-terminal_aarch64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSdXNzZDVpbWtnK2VXQkZzSE9KT1p6K0xrYUh2ZHBVMWNQUFJ3NjNMTC9ZVGo3SXZpdTdNZG5qRzliNHVlZTVkblYxZDVyNDdncy92OUhreXAyYjZKTE9NblRheVg3VHdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjA5NTc5CWZpbGU6ei1iaXotdG9vbC10ZXJtaW5hbC5hcHAudGFyLmd6CngyOGJaaUdVOHJYMVYrTzdlRlRkM2haekgxeFBFRDBubTV1WjFGVUdaMWNLK2tZZzQxejdBaVFuMzY1WFZyUlo2YXc1d3BKY2hLTmlVS3R1Y3ZXZEFRPT0K"
+    },
+    "darwin-x86_64": {
+      "url": "https://github.com/z-biz-tool/z-biz-tool-terminal/releases/download/v0.2.1/z-biz-tool-terminal_x64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSdXNzZDVpbWtnK1VyMUptbE5SWFl5N0krRGdZYnR1YUdianhhYWR2UzduMUdJbXgwMlZnaE9DQVR5Z1hSMlBTTjEzZklYSU5udTRJUGhpU2swUFpBb2t1VXNYbVRFS0FzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjA5NTMxCWZpbGU6ei1iaXotdG9vbC10ZXJtaW5hbC5hcHAudGFyLmd6CmdHYnpBS1VETlYxRkJIUUpNUS91Q0pYT0lDN3NlWVBGc1R0NzJBV1lyWVMvekNhaitJMERzMlp1azZrWUlDbkxpVlJTa1dQNGZ5Rkd1YTVVUHovcEN3PT0K"
+    },
+    "linux-x86_64": {
+      "url": "https://github.com/z-biz-tool/z-biz-tool-terminal/releases/download/v0.2.1/z-biz-tool-terminal_0.2.1_amd64.AppImage",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSdXNzZDVpbWtnK1phODdEUkdYQVNTeUpQdkxxbThaSWFQYTkwRVZFM0kvSzNLMW9BOE1sZllzOFlQUzBON0ptT0VqV0ZXWmlmNndKNnRDL0l4NHFZckJ2NlVhNWE5K2d3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjA5NTc2CWZpbGU6ei1iaXotdG9vbC10ZXJtaW5hbF8wLjIuMV9hbWQ2NC5BcHBJbWFnZQpuNy9tYU1TNlp2bk96bEVjby9zU01pbWdVRW1RclI4UlMvTXgxM3ZkSmdtRVUxWXJsM1plL1FJa2M4RDZxZTBMTVhWL1RBVWFnUUd6UDRmcUI1N2lDdz09Cg=="
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/z-biz-tool/z-biz-tool-terminal/releases/download/v0.2.1/z-biz-tool-terminal_0.2.1_x64_en-US.msi",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSdXNzZDVpbWtnK2Q2UzhadE8rU0lqb1pqQTRWWVhCN0xtQmRxZVl5QXA3T1Vla1podzdrbXhsYyt3MG1FaVdmcUdiN3JUK293dml5eWhsQTRuWGJqMzd1cDc1c0NVeVFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjA5NjY4CWZpbGU6ei1iaXotdG9vbC10ZXJtaW5hbF8wLjIuMV94NjRfZW4tVVMubXNpCkpqZkxWTTRXejh5bnJxb1pkR0JiQ2M5ZXF1RWoycURrTm1ndlhaSmlHNEdkb3FlcXN4WDFHaGNkb0IvWkZhYzJMOC90L0YxZnBsRkNkZ0FqNEZPVERnPT0K"
+    }
+  }
+}
