@@ -7,19 +7,47 @@
  */
 
 /**
- * 支持的 AI 提供商; custom 表示 OpenAI 兼容的自建网关
+ * 支持的 AI 提供商标识。
  *
- * 'minimax'：MiniMax 开放平台，**OpenAI 兼容**（与 custom 同协议），
- * 但作为**第一方 provider** 单列 —— 好给它自己的默认 baseUrl 与默认模型，
- * 用户点一下就能用，不必自己抄地址。2026-10-20 加入（实测端点连通）。
+ * 2026-10-28 起**放宽为 string**：供应商预设（cap-llm::presets，17 条）的
+ * `id` 直接回写这里（"deepseek" / "qwen" / "kimi" …），不再受一份前端
+ * 枚举的约束 —— 加一家厂商只改后端预设表，前端下拉自动出现（家族设计文档 05 R1）。
+ * 历史取值（openai / claude / gemini / ollama / custom / minimax）仍是合法字符串。
+ * 后端 `provider_kind` 对所有未知字符串退回 OpenAI 兼容协议族，不会报「未知 provider」。
  */
-export type AIProvider =
-  | "openai"
-  | "claude"
-  | "gemini"
-  | "ollama"
-  | "custom"
-  | "minimax";
+export type AIProvider = string;
+
+/** 后端 `list_llm_presets` 返回的单一事实源（前端不再存第二份表） */
+export interface PresetView {
+  /** 稳定机器标识，直接写回 config.provider */
+  id: string;
+  /** 展示名（中文） */
+  label: string;
+  /** 已填好的服务地址 */
+  base_url: string;
+  /** 分组键：international / domestic / aggregator / selfHosted */
+  category: string;
+  /** 分组展示名 */
+  category_label: string;
+  /** 是否需要 API Key（Ollama 类为 false，界面据此隐藏密钥框） */
+  requires_api_key: boolean;
+  /** 搜索别名（英文名、旧称） */
+  aliases: string[];
+  /** 地址核对日期，提示「这条预设是不是很老了」 */
+  verified_on: string;
+}
+
+/** 后端 `test_ai_config` / `list_llm_models` 返回的结构化失败（家族设计文档 05 R5） */
+export interface LlmFailure {
+  /** 机器可判的类别：notConfigured / network / timeout / http / parse / unsupported / io */
+  kind: string;
+  /** HTTP 状态码（仅 kind == "http" 时非空） */
+  status: number | null;
+  /** 原始错误（已脱敏、已截断），给想知道细节的用户 */
+  message: string;
+  /** 一句话动机 + 一个动作，给只想让它能用的用户 */
+  hint: string;
+}
 
 /** AI 配置 */
 export interface AIConfig {

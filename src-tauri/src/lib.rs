@@ -83,6 +83,10 @@ pub fn run() {
             ai::ai_chat,
             ai::ai_chat_stream,
             ai::ai_stream_abort,
+            // LLM 接入层：供应商预设 + 结构化测试（读已保存配置，因 key 不出 webview）
+            ai::list_llm_presets,
+            ai::list_llm_models,
+            ai::test_ai_config,
             config::get_session_logs,
             config::read_session_log,
             config::delete_session_log,

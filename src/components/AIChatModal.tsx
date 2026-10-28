@@ -1,10 +1,33 @@
-import React, { useState, useEffect, useRef } from "react";
-import { Modal, Button, Space, Tag, Tooltip, message, Input, Tabs } from "antd";
+import { useState, useEffect, useRef, useMemo } from "react";
+import {
+  Modal,
+  Button,
+  Space,
+  Tag,
+  Tooltip,
+  message,
+  Input,
+  Tabs,
+  Select,
+  Collapse,
+  Alert,
+  AutoComplete,
+  Typography,
+} from "antd";
 import type { TabsProps } from "antd";
-import { SendOutlined, StopOutlined, SettingOutlined, PlusOutlined, DeleteOutlined } from "@ant-design/icons";
-import type { AIMessage, AIConfig, AIProvider } from "../types/ai";
-import { useAIStore, withProvider, PROVIDER_PLACEHOLDERS, isAIConfigured } from "../stores/aiStore";
+import {
+  SendOutlined,
+  StopOutlined,
+  SettingOutlined,
+  PlusOutlined,
+  DeleteOutlined,
+  ReloadOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
+import type { AIMessage, AIConfig, LlmFailure } from "../types/ai";
+import { useAIStore, applyPreset, isAIConfigured } from "../stores/aiStore";
 import { createAIClient } from "../services/aiClient";
+import { invoke } from "@tauri-apps/api/core";
 import { renderMarkdown } from "../utils/markdown";
 
 interface AIChatModalProps {
@@ -318,70 +341,309 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
 }
 
 // Settings Form Component
+//
+// 2026-10-28 按家族设计文档 05 §5 的交互契约重写：
+// R1 预设来自后端（list_llm_presets），前端不再存第二份表
+// R2 切换服务商 = 地址跟着走（自定义例外）
+// R3 Base URL 默认折叠进「高级」，自定义时自动展开
+// R4 模型名可「取」可填，拉不到时降级自由输入
+// R5 错误来自结构化 LlmFailure，带动作按钮（只对「改配置能解决」的失败给按钮）
+// §5.4 terminal 差异：key 不出 webview → 测试/取模型读**已保存**配置，界面如实说明
 function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave: (c: AIConfig) => void; onClose: () => void }) {
+  const { presets, loadPresets } = useAIStore();
   const [formData, setFormData] = useState<AIConfig>(config);
+  const [advancedOpen, setAdvancedOpen] = useState<string[]>([]);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string; failure?: LlmFailure } | null>(null);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
+  const [modelError, setModelError] = useState<LlmFailure | null>(null);
+  const keyRef = useRef<any>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    onSave(formData);
+  // 预设是界面的单一事实源：进入设置时拉一次
+  useEffect(() => {
+    if (presets.length === 0) loadPresets();
+  }, [presets.length, loadPresets]);
+
+  const currentPreset = presets.find(
+    (p) => p.id === formData.provider || p.aliases.includes(formData.provider),
+  );
+  // 是否需要密钥：Ollama 这类本地服务不需要（需隐藏密钥框）
+  const requiresKey = currentPreset ? currentPreset.requires_api_key : formData.provider !== "ollama";
+  const hasSavedKey = config.hasApiKey === true || Boolean(config.apiKey);
+  // 已保存配置是否可测：有 key，或该服务本来免密钥（按 id 或别名匹配，兼容历史值 claude）
+  const savedConfigured =
+    hasSavedKey ||
+    presets.find((p) => p.id === config.provider || p.aliases.includes(config.provider))
+      ?.requires_api_key === false;
+
+  // 改动判定：只比用户可编辑字段（hasApiKey 等派生字段不算）
+  const dirty =
+    formData.provider !== config.provider ||
+    formData.baseUrl !== config.baseUrl ||
+    formData.model !== config.model ||
+    formData.apiKey !== config.apiKey ||
+    formData.temperature !== config.temperature ||
+    formData.maxTokens !== config.maxTokens;
+
+  // 分组 + 可搜索：16+ 预设横排 Tag 放不下，且用户想输 "kimi" 就搜到
+  const groupedOptions: any[] = useMemo(() => {
+    const cats = new Map<string, { label: string; value: string; search: string }[]>();
+    const catLabel = new Map<string, string>();
+    for (const p of presets) {
+      catLabel.set(p.category, p.category_label);
+      const arr = cats.get(p.category) ?? [];
+      arr.push({
+        label: p.label,
+        value: p.id,
+        search: [p.label, p.id, ...p.aliases].join(" ").toLowerCase(),
+      });
+      cats.set(p.category, arr);
+    }
+    const groups = Array.from(cats.entries()).map(([cat, options]) => ({
+      label: catLabel.get(cat) ?? cat,
+      options,
+    }));
+    groups.push({
+      label: "其他",
+      options: [
+        {
+          label: "自定义（手动填地址）",
+          value: "custom",
+          search: "custom 自定义 自建 代理 gateway openai兼容",
+        },
+      ],
+    });
+    return groups;
+  }, [presets]);
+
+  const selectProvider = (id: string) => {
+    const preset = presets.find((p) => p.id === id);
+    setFormData(preset ? applyPreset(formData, preset) : applyPreset(formData, "custom"));
+    // R3：自定义时地址必填，自动展开高级
+    setAdvancedOpen(id === "custom" ? ["base"] : []);
+    setModels([]);
+    setModelError(null);
+    setTestResult(null);
+  };
+
+  // 取模型：读**已保存**配置（key 不出后端）
+  const handleFetchModels = async () => {
+    setFetchingModels(true);
+    setModelError(null);
+    try {
+      const list = await invoke<string[]>("list_llm_models");
+      setModels(list);
+      if (list.length > 0 && !formData.model) {
+        setFormData((f) => ({ ...f, model: list[0] }));
+      }
+      if (list.length === 0) {
+        setModelError({
+          kind: "unsupported",
+          status: null,
+          message: "服务没有返回任何模型。",
+          hint: "该服务可能不实现 /models 接口，请直接在输入框里手动填写模型名。",
+        });
+      }
+    } catch (e) {
+      setModelError(e as LlmFailure);
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  // 测试：读**已保存**配置，失败带回结构化 hint（R5）
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const text = await invoke<string>("test_ai_config");
+      setTestResult({ ok: true, text });
+    } catch (e) {
+      const f = e as LlmFailure;
+      setTestResult({ ok: false, text: f?.hint ?? String(e), failure: f });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const restoreDefaultAddress = () => {
+    if (currentPreset) {
+      setFormData((f) => ({ ...f, baseUrl: currentPreset.base_url }));
+      setAdvancedOpen(["base"]);
+    }
+  };
+
+  // R5：只对「改配置能解决」的失败给动作按钮。429 / 5xx / 超时给按钮 = 诱导乱改。
+  const failureActions = (f?: LlmFailure) => {
+    if (!f || f.kind !== "http") return null;
+    if (f.status === 401 || f.status === 403) {
+      return (
+        <Button size="small" onClick={() => keyRef.current?.focus()}>
+          重新填写密钥
+        </Button>
+      );
+    }
+    if (f.status === 404 && currentPreset) {
+      return (
+        <Button size="small" onClick={restoreDefaultAddress}>
+          恢复默认地址
+        </Button>
+      );
+    }
+    return null;
+  };
+
+  const handleCancel = () => {
+    if (!dirty) {
+      onClose();
+      return;
+    }
+    Modal.confirm({
+      title: "放弃未保存的改动？",
+      content: "当前设置还没保存，关闭后改动会丢失。",
+      okText: "放弃改动",
+      cancelText: "继续编辑",
+      okButtonProps: { danger: true },
+      onOk: onClose,
+    });
   };
 
   return (
-    <form onSubmit={handleSubmit} style={{ padding: "24px", maxWidth: 600 }}>
-      <div style={{ marginBottom: "16px" }}>
-        <label style={{ display: "block", marginBottom: "8px", fontWeight: "bold" }}>AI 提供商</label>
-        <Space orientation="horizontal">
-          {(["openai", "claude", "gemini", "ollama", "custom", "minimax"] as AIProvider[]).map((provider) => (
-            <Tag
-              key={provider}
-              color={formData.provider === provider ? "blue" : "default"}
-              style={{ cursor: "pointer", padding: "8px 16px" }}
-              onClick={() => setFormData(withProvider(formData, provider as AIProvider))}
-            >
-              {({ openai: "OpenAI", claude: "Claude", gemini: "Gemini", ollama: "Ollama", custom: "自建网关", minimax: "MiniMax" } as Record<AIProvider, string>)[provider]}
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSave(formData);
+      }}
+      style={{ padding: 24, maxWidth: 620 }}
+    >
+      {/* 服务商：分组 + 搜索（R1/R2） */}
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ display: "block", marginBottom: 8, fontWeight: "bold" }}>
+          AI 服务商
+          {currentPreset && !currentPreset.requires_api_key && (
+            <Tag color="green" style={{ marginLeft: 8 }}>
+              本地，无需密钥
             </Tag>
-          ))}
-        </Space>
-      </div>
-
-      <div style={{ marginBottom: "16px" }}>
-        <label style={{ display: "block", marginBottom: "8px", fontWeight: "bold" }}>API Key</label>
-        <Input
-          type="password"
-          value={formData.apiKey}
-          onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
-          placeholder={
-            config.hasApiKey
-              ? "已保存 · 留空保持不变（明文不再回传界面）"
-              : formData.provider === "ollama"
-                ? "留空使用本地 Ollama"
-                : "请输入 API Key"
+          )}
+        </label>
+        <Select
+          style={{ width: "100%" }}
+          value={currentPreset ? currentPreset.id : formData.provider}
+          onChange={selectProvider}
+          options={groupedOptions}
+          showSearch
+          placeholder="搜索或选择服务商（如 deepseek / kimi / 通义）"
+          filterOption={(input, option) =>
+            String((option as any)?.search ?? "").includes(input.toLowerCase())
+          }
+          notFoundContent={
+            <Typography.Text type="secondary">没有匹配的服务商，请选「自定义」</Typography.Text>
           }
         />
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          选一家厂商会自动填好服务地址；模型名用下方「获取模型列表」现取（名称换代快，不写死）。
+        </Typography.Text>
       </div>
 
-      {formData.provider !== "ollama" && (
-        <div style={{ marginBottom: "16px" }}>
-          <label style={{ display: "block", marginBottom: "8px", fontWeight: "bold" }}>Base URL</label>
+      {/* API Key（免密钥服务隐藏） */}
+      {requiresKey && (
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 8, fontWeight: "bold" }}>API Key</label>
           <Input
-            value={formData.baseUrl || ""}
-            onChange={(e) => setFormData({ ...formData, baseUrl: e.target.value })}
-            placeholder={PROVIDER_PLACEHOLDERS[formData.provider]?.baseUrl ?? "请输入 Base URL"}
+            ref={keyRef}
+            type="password"
+            value={formData.apiKey}
+            onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
+            placeholder={
+              hasSavedKey ? "已保存 · 留空保持不变（明文不再回传界面）" : "请输入 API Key"
+            }
           />
         </div>
       )}
 
-      <div style={{ marginBottom: "16px" }}>
-        <label style={{ display: "block", marginBottom: "8px", fontWeight: "bold" }}>模型名称</label>
-        <Input
-          value={formData.model}
-          onChange={(e) => setFormData({ ...formData, model: e.target.value })}
-          placeholder={PROVIDER_PLACEHOLDERS[formData.provider]?.model ?? "请输入模型名称"}
-        />
+      {/* 模型名：可选取、可自由填（R4） */}
+      <div style={{ marginBottom: 8 }}>
+        <label style={{ display: "block", marginBottom: 8, fontWeight: "bold" }}>模型名称</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          <AutoComplete
+            style={{ flex: 1 }}
+            value={formData.model}
+            onChange={(v) => setFormData({ ...formData, model: v })}
+            options={models.map((m) => ({ value: m }))}
+            placeholder={
+              models.length > 0
+                ? "从列表选择，或手动输入"
+                : "手动输入模型名，或点右侧「获取模型列表」"
+            }
+          />
+          <Tooltip title={savedConfigured ? "" : "请先填写并保存 API Key（测试读已保存配置）"}>
+            <Button
+              icon={<ReloadOutlined />}
+              loading={fetchingModels}
+              disabled={!savedConfigured}
+              onClick={handleFetchModels}
+            >
+              获取模型列表
+            </Button>
+          </Tooltip>
+        </div>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          基于已保存的配置读取；改了设置请先保存再取。
+        </Typography.Text>
       </div>
+      {modelError && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          title="获取模型列表失败"
+          description={
+            <div style={{ fontSize: 12 }}>
+              <div>{modelError.hint}</div>
+              <details style={{ marginTop: 4 }}>
+                <summary style={{ cursor: "pointer", color: "#888" }}>原始错误</summary>
+                <div style={{ wordBreak: "break-all", color: "#888" }}>{modelError.message}</div>
+              </details>
+            </div>
+          }
+        />
+      )}
 
-      <div style={{ marginBottom: "16px" }}>
-        <label style={{ display: "block", marginBottom: "8px", fontWeight: "bold" }}>
+      {/* 高级：Base URL 默认折叠（R3），自定义时自动展开 */}
+      <Collapse
+        ghost
+        size="small"
+        activeKey={advancedOpen}
+        onChange={(k) => setAdvancedOpen(k as string[])}
+        style={{ marginBottom: 8 }}
+        items={[
+          {
+            key: "base",
+            label: (
+              <span>
+                高级：Base URL{formData.provider === "custom" ? "（自定义必填）" : ""}
+              </span>
+            ),
+            children: (
+              <div>
+                <Input
+                  value={formData.baseUrl}
+                  onChange={(e) => setFormData({ ...formData, baseUrl: e.target.value })}
+                  placeholder={currentPreset ? currentPreset.base_url : "https://your-gateway.example.com/v1"}
+                />
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  已自动填好标准地址；只有走公司代理或自建网关时才需要改。
+                  {currentPreset && `（${currentPreset.label} 地址核对于 ${currentPreset.verified_on}）`}
+                </Typography.Text>
+              </div>
+            ),
+          },
+        ]}
+      />
+
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ display: "block", marginBottom: 8, fontWeight: "bold" }}>
           温度 (Temperature): {formData.temperature}
         </label>
         <Input
@@ -393,13 +655,13 @@ function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave:
           onChange={(e) => setFormData({ ...formData, temperature: parseFloat(e.target.value) })}
           style={{ width: "100%" }}
         />
-        <div style={{ fontSize: 12, color: "#666", marginTop: "4px" }}>
+        <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>
           较高温度=更创造性，较低温度=更确定性
         </div>
       </div>
 
-      <div style={{ marginBottom: "24px" }}>
-        <label style={{ display: "block", marginBottom: "8px", fontWeight: "bold" }}>
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ display: "block", marginBottom: 8, fontWeight: "bold" }}>
           最大 Token 数: {formData.maxTokens}
         </label>
         <Input
@@ -413,9 +675,54 @@ function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave:
         />
       </div>
 
-      <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
-        <Button onClick={onClose}>取消</Button>
-        <Button type="primary" htmlType="submit">保存</Button>
+      {/* 测试连接：读已保存配置；失败带动作（R5，§5.4） */}
+      <div style={{ marginBottom: 24 }}>
+        <Space orientation="horizontal" wrap>
+          <Tooltip title={savedConfigured ? "" : "请先填写并保存配置（测试读已保存配置）"}>
+            <Button
+              icon={<ThunderboltOutlined />}
+              loading={testing}
+              disabled={!savedConfigured}
+              onClick={handleTest}
+            >
+              测试连接
+            </Button>
+          </Tooltip>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            测试的是已保存的配置；改了设置请先保存。
+          </Typography.Text>
+        </Space>
+        {testResult && (
+          <Alert
+            style={{ marginTop: 8 }}
+            type={testResult.ok ? "success" : "error"}
+            showIcon
+            title={testResult.ok ? "连接成功" : "连接失败"}
+            description={
+              <div style={{ fontSize: 12 }}>
+                <div>{testResult.text}</div>
+                {testResult.failure?.message && (
+                  <details style={{ marginTop: 4 }}>
+                    <summary style={{ cursor: "pointer", color: "#888" }}>原始错误</summary>
+                    <div style={{ wordBreak: "break-all", color: "#888" }}>
+                      {testResult.failure.message}
+                    </div>
+                  </details>
+                )}
+                {!testResult.ok && failureActions(testResult.failure) && (
+                  <div style={{ marginTop: 8 }}>{failureActions(testResult.failure)}</div>
+                )}
+              </div>
+            }
+          />
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <Button onClick={handleCancel}>取消</Button>
+        <Button type="primary" htmlType="submit">
+          保存
+        </Button>
       </div>
     </form>
   );

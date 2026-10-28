@@ -3,47 +3,52 @@
  *
  * 配置真源在后端 config.json 的 `ai` 段(apiKey 密文落盘),
  * 这里只缓存进程内明文副本供请求时使用。
+ *
+ * 2026-10-28 改造（家族设计文档 05）：
+ * - 删掉前端第二份 provider 预设表（PROVIDER_PRESETS / PROVIDER_PLACEHOLDERS）。
+ *   那张表与后端 `cap-llm::presets` 是「两份事实源」，一旦不同步就会出现
+ *   「界面显示 DeepSeek、请求打向别处」这类最难查的故障。现在预设由
+ *   `list_llm_presets` 从后端取（R1：单一事实源）。
+ * - 模型名不再写死（R4）：默认留空，由「获取模型列表」现取，避免半年后
+ *   用户拿到一个已关停的模型。
  */
 
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { AIConfig, AIProvider } from '../types/ai';
+import type { AIConfig, AIProvider, PresetView } from '../types/ai';
 
 export const DEFAULT_AI_CONFIG: AIConfig = {
   provider: 'openai',
   apiKey: '',
   baseUrl: 'https://api.openai.com/v1',
-  model: 'gpt-4o-mini',
+  // 不再写死模型名：模型名半年换代，写死必过期（见设计文档 05 §3 ①）。
+  // 用户通过「获取模型列表」现取，或手动填写。
+  model: '',
   temperature: 0.7,
   maxTokens: 2048,
 };
 
-/** 各家 provider 的默认 endpoint 与模型；custom 不自带 baseUrl（用户必须填） */
-export const PROVIDER_PRESETS: Record<AIProvider, Partial<AIConfig>> = {
-  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-  claude: { baseUrl: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-20240620' },
-  gemini: { baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-2.0-flash' },
-  ollama: { baseUrl: 'http://127.0.0.1:11434', model: 'llama3.2' },
-  custom: {},
-  // MiniMax 开放平台（国内站）：OpenAI 兼容协议，走 /chat/completions。
-  // 2026-10-20 实测该端点连通（HTTP 200，返回非空内容）。
-  minimax: { baseUrl: 'https://api.minimaxi.com/v1', model: 'MiniMax-M3.1-Flash' },
-};
-
 /**
- * 切换 provider 时一并换掉 baseUrl/model。
- * 只改 provider 字段会让请求带着 openai 的 baseUrl/model 打到 claude 上, 必然失败；
- * 用户手填过的非默认值则保留。
+ * 切换服务商时的字段联动（落实 R2：切换服务商 = 地址跟着走；「自定义」例外）。
+ *
+ * - 选某家厂商预设：provider = 预设 id，baseUrl = 预设里填好的标准地址。
+ *   用户手改过的代理地址会被覆盖 —— 因为那个代理对新厂商毫无意义，
+ *   留着它只会静默把请求打向一个不知道自己被用来问新厂商的代理（静默错路由比丢失输入严重得多）。
+ * - 选「自定义」：保留现有 baseUrl 作为起点（让他当起点改），只换 provider。
+ *
+ * 模型名不在这里填：由「获取模型列表」现取，避免写死过期模型名。
  */
-export function withProvider(config: AIConfig, provider: AIProvider): AIConfig {
-  const preset = PROVIDER_PRESETS[provider];
-  const isPreset = (value: string | undefined, field: 'baseUrl' | 'model') =>
-    !value || Object.values(PROVIDER_PRESETS).some((p) => p[field] === value);
+export function applyPreset(
+  config: AIConfig,
+  preset: PresetView | 'custom',
+): AIConfig {
+  if (preset === 'custom') {
+    return { ...config, provider: 'custom' as AIProvider };
+  }
   return {
     ...config,
-    provider,
-    baseUrl: isPreset(config.baseUrl, 'baseUrl') ? preset.baseUrl ?? config.baseUrl : config.baseUrl,
-    model: isPreset(config.model, 'model') ? preset.model ?? config.model : config.model,
+    provider: preset.id as AIProvider,
+    baseUrl: preset.base_url,
   };
 }
 
@@ -59,46 +64,21 @@ export function isAIConfigured(config: AIConfig): boolean {
   return Boolean(config.apiKey);
 }
 
-/**
- * 各 provider 的输入框占位文案。
- *
- * 此前只有「openai → OpenAI 地址 / 其它 → Anthropic 地址」两档，
- * 于是选 Gemini / Ollama / 自建网关时占位符也在骗人（显示 Anthropic 的地址）。
- * 占位符是用户填地址时**唯一**的参照 —— 骗人一次，用户就会照着填错地址。
- * 2026-10-20 改成按 provider 逐个给。
- */
-export const PROVIDER_PLACEHOLDERS: Record<
-  AIProvider,
-  { baseUrl: string; model: string }
-> = {
-  openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-  claude: {
-    baseUrl: "https://api.anthropic.com/v1",
-    model: "claude-3-5-sonnet-20240620",
-  },
-  gemini: {
-    baseUrl: "https://generativelanguage.googleapis.com",
-    model: "gemini-2.0-flash",
-  },
-  ollama: { baseUrl: "http://127.0.0.1:11434", model: "llama3.2" },
-  custom: { baseUrl: "https://your-gateway.example.com/v1", model: "你的模型名" },
-  minimax: {
-    baseUrl: "https://api.minimaxi.com/v1",
-    model: "MiniMax-M3.1-Flash",
-  },
-};
-
 interface TerminalAIStore {
   config: AIConfig;
+  /** 后端供应商预设（单一事实源，来自 `list_llm_presets`） */
+  presets: PresetView[];
   /** 后端配置是否已加载完成; 未完成时不应覆盖已保存的 Key */
   loaded: boolean;
   updateConfig: (partial: Partial<AIConfig>) => void;
   loadFromStorage: () => Promise<void>;
+  loadPresets: () => Promise<void>;
   save: () => Promise<boolean>;
 }
 
 export const useAIStore = create<TerminalAIStore>((set, get) => ({
   config: DEFAULT_AI_CONFIG,
+  presets: [],
   loaded: false,
 
   updateConfig: (partial) =>
@@ -113,6 +93,16 @@ export const useAIStore = create<TerminalAIStore>((set, get) => ({
       console.error('读取 AI 配置失败:', e);
     } finally {
       set({ loaded: true });
+    }
+  },
+
+  /** 拉取供应商预设（界面下拉的唯一事实源；加一家厂商只改后端预设表） */
+  loadPresets: async () => {
+    try {
+      const presets = await invoke<PresetView[]>('list_llm_presets');
+      set({ presets });
+    } catch (e) {
+      console.error('读取供应商预设失败:', e);
     }
   },
 

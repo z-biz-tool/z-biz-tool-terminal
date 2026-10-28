@@ -8,7 +8,6 @@
 //   4. 监听器在 resolve / 抛错后都必须注销
 //   5. 未配置时一个请求都不发
 import { createAIClient, parseJsonReply } from "../src/services/aiClient";
-import { PROVIDER_PRESETS } from "../src/stores/aiStore";
 
 let pass = 0,
   fail = 0;
@@ -185,7 +184,19 @@ await t("chat: 缺 baseUrl / model 时分别给出可行动提示", async () => 
 });
 
 await t("createAIClient: provider 差异不再影响前端（同一工厂即可）", async () => {
-  for (const provider of Object.keys(PROVIDER_PRESETS)) {
+  // 预设的唯一事实源已迁到后端（list_llm_presets），前端不再有 PROVIDER_PRESETS 表。
+  // 这里用一组代表性 provider（含历史取值与新增预设 id）钉住「工厂与 provider 无关」。
+  for (const provider of [
+    "openai",
+    "claude",
+    "gemini",
+    "ollama",
+    "custom",
+    "minimax",
+    "deepseek",
+    "qwen",
+    "kimi",
+  ]) {
     calls.length = 0;
     const client = createAIClient({ ...cfg, provider: provider as typeof cfg.provider });
     eq(await client.chat(msg("hi")), "ok", provider);

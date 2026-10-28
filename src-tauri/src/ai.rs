@@ -20,8 +20,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use cap_llm::{Delta, LlmConfig, Message, ProviderKind};
-use serde::Deserialize;
+use cap_llm::{Delta, ErrorKind, LlmConfig, LlmError, Message, ProviderKind};
+use serde::{Deserialize, Serialize};
 
 use crate::config::{load_config, AiConfig};
 
@@ -38,12 +38,17 @@ fn aborted() -> bool {
 }
 
 /// 前端 provider 名 → cap-llm 协议族。
+///
+/// ⚠️ 必须同时认得两种写法：历史值 `claude`，以及预设 id `anthropic`
+/// （`cap-llm::presets` 里 Anthropic 的稳定 id 是 `anthropic`，前端下拉
+/// 直接把预设 id 写回 provider）。只认 `claude` 的话，用户从下拉里选
+/// 「Anthropic」后请求会走 OpenAI 兼容协议打到 api.anthropic.com —— 全 4xx。
 pub fn provider_kind(provider: &str) -> ProviderKind {
     match provider {
-        "claude" => ProviderKind::Anthropic,
+        "claude" | "anthropic" => ProviderKind::Anthropic,
         "gemini" => ProviderKind::Gemini,
         "ollama" => ProviderKind::Ollama,
-        // openai / custom / minimax 都是 OpenAI 兼容协议（Bearer + /chat/completions）
+        // openai / custom / minimax / deepseek / qwen … 都是 OpenAI 兼容协议（Bearer + /chat/completions）
         _ => ProviderKind::Custom,
     }
 }
@@ -223,6 +228,245 @@ pub async fn ai_chat_stream(
     chat_stream(&app, &messages, &overrides.unwrap_or_default()).await
 }
 
+/// 给前端的预设视图。
+///
+/// **为什么不直接序列化 `ProviderPreset`**：那个结构里的 `protocol` / `kind`
+/// 是 Rust 枚举，前端拿到 `"OpenAiCompat"` 这种字符串也没有用武之地；而
+/// `aliases` / `verified_on` 前端确实要（搜索别名、提示「地址可能过期」）。
+/// 所以这里只挑前端真正消费的字段，而不是把内部结构整体推出去 ——
+/// 内部字段一改就炸前端，是最不划算的耦合。
+///
+/// 单一事实源：界面从 Rust 取，加一家厂商只需改 `cap-llm::presets`。
+/// 前端不再保留第二份 `PROVIDER_PRESETS` 常量表（R1）。
+#[derive(Debug, Serialize)]
+pub struct PresetView {
+    /// 稳定机器标识，作为 `provider` 字段写回配置。
+    pub id: &'static str,
+    /// 展示名（中文）。
+    pub label: &'static str,
+    /// 已填好的服务地址。
+    pub base_url: &'static str,
+    /// 分组键（international / domestic / aggregator / selfHosted）。
+    pub category: &'static str,
+    /// 分组展示名。
+    pub category_label: &'static str,
+    /// 是否需要 API Key。Ollama 这类本地服务不需要，界面要据此隐藏密钥框。
+    pub requires_api_key: bool,
+    /// 供搜索的其他写法（英文名、旧称）。用户输 "kimi" 要能搜到「Kimi（月之暗面）」。
+    pub aliases: &'static [&'static str],
+    /// 地址核对日期。给用户一个「这条预设是不是很老了」的判断依据。
+    pub verified_on: &'static str,
+}
+
+fn category_key(c: cap_llm::preset::Category) -> &'static str {
+    use cap_llm::preset::Category as C;
+    match c {
+        C::International => "international",
+        C::Domestic => "domestic",
+        C::Aggregator => "aggregator",
+        C::SelfHosted => "selfHosted",
+    }
+}
+
+/// 列出可选的供应商预设。
+///
+/// terminal 与 file 共用同一张 `cap-llm::presets` 表，保证「界面显示 DeepSeek、
+/// 请求打向 DeepSeek」两者同源。详见家族设计文档 05_LLM接入层。
+#[tauri::command]
+pub fn list_llm_presets() -> Vec<PresetView> {
+    cap_llm::preset::PRESETS
+        .iter()
+        .map(|p| PresetView {
+            id: p.id,
+            label: p.label,
+            base_url: p.base_url,
+            category: category_key(p.category),
+            category_label: p.category.label(),
+            requires_api_key: p.requires_api_key,
+            aliases: p.aliases,
+            verified_on: p.verified_on,
+        })
+        .collect()
+}
+
+/// 明显不是对话模型的模型名前缀。
+///
+/// 用户点「获取模型列表」是为了选一个**能聊天**的模型；而 `/models` 通常把
+/// 向量、语音、绘图、重排模型全都列出来。让用户在一个 200 项的下拉里
+/// 挑出那个能用的，等于把筛选工作推回给人 —— 选错之后拿到的是
+/// 「model does not support chat」，一句话都看不出是选错了模型类别。
+const NON_CHAT_HINTS: &[&str] = &[
+    "embedding",
+    "embed",
+    "whisper",
+    "tts",
+    "audio",
+    "image",
+    "dall-e",
+    "rerank",
+    "moderation",
+    "guard",
+    "search-",
+    "-search",
+    "ocr",
+];
+
+/// 按「能不能聊天」给模型名排序：能聊的在前，其余在后。
+///
+/// 刻意**不删除**非对话模型：有些代理把自定义模型名起得很随意，
+/// 一刀切过滤会把「唯一可用的那个」也滤掉。排序而非过滤，最坏情况
+/// 只是用户需要往下滚一点。
+fn rank_models(mut models: Vec<String>) -> Vec<String> {
+    models.sort_by_key(|m| {
+        let lower = m.to_ascii_lowercase();
+        let non_chat = NON_CHAT_HINTS.iter().any(|h| lower.contains(h));
+        (non_chat, lower.clone())
+    });
+    models.dedup();
+    models
+}
+
+/// 列出该配置可用的模型。
+///
+/// ⚠️ terminal 与 file 的一个关键差异（家族设计文档 05 §5.4）：
+/// **apiKey 不出 webview**（`get_ai_config` 回传的永远是脱敏视图），所以
+/// 「获取模型列表」只能读**已保存的配置**，不能用表单草稿。这意味着用户
+/// 必须先把新配置「保存」一次，再回来点这个按钮 —— 界面会如实写
+/// 「基于已保存的配置」，不假装草稿可测。
+#[tauri::command]
+pub async fn list_llm_models() -> Result<Vec<String>, LlmFailure> {
+    let cap = to_cap(&GenOverrides::default()).map_err(LlmFailure::from)?;
+    let models = cap_llm::list_models(&cap)
+        .await
+        .map_err(LlmFailure::from_error)?;
+    Ok(rank_models(models))
+}
+
+/// 测试已保存的 AI 配置是否可用。
+///
+/// 同样读**已保存配置**（理由同上）：ping 一个 `max_tokens=1` 的真实对话，
+/// 能拿到回复 ⇒ key、地址、模型三项全对。不用 `/models` 探活 —— 很多自建
+/// 代理不实现这个接口，用它测会把「服务好的，只是没这个 API」误报成「连不上」。
+#[tauri::command]
+pub async fn test_ai_config() -> Result<String, LlmFailure> {
+    let cap = to_cap(&GenOverrides::default()).map_err(LlmFailure::from)?;
+    let elapsed = cap_llm::ping(&cap)
+        .await
+        .map_err(LlmFailure::from_error)?;
+    Ok(format!(
+        "连接成功（{} · {}），耗时 {}ms",
+        cap.kind.label(),
+        cap.model,
+        elapsed.as_millis()
+    ))
+}
+
+/// 给界面的结构化失败。
+///
+/// ## 为什么不是 `Result<_, String>`
+///
+/// 字符串错误只能被「读」不能被「判断」。界面要给出的恰恰是判断：
+/// 401 该聚焦密钥框、404 该提示地址、429 该说「这不是你的配置问题」。
+/// 靠正则去猜 `HTTP 401 — ...` 里的数字，等于把协议塞进文案里，
+/// 哪天文案改一个字（比如加个中文破折号），分流就静默失效 ——
+/// 而失效的表现是「所有错误都显示同一句话」，没人会当成 bug 报上来。
+#[derive(Debug, Serialize)]
+pub struct LlmFailure {
+    /// 机器可判的类别：notConfigured / network / timeout / http / parse / unsupported / io
+    pub kind: &'static str,
+    /// HTTP 状态码（仅 kind == "http" 时非空）。
+    pub status: Option<u16>,
+    /// 原始错误，已脱敏、已按字符截断。给「想知道细节」的用户。
+    pub message: String,
+    /// 一句话动机 + 一个动作。给「只想让它能用」的用户。
+    pub hint: String,
+}
+
+fn kind_key(k: ErrorKind) -> &'static str {
+    use ErrorKind as E;
+    match k {
+        E::NotConfigured => "notConfigured",
+        E::Network => "network",
+        E::Timeout => "timeout",
+        E::Http => "http",
+        E::Parse => "parse",
+        E::Unsupported => "unsupported",
+        E::Io => "io",
+    }
+}
+
+/// 把类别 + 状态码翻译成「用户下一步该做什么」。
+///
+/// 每一条都必须指向**一个具体动作**，而不是复述错误。
+/// 「请求失败，请重试」这种文案的价值是零 —— 用户已经知道失败了。
+fn hint_for(kind: ErrorKind, status: Option<u16>) -> String {
+    use ErrorKind as E;
+    match (kind, status) {
+        (E::NotConfigured, _) => "配置还差一项。请补齐上方标红的字段后重试。".into(),
+        (E::Network, _) => {
+            "连不上这个地址。国内厂商（DeepSeek / 通义 / Kimi / 智谱 / 豆包）一般直连即可，\
+             如果你开了代理，先关掉再试；海外厂商（OpenAI / Gemini / Anthropic）相反，需要代理。"
+                .into()
+        }
+        (E::Timeout, _) => {
+            "等太久没等到回应。可能是网络到该地区的链路慢，也可能是模型正在排队。\
+             可以先换一个更小的模型试，或把超时调大。"
+                .into()
+        }
+        (E::Http, Some(401)) | (E::Http, Some(403)) => {
+            "API Key 无效、已过期，或这个 key 没有该模型的权限。请重新粘贴密钥；\
+             若刚续费过，确认用的是新 key。"
+                .into()
+        }
+        (E::Http, Some(404)) => {
+            "地址或模型名不存在。最常见的原因是 Base URL 多写／少写了一段路径 —— \
+             各家都不完全一样（DeepSeek 带 /v1，智谱是 /api/paas/v4，火山是 /api/v3）。\
+             点「恢复默认地址」用该厂商的标准地址最稳。"
+                .into()
+        }
+        (E::Http, Some(429)) => {
+            "额度用尽或被限流。这不是配置写错了 —— 换个时段再试，或在服务商后台充值／提额。"
+                .into()
+        }
+        (E::Http, Some(s)) if s >= 500 => {
+            "服务商那边出故障了，不是你配置的问题。稍后重试即可。".into()
+        }
+        (E::Http, _) => "服务端拒绝了这次请求。原始错误见下方详情。".into(),
+        (E::Parse, _) => {
+            "对方回了内容，但不是预期的格式。多半是这个地址其实不是该协议的服务 —— \
+             例如把 Anthropic 的地址填在了 OpenAI 兼容这一档。".into()
+        }
+        (E::Unsupported, _) => {
+            "这家服务不支持当前操作。换一个厂商，或改用手动填写模型名。".into()
+        }
+        (E::Io, _) => "本机读写配置出错。检查配置文件所在目录是否可写。".into(),
+    }
+}
+
+impl LlmFailure {
+    fn from_error(e: LlmError) -> Self {
+        let hint = hint_for(e.kind, e.status);
+        Self {
+            kind: kind_key(e.kind),
+            status: e.status,
+            message: e.to_string(),
+            hint,
+        }
+    }
+}
+
+impl From<String> for LlmFailure {
+    /// `to_cap()` 之类的本地校验失败（如「AI 未配置」）：没有类别可判，但同样要能显示。
+    fn from(message: String) -> Self {
+        Self {
+            kind: "notConfigured",
+            status: None,
+            hint: hint_for(ErrorKind::NotConfigured, None),
+            message,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +489,9 @@ mod tests {
         assert!(matches!(provider_kind("openai"), ProviderKind::Custom));
         assert!(matches!(provider_kind("custom"), ProviderKind::Custom));
         assert!(matches!(provider_kind("claude"), ProviderKind::Anthropic));
+        // 预设 id 是 anthropic（前端下拉直接写回它）—— 必须与 claude 走同一协议族，
+        // 否则从下拉选「Anthropic」会退化成 OpenAI 兼容请求（2026-10-28）
+        assert!(matches!(provider_kind("anthropic"), ProviderKind::Anthropic));
         assert!(matches!(provider_kind("gemini"), ProviderKind::Gemini));
         assert!(matches!(provider_kind("ollama"), ProviderKind::Ollama));
         // 未知 provider 不许猜：落到 OpenAI 兼容并保留原字符串由 cap-llm 报错
@@ -351,5 +598,91 @@ mod tests {
     #[test]
     fn empty_messages_rejected() {
         assert!(to_messages(&[]).is_err());
+    }
+
+    // ---- 供应商预设 / 模型排序 / 错误分流（与 file 仓同一套契约）----
+
+    #[test]
+    fn presets_expose_every_field_the_ui_needs() {
+        let all = list_llm_presets();
+        assert!(all.len() >= 16, "预设不应少于 16 条，实际 {}", all.len());
+        for p in &all {
+            assert!(!p.base_url.is_empty(), "{} 缺地址", p.id);
+            assert!(!p.label.is_empty(), "{} 缺展示名", p.id);
+            assert!(!p.category_label.is_empty(), "{} 缺分组名", p.id);
+            assert!(!p.verified_on.is_empty(), "{} 缺核对日期", p.id);
+        }
+        // 国内厂商必须覆盖：terminal 用户最可能买的几家
+        for id in ["deepseek", "qwen", "moonshot", "zhipu", "volcengine", "minimax"] {
+            assert!(all.iter().any(|p| p.id == id), "缺国内预设 {}", id);
+        }
+        let ollama = all.iter().find(|p| p.id == "ollama").unwrap();
+        assert!(!ollama.requires_api_key);
+    }
+
+    #[test]
+    fn every_preset_id_is_writable_back_as_provider() {
+        for p in list_llm_presets() {
+            let (_kind, preset) = cap_llm::ProviderKind::parse_with_preset(p.id)
+                .unwrap_or_else(|e| panic!("预设 {} 无法写回：{}", p.id, e));
+            assert_eq!(preset, Some(p.id), "预设 {} 写回后身份丢了", p.id);
+        }
+    }
+
+    #[test]
+    fn chat_models_are_ranked_before_embedding_and_speech() {
+        let ranked = rank_models(vec![
+            "text-embedding-3-small".into(),
+            "gpt-4o".into(),
+            "whisper-1".into(),
+            "dall-e-3".into(),
+            "deepseek-chat".into(),
+        ]);
+        assert_eq!(ranked[0], "deepseek-chat");
+        assert_eq!(ranked[1], "gpt-4o");
+        // 非对话模型仍在列表里，只是排到后面
+        assert!(ranked.contains(&"text-embedding-3-small".to_string()));
+        assert!(ranked.contains(&"whisper-1".to_string()));
+    }
+
+    #[test]
+    fn every_failure_kind_carries_an_actionable_hint() {
+        let cases = [
+            (ErrorKind::NotConfigured, None, "补齐"),
+            (ErrorKind::Network, None, "代理"),
+            (ErrorKind::Timeout, None, "超时"),
+            (ErrorKind::Http, Some(401), "密钥"),
+            (ErrorKind::Http, Some(403), "权限"),
+            (ErrorKind::Http, Some(404), "Base URL"),
+            (ErrorKind::Http, Some(429), "限流"),
+            (ErrorKind::Http, Some(502), "故障"),
+            (ErrorKind::Parse, None, "协议"),
+            (ErrorKind::Unsupported, None, "不支持"),
+            (ErrorKind::Io, None, "配置"),
+        ];
+        for (kind, status, must_mention) in cases {
+            let hint = hint_for(kind, status);
+            assert!(
+                hint.contains(must_mention),
+                "{:?}/{:?} 的提示里没提到「{}」，实际：{}",
+                kind,
+                status,
+                must_mention,
+                hint
+            );
+            assert!(hint.chars().count() >= 12, "提示过短：{}", hint);
+        }
+    }
+
+    #[test]
+    fn hint_does_not_leak_the_api_key() {
+        for (kind, status) in [
+            (ErrorKind::Network, None),
+            (ErrorKind::Http, Some(401)),
+            (ErrorKind::Parse, None),
+        ] {
+            let hint = hint_for(kind, status);
+            assert!(!hint.contains("sk-"), "提示里出现了疑似密钥：{}", hint);
+        }
     }
 }
