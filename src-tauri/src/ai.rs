@@ -48,6 +48,39 @@ pub fn provider_kind(provider: &str) -> ProviderKind {
     }
 }
 
+/// 前端 provider 名 → 供应商预设 id（可选）。
+///
+/// 命中预设时，`base_url` 留空也能自动填上该厂商的服务地址 ——
+/// 用户在设置里选了「DeepSeek」就不必手抄 `https://api.deepseek.com/v1`，
+/// 抄错一个字符就是 404，而报错只说「404」。
+///
+/// ⚠️ 绑定条件是**协议族兼容**，不是「完全相等」。
+/// 本仓的 [`provider_kind`] 把 openai / minimax 都归成 `Custom`
+/// （协议上确实与 OpenAI 兼容族毫无差别），而预设里 openai / minimax
+/// 有各自的身份。若要求 kind 完全相等，这两个预设就永远绑不上。
+/// 真正的红线是**不能跨协议族**（Anthropic / Gemini / Ollama 互不通用）。
+pub fn preset_id(provider: &str) -> Option<&'static str> {
+    let kind = provider_kind(provider);
+    cap_llm::preset::find_by_name(provider)
+        .filter(|p| same_protocol_family(p.kind, kind))
+        .map(|p| p.id)
+}
+
+/// 两个 provider 身份是否走同一套报文。
+///
+/// `Custom` 与 `OpenAi` / `MiniMax` 同族 —— 它们都是 OpenAI 兼容协议
+/// （Bearer + `/chat/completions`），只是默认地址与身份标签不同。
+fn same_protocol_family(a: ProviderKind, b: ProviderKind) -> bool {
+    use cap_llm::ProviderKind as K;
+    let fam = |k: K| match k {
+        K::OpenAi | K::MiniMax | K::Custom => 0,
+        K::Anthropic => 1,
+        K::Gemini => 2,
+        K::Ollama => 3,
+    };
+    fam(a) == fam(b)
+}
+
 /// 生成参数的临时覆盖（单次请求的 temperature / max_tokens）。
 /// 长期值存在 AiConfig，这里只覆盖本次。
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -72,12 +105,18 @@ fn build_cap(ai: &AiConfig, overrides: &GenOverrides) -> Result<LlmConfig, Strin
         .map(str::trim)
         .filter(|k| !k.is_empty())
         .ok_or_else(|| "AI 未配置：请先在 AI 设置里填写 API Key".to_string())?;
+    // 先认预设 —— 选了「DeepSeek」这类已知厂商时，地址可以不填，
+    // 由 cap-llm 用预设里的服务地址兜底（用户手抄地址容易抄错，
+    // 抄错一个字符就是 404，而报错只说「404」）。
+    let preset = preset_id(&ai.provider);
     let base_url = ai
         .base_url
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "AI 未配置：请先在 AI 设置里填写 Base URL".to_string())?;
+        .filter(|s| !s.is_empty());
+    if base_url.is_none() && preset.is_none() {
+        return Err("AI 未配置：请先在 AI 设置里填写 Base URL".to_string());
+    }
     let model = ai
         .model
         .as_deref()
@@ -92,12 +131,13 @@ fn build_cap(ai: &AiConfig, overrides: &GenOverrides) -> Result<LlmConfig, Strin
 
     Ok(LlmConfig {
         kind: provider_kind(&ai.provider),
-        base_url: base_url.to_string(),
+        base_url: base_url.unwrap_or_default().to_string(),
         api_key: key.to_string(),
         model: model.to_string(),
         timeout: CHAT_TIMEOUT,
         temperature: Some(temperature as f32),
         max_tokens: Some(max_tokens),
+        preset,
     })
 }
 
@@ -212,6 +252,47 @@ mod tests {
     }
 
     #[test]
+    fn preset_binding_never_crosses_protocol_families() {
+        // 红线：preset 的协议族必须与 provider_kind 的判定兼容。
+        // 跨协议族绑定 = 静默错路由（地址是 Anthropic 的却按 Gemini 协议发）。
+        assert_eq!(preset_id("claude"), Some("anthropic"));
+        assert_eq!(preset_id("gemini"), Some("gemini"));
+        assert_eq!(preset_id("ollama"), Some("ollama"));
+        // openai / minimax 走 Custom 判定，但与预设同族，仍应绑定
+        assert_eq!(preset_id("openai"), Some("openai"));
+        assert_eq!(preset_id("minimax"), Some("minimax"));
+        // 未知 provider 不绑定
+        assert_eq!(preset_id("wat"), None);
+        assert_eq!(preset_id("custom"), None);
+    }
+
+    #[test]
+    fn preset_supplies_address_when_base_url_is_empty() {
+        // 用户在设置里选了 DeepSeek 但没填地址 —— 自动补上
+        let mut ai = AiConfig {
+            provider: "deepseek".to_string(),
+            api_key: Some("sk-test-1234567890".to_string()),
+            base_url: None,
+            model: Some("deepseek-chat".to_string()),
+            temperature: None,
+            max_tokens: None,
+        };
+        let cap = build_cap(&ai, &GenOverrides::default()).unwrap();
+        assert_eq!(cap.preset, Some("deepseek"));
+        assert_eq!(
+            cap.endpoint(cap_llm::Action::Chat).unwrap(),
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+        // 显式填的地址优先
+        ai.base_url = Some("https://my-proxy.corp/v1".to_string());
+        let cap = build_cap(&ai, &GenOverrides::default()).unwrap();
+        assert_eq!(
+            cap.endpoint(cap_llm::Action::Chat).unwrap(),
+            "https://my-proxy.corp/v1/chat/completions"
+        );
+    }
+
+    #[test]
     fn missing_key_fails_before_any_network() {
         let err = build_cap(&ai("openai", "https://api.example.com", "  "), &GenOverrides::default())
             .unwrap_err();
@@ -223,13 +304,16 @@ mod tests {
 
     #[test]
     fn missing_base_url_and_model_are_reported_separately() {
-        let e1 = build_cap(&ai("openai", " ", "k"), &GenOverrides::default()).unwrap_err();
+        // 用 "custom"（无预设）来测「缺地址要报错」——
+        // openai 这类有预设的 provider 缺地址时会被预设兜住，
+        // 见 preset_supplies_address_when_base_url_is_empty。
+        let e1 = build_cap(&ai("custom", " ", "k"), &GenOverrides::default()).unwrap_err();
         assert!(e1.contains("Base URL"));
-        let e2 = build_cap(&ai("openai", "https://x.com", "k"), &GenOverrides::default())
+        let e2 = build_cap(&ai("custom", "https://x.com", "k"), &GenOverrides::default())
             .map(|c| c.model)
             .err();
         assert!(e2.is_none(), "model 已填，不该报错");
-        let mut no_model = ai("openai", "https://x.com", "k");
+        let mut no_model = ai("custom", "https://x.com", "k");
         no_model.model = Some(" ".into());
         assert!(build_cap(&no_model, &GenOverrides::default())
             .unwrap_err()
