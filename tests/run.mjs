@@ -65,7 +65,17 @@ for (const file of cases) {
     );
     continue;
   }
-  const ran = spawnSync(process.execPath, [bundle], { encoding: "utf8", timeout: 60_000 });
+  // cwd 必须显式给成仓库根：多个测试用相对路径读源码（walk("src")、
+  // readFileSync("src/App.tsx")），子进程一旦继承了别的 cwd 就会 ENOENT 崩掉。
+  // 上面 esbuild 那步传了 root、这里没传，是同一个坑的两半。
+  //
+  // 超时给到 180s：像 button-labels 那种"全仓扫 .tsx"的用例，要读几十个源文件；
+  // 在慢速磁盘（每次 open 几百毫秒的云同步盘）上 60s 会被误杀成 flaky。
+  const ran = spawnSync(process.execPath, [bundle], {
+    encoding: "utf8",
+    timeout: 180_000,
+    cwd: root,
+  });
   const out = `${ran.stdout || ""}${ran.stderr || ""}`;
   process.stdout.write(out);
   // 一个文件里可以有多段小结：pass 取最后一段累计值，fail 跨段求和
@@ -75,7 +85,20 @@ for (const file of cases) {
   total += passed;
   if (ran.status !== 0) {
     failed++;
-    summary.push([file, `失败 ${failedCases || "全部"}`]);
+    // 区分"断言真的挂了"和"进程被杀"：被超时 SIGTERM 时 stdout 是空的，
+    // 报成"失败 全部"会让人以为是断言问题，实际上一条都没跑到。
+    if (ran.error || ran.signal) {
+      const why = ran.error
+        ? ran.error.code || String(ran.error)
+        : `信号 ${ran.signal}`;
+      summary.push([file, `进程被杀(${why})`]);
+      process.stdout.write(
+        `[run] ${file} 进程未正常结束：${why}` +
+          `${ran.signal ? "（多半是超时 SIGTERM，先单独跑这个文件看真实报错）" : ""}\n`
+      );
+    } else {
+      summary.push([file, `失败 ${failedCases || "全部"}`]);
+    }
   } else if (!matched.length) {
     failed++;
     summary.push([file, "未打印小结"]);
