@@ -195,9 +195,13 @@ export default function ServerList() {
                 label: "复制连接信息",
                 onClick: () => {
                   const info = `${s.username}@${s.host}:${s.port}`;
-                  navigator.clipboard.writeText(info).then(() => {
-                    message.success(`已复制: ${info}`);
-                  });
+                  navigator.clipboard.writeText(info).then(
+                    () => message.success(`已复制: ${info}`),
+                    (e) => {
+                      console.warn("[serverList] 复制连接信息失败:", e);
+                      message.error("复制失败，请手动选择连接信息");
+                    },
+                  );
                 },
               },
               {

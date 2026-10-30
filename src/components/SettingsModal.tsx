@@ -1,4 +1,4 @@
-import { Modal, Form, InputNumber, Select, Switch, Input, Slider, message, Button, Space, Tabs, Empty, Spin, Popconfirm, Typography, Tag, Tooltip } from "antd";
+import { Modal, Form, InputNumber, Select, Switch, Input, Slider, message, Button, Space, Tabs, Empty, Spin, Popconfirm, Typography, Tag, Tooltip, theme } from "antd";
 import { useServerStore } from "../stores/serverStore";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -53,6 +53,7 @@ function formatBytes(bytes: number): string {
 }
 
 export default function SettingsModal({ open, onClose }: Props) {
+  const { token } = theme.useToken();
   const { settings, updateSettings } = useServerStore();
   const [bgPreview, setBgPreview] = useState<string | null>(settings.background_image);
 
@@ -232,7 +233,7 @@ export default function SettingsModal({ open, onClose }: Props) {
                         marginTop: 8,
                         borderRadius: 6,
                         overflow: "hidden",
-                        border: "1px solid #f0f0f0",
+                        border: `1px solid ${token.colorBorderSecondary}`,
                         display: "inline-block",
                       }}
                     >
@@ -462,6 +463,7 @@ function auditOutcome(record: AuditRecord): string {
 }
 
 function AuditTab() {
+  const { token } = theme.useToken();
   const [records, setRecords] = useState<AuditRecord[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -528,7 +530,7 @@ function AuditTab() {
       ) : (
         <div
           style={{
-            border: "1px solid #f0f0f0",
+            border: `1px solid ${token.colorBorderSecondary}`,
             borderRadius: 6,
             maxHeight: 360,
             overflowY: "auto",
@@ -572,6 +574,7 @@ function AuditTab() {
  * 并提醒"下次连接会重新要求确认指纹"——没有比这更容易被误当成中间人告警的地方。
  */
 function HostKeysTab() {
+  const { token } = theme.useToken();
   const servers = useServerStore((s) => s.servers);
   const [entries, setEntries] = useState<HostKeyView[]>([]);
   const [loading, setLoading] = useState(false);
@@ -755,7 +758,7 @@ function HostKeysTab() {
       ) : (
         <div
           style={{
-            border: "1px solid #f0f0f0",
+            border: `1px solid ${token.colorBorderSecondary}`,
             borderRadius: 6,
             maxHeight: 320,
             overflowY: "auto",
@@ -769,6 +772,7 @@ function HostKeysTab() {
 }
 
 function BackupTab() {
+  const { token } = theme.useToken();
   const [backups, setBackups] = useState<ConfigBackup[]>([]);
   const [loading, setLoading] = useState(false);
   const [restoring, setRestoring] = useState<string | null>(null);
@@ -849,7 +853,7 @@ function BackupTab() {
       ) : (
         <div
           style={{
-            border: "1px solid #f0f0f0",
+            border: `1px solid ${token.colorBorderSecondary}`,
             borderRadius: 6,
             maxHeight: 320,
             overflowY: "auto",
@@ -863,7 +867,7 @@ function BackupTab() {
                 alignItems: "center",
                 justifyContent: "space-between",
                 padding: "8px 12px",
-                borderBottom: "1px solid #f0f0f0",
+                borderBottom: `1px solid ${token.colorBorderSecondary}`,
                 fontSize: 12,
               }}
             >
@@ -871,7 +875,7 @@ function BackupTab() {
                 <div style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {b.filename}
                 </div>
-                <div style={{ color: "#999", fontSize: 11, marginTop: 2 }}>
+                <div style={{ color: token.colorTextTertiary, fontSize: 11, marginTop: 2 }}>
                   {b.modified} · {formatBytes(b.size)}
                 </div>
               </div>

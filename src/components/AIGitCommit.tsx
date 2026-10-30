@@ -62,18 +62,27 @@ export default function AIGitCommit({ open, onClose, diff }: AIGitCommitProps) {
     }
   };
 
-  const handleCopyMessage = () => {
-    navigator.clipboard.writeText(commitMessage);
-    message.success("提交信息已复制到剪贴板");
+  const copyText = async (text: string, okText: string): Promise<boolean> => {
+    try {
+      await navigator.clipboard.writeText(text);
+      message.success(okText);
+      return true;
+    } catch (e) {
+      console.warn("[git] 复制提交信息失败:", e);
+      message.error("复制失败，请手动选中文本复制");
+      return false;
+    }
   };
 
-  const handleUseMessage = () => {
+  const handleCopyMessage = () => {
+    void copyText(commitMessage, "提交信息已复制到剪贴板");
+  };
+
+  const handleUseMessage = async () => {
     // "使用此提交信息"原本回调到 App 的 () => {}，即点了什么都没发生；
     // 本应用不派生本地 git 进程，能落地的动作就是带走这段文本。
     const composed = commitBody ? `${commitMessage}\n\n${commitBody}` : commitMessage;
-    navigator.clipboard.writeText(composed);
-    message.success("完整提交信息（含正文）已复制到剪贴板");
-    onClose();
+    if (await copyText(composed, "完整提交信息（含正文）已复制到剪贴板")) onClose();
   };
 
   if (!open) return null;

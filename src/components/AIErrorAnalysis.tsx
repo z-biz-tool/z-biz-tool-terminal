@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Modal, Button, Spin, Typography } from "antd";
+import { Modal, Button, Spin, Typography, theme } from "antd";
 import { BugOutlined, SolutionOutlined } from "@ant-design/icons";
 import type { ErrorAnalysis } from "../types/ai";
 import { isAIConfigured, useAIStore } from '../stores/aiStore';
@@ -14,6 +14,7 @@ interface AIErrorAnalysisProps {
 }
 
 export default function AIErrorAnalysis({ open, onClose, error }: AIErrorAnalysisProps) {
+  const { token } = theme.useToken();
   const { config } = useAIStore();
   const [loading, setLoading] = useState(false);
   const [analysis, setAnalysis] = useState<ErrorAnalysis | null>(null);
@@ -59,14 +60,14 @@ export default function AIErrorAnalysis({ open, onClose, error }: AIErrorAnalysi
       {loading ? (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px" }}>
           <Spin size="large" />
-          <Paragraph style={{ marginTop: "16px", color: "#666" }}>正在分析错误...</Paragraph>
+          <Paragraph style={{ marginTop: "16px", color: token.colorTextSecondary }}>正在分析错误...</Paragraph>
         </div>
       ) : errorText ? (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px" }}>
           <div style={{ fontSize: 36, color: "#ff4d4f" }}>
             <BugOutlined />
           </div>
-          <Paragraph style={{ marginTop: "16px", color: "#666" }}>分析失败: {errorText}</Paragraph>
+          <Paragraph style={{ marginTop: "16px", color: token.colorTextSecondary }}>分析失败: {errorText}</Paragraph>
         </div>
       ) : analysis ? (
         <div>

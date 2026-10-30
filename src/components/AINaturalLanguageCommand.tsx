@@ -110,8 +110,13 @@ export default function AINaturalLanguageCommand({ open, onClose, onCommandGener
             </div>
             <div style={{ marginTop: "12px", display: "flex", gap: "8px", justifyContent: "center" }}>
               <Button onClick={() => {
-                navigator.clipboard.writeText(generatedCommand);
-                message.success("已复制到剪贴板");
+                navigator.clipboard.writeText(generatedCommand).then(
+                  () => message.success("已复制到剪贴板"),
+                  (e) => {
+                    console.warn("[terminal] 复制生成命令失败:", e);
+                    message.error("复制失败，请手动选中命令复制");
+                  },
+                );
               }}>
                 复制
               </Button>

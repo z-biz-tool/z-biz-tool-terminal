@@ -204,9 +204,13 @@ export default function BatchExecModal({ open, onClose }: Props) {
       parts.push("");
     }
     const text = parts.join("\n");
-    navigator.clipboard.writeText(text).then(() => {
-      message.success("结果已复制到剪贴板");
-    });
+    navigator.clipboard.writeText(text).then(
+      () => message.success("结果已复制到剪贴板"),
+      (e) => {
+        console.warn("[batch] 复制执行结果失败:", e);
+        message.error("复制失败，请手动选中结果复制");
+      },
+    );
   }, [outputs]);
 
   const allSelected = connectedServers.length > 0 && selectedIds.size === connectedServers.length;

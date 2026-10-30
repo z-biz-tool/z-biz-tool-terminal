@@ -7,7 +7,7 @@
  */
 
 import { useState, useEffect } from "react";
-import { Modal, Alert, Typography, Button, message, Popconfirm } from "antd";
+import { Modal, Alert, Typography, Button, message, Popconfirm, theme } from "antd";
 import { ItemList, ItemRow } from "../_shared/ItemRows";
 import { DatabaseOutlined, DeleteOutlined } from "@ant-design/icons";
 
@@ -42,6 +42,7 @@ function readDatasets(): LocalDataset[] {
 }
 
 export default function CloudAgent({ open, onClose }: Props) {
+  const { token } = theme.useToken();
   const [datasets, setDatasets] = useState<LocalDataset[]>([]);
 
   useEffect(() => {
@@ -113,7 +114,7 @@ export default function CloudAgent({ open, onClose }: Props) {
           ))}
         </ItemList>
       ) : (
-        <div style={{ textAlign: "center", padding: "32px 0", color: "#999" }}>
+        <div style={{ textAlign: "center", padding: "32px 0", color: token.colorTextTertiary }}>
           <Paragraph type="secondary" style={{ margin: 0 }}>
             本机暂无已保存的 AI 数据
           </Paragraph>

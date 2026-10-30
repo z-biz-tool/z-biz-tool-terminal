@@ -587,9 +587,13 @@ function AppInner() {
         onClick: () => {
           if (server) {
             const info = `${server.username}@${server.host}:${server.port}`;
-            navigator.clipboard.writeText(info).then(() => {
-              message.success("已复制: " + info);
-            });
+            navigator.clipboard.writeText(info).then(
+              () => message.success("已复制: " + info),
+              (e) => {
+                console.warn("[terminal] 复制连接信息失败:", e);
+                message.error("复制失败，请手动选择连接信息");
+              },
+            );
           }
         },
       },

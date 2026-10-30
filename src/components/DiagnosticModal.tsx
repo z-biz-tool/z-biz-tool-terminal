@@ -158,9 +158,13 @@ export default function DiagnosticModal({ open, onClose }: Props) {
   };
 
   const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text).then(() => {
-      message.success("已复制到剪贴板");
-    });
+    navigator.clipboard.writeText(text).then(
+      () => message.success("已复制到剪贴板"),
+      (e) => {
+        console.warn("[diagnostic] 复制失败:", e);
+        message.error("复制失败，请手动选中文本复制");
+      },
+    );
   };
 
   const outputStyle: React.CSSProperties = {
@@ -188,7 +192,7 @@ export default function DiagnosticModal({ open, onClose }: Props) {
     }
     if (!output) {
       return (
-        <pre style={{ ...outputStyle, color: "#666" }}>
+        <pre style={{ ...outputStyle, color: "#a6a6a6" }}>
           点击"执行"按钮开始诊断
         </pre>
       );

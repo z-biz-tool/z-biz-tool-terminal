@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Modal, Button, Typography, message, Progress, Card, Input } from "antd";
+import { Modal, Button, Typography, message, Progress, Card, Input, theme } from "antd";
 import { TeamOutlined } from "@ant-design/icons";
 import type { AIMessage } from "../types/ai";
 import { isAIConfigured, useAIStore } from '../stores/aiStore';
@@ -23,6 +23,7 @@ interface AIMultiAgentsProps {
 }
 
 export default function AIMultiAgents({ open, onClose }: AIMultiAgentsProps) {
+  const { token } = theme.useToken();
   const { config } = useAIStore();
   const [loading, setLoading] = useState(false);
   // 任务描述由面板自己收：以前从 App 传进来的是硬编码空串，"开始协作"永远点不动
@@ -208,10 +209,10 @@ export default function AIMultiAgents({ open, onClose }: AIMultiAgentsProps) {
                   </Text>
                 }
                 style={{
-                  background: taskItem.status === "completed" ? "#f6ffed" :
-                             taskItem.status === "failed" ? "#fff2f0" :
-                             taskItem.status === "working" ? "#e6f7ff" :
-                             "#fafafa",
+                  background: taskItem.status === "completed" ? token.colorSuccessBg :
+                             taskItem.status === "failed" ? token.colorErrorBg :
+                             taskItem.status === "working" ? token.colorPrimaryBg :
+                             token.colorFillQuaternary,
                 }}
               >
                 <Paragraph style={{ margin: "0 0 8px 0", fontSize: 13 }} ellipsis={{ rows: 2 }}>

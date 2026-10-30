@@ -54,8 +54,9 @@ export default function KeyGenModal({ open, onClose }: Props) {
   const handleCopyPublic = () => {
     navigator.clipboard.writeText(publicKey).then(() => {
       message.success("公钥已复制到剪贴板");
-    }).catch(() => {
-      message.error("复制失败");
+    }).catch((e) => {
+      console.warn("[keygen] 复制公钥失败:", e);
+      message.error("复制失败，请手动选中公钥复制");
     });
   };
 

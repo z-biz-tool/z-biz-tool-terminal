@@ -191,6 +191,7 @@ function EmptyPanelText({ children }: { children: React.ReactNode }) {
 }
 
 function ServerInfoContent({ info }: { info: ServerSystemInfo }) {
+  const { token } = theme.useToken();
   const cpu = Math.min(100, Math.max(0, info.cpu_usage));
   const mem = percentText(info.mem_used, info.mem_total);
   const disk = percentText(info.disk_used, info.disk_total);
@@ -198,7 +199,7 @@ function ServerInfoContent({ info }: { info: ServerSystemInfo }) {
   return (
     <div>
       <SectionTitle>主机</SectionTitle>
-      <Descriptions column={1} size="small" colon={false} labelStyle={{ color: "#999", width: 88 }}>
+      <Descriptions column={1} size="small" colon={false} labelStyle={{ color: token.colorTextTertiary, width: 88 }}>
         <Descriptions.Item label="主机名">{info.hostname || "—"}</Descriptions.Item>
         <Descriptions.Item label="操作系统">{info.os || "—"}</Descriptions.Item>
         <Descriptions.Item label="内核">{info.kernel || "—"}</Descriptions.Item>
@@ -208,7 +209,7 @@ function ServerInfoContent({ info }: { info: ServerSystemInfo }) {
       <Divider style={{ margin: "16px 0" }} />
 
       <SectionTitle>CPU</SectionTitle>
-      <Descriptions column={1} size="small" colon={false} labelStyle={{ color: "#999", width: 88 }}>
+      <Descriptions column={1} size="small" colon={false} labelStyle={{ color: token.colorTextTertiary, width: 88 }}>
         <Descriptions.Item label="型号">{info.cpu_model || "—"}</Descriptions.Item>
         <Descriptions.Item label="核心数">{info.cpu_cores || "—"}</Descriptions.Item>
       </Descriptions>
@@ -217,7 +218,7 @@ function ServerInfoContent({ info }: { info: ServerSystemInfo }) {
       <Divider style={{ margin: "16px 0" }} />
 
       <SectionTitle>内存</SectionTitle>
-      <Descriptions column={1} size="small" colon={false} labelStyle={{ color: "#999", width: 88 }}>
+      <Descriptions column={1} size="small" colon={false} labelStyle={{ color: token.colorTextTertiary, width: 88 }}>
         <Descriptions.Item label="已用 / 共">
           {formatBytes(info.mem_used)} / {formatBytes(info.mem_total)}
         </Descriptions.Item>
@@ -228,7 +229,7 @@ function ServerInfoContent({ info }: { info: ServerSystemInfo }) {
         <>
           <Divider style={{ margin: "16px 0" }} />
           <SectionTitle>磁盘 (根分区)</SectionTitle>
-          <Descriptions column={1} size="small" colon={false} labelStyle={{ color: "#999", width: 88 }}>
+          <Descriptions column={1} size="small" colon={false} labelStyle={{ color: token.colorTextTertiary, width: 88 }}>
             <Descriptions.Item label="已用 / 共">
               {formatBytes(info.disk_used)} / {formatBytes(info.disk_total)}
             </Descriptions.Item>
@@ -241,7 +242,7 @@ function ServerInfoContent({ info }: { info: ServerSystemInfo }) {
         <>
           <Divider style={{ margin: "16px 0" }} />
           <SectionTitle>状态</SectionTitle>
-          <Descriptions column={1} size="small" colon={false} labelStyle={{ color: "#999", width: 88 }}>
+          <Descriptions column={1} size="small" colon={false} labelStyle={{ color: token.colorTextTertiary, width: 88 }}>
             {info.load_avg && (
               <Descriptions.Item label="负载 (1/5/15)">
                 {info.load_avg}
@@ -282,10 +283,11 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 }
 
 function ProgressMetric({ label, percent, color }: { label: string; percent: number; color: string }) {
+  const { token } = theme.useToken();
   return (
     <div style={{ marginTop: 6 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-        <span style={{ fontSize: 12, color: "#999" }}>{label}</span>
+        <span style={{ fontSize: 12, color: token.colorTextTertiary }}>{label}</span>
         <span style={{ fontSize: 12, color, fontWeight: 500 }}>{percent.toFixed(1)}%</span>
       </div>
       <Progress

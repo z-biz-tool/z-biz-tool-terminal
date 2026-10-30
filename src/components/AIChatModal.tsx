@@ -13,6 +13,7 @@ import {
   Alert,
   AutoComplete,
   Typography,
+  theme,
 } from "antd";
 import type { TabsProps } from "antd";
 import {
@@ -209,7 +210,7 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
           {/* 消息列表 */}
           <div style={{ flex: 1, overflow: "auto", padding: "16px", background: "#000" }}>
             {messages.length === 0 ? (
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", color: "#666" }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", color: "#a6a6a6" }}>
                 <p style={{ fontSize: 18 }}>👋 欢迎使用 AI 聊天助手</p>
                 <p style={{ fontSize: 14, margin: "8px 0" }}>我可以帮你：</p>
                 <ul style={{ textAlign: "left", maxWidth: 400 }}>
@@ -248,7 +249,7 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
                     {msg.role === "user" ? "你" : "AI"}
                   </div>
                   <div style={{ flex: 1, background: msg.role === "user" ? "#1f1f1f" : "#141414", padding: "12px", borderRadius: "8px" }}>
-                    <div style={{ fontSize: 12, color: "#666", marginBottom: "8px" }}>
+                    <div style={{ fontSize: 12, color: "#a6a6a6", marginBottom: "8px" }}>
                       {msg.role === "user" ? "你" : "AI助手"} · {new Date(msg.timestamp).toLocaleTimeString()}
                     </div>
                     <div style={{ color: "#fff", lineHeight: 1.6 }}>
@@ -350,6 +351,7 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
 // R5 错误来自结构化 LlmFailure，带动作按钮（只对「改配置能解决」的失败给按钮）
 // §5.4 terminal 差异：key 不出 webview → 测试/取模型读**已保存**配置，界面如实说明
 function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave: (c: AIConfig) => void; onClose: () => void }) {
+  const { token } = theme.useToken();
   const { presets, loadPresets } = useAIStore();
   const [formData, setFormData] = useState<AIConfig>(config);
   const [advancedOpen, setAdvancedOpen] = useState<string[]>([]);
@@ -655,7 +657,7 @@ function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave:
           onChange={(e) => setFormData({ ...formData, temperature: parseFloat(e.target.value) })}
           style={{ width: "100%" }}
         />
-        <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>
+        <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 4 }}>
           较高温度=更创造性，较低温度=更确定性
         </div>
       </div>
