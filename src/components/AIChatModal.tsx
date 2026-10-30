@@ -13,6 +13,7 @@ import {
   Alert,
   AutoComplete,
   Typography,
+  Switch,
   theme,
 } from "antd";
 import type { TabsProps } from "antd";
@@ -24,9 +25,12 @@ import {
   DeleteOutlined,
   ReloadOutlined,
   ThunderboltOutlined,
+  ToolOutlined,
 } from "@ant-design/icons";
-import type { AIMessage, AIConfig, LlmFailure } from "../types/ai";
+import type { AIMessage, AIConfig, AIToolCall, LlmFailure } from "../types/ai";
 import { useAIStore, applyPreset, isAIConfigured } from "../stores/aiStore";
+import { useServerStore } from "../stores/serverStore";
+import { pickActiveSession } from "../utils/session";
 import { createAIClient } from "../services/aiClient";
 import { invoke } from "@tauri-apps/api/core";
 import { renderMarkdown } from "../utils/markdown";
@@ -43,12 +47,84 @@ const MAX_HISTORY = 200;
 const SYSTEM_PROMPT =
   "你是一个专业的终端助手，可以回答关于 Linux/Unix 命令、Shell 脚本、系统管理等方面的问题。请提供简洁、准确的答案。";
 
+/**
+ * 一次工具调用的轨迹。
+ *
+ * 单独一块显示、默认折叠，而不是把工具输出混进正文 —— 工具输出是**证据**，
+ * 模型的回答是**结论**；混在一起用户没法核对「AI 到底看到了什么才这么答」，
+ * 长输出还会把真正的回答顶到屏幕外。
+ */
+function ToolCallTrace({ calls }: { calls: AIToolCall[] }) {
+  const { token } = theme.useToken();
+  if (calls.length === 0) return null;
+  const okCount = calls.filter((c) => c.ok).length;
+  return (
+    <Collapse
+      size="small"
+      ghost
+      style={{ marginBottom: 8 }}
+      items={[
+        {
+          key: "tools",
+          label: (
+            <span style={{ fontSize: 12, color: token.colorTextSecondary }}>
+              <ToolOutlined /> 工具调用 {calls.length} 次（成功 {okCount}）
+            </span>
+          ),
+          children: (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {calls.map((c, i) => (
+                <div
+                  key={i}
+                  style={{
+                    borderLeft: `2px solid ${c.ok ? token.colorSuccess : token.colorError}`,
+                    paddingLeft: 8,
+                  }}
+                >
+                  <div style={{ fontSize: 12, color: token.colorTextSecondary }}>
+                    第 {c.round} 轮 · <b>{c.name}</b> ·{" "}
+                    {c.ok ? (
+                      <span style={{ color: token.colorSuccess }}>成功</span>
+                    ) : (
+                      <span style={{ color: token.colorError }}>失败</span>
+                    )}
+                  </div>
+                  <pre
+                    style={{
+                      margin: "4px 0 0",
+                      fontSize: 11,
+                      color: token.colorTextTertiary,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                      maxHeight: 120,
+                      overflow: "auto",
+                    }}
+                  >
+                    {c.output}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          ),
+        },
+      ]}
+    />
+  );
+}
+
 export default function AIChatModal({ open, onClose }: AIChatModalProps) {
   const { config, updateConfig } = useAIStore();
   const [messages, setMessages] = useState<AIMessage[]>([]);
   const [input, setInput] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  /**
+   * 是否允许模型调用只读工具（列远端目录 / 读远端文件 / 查服务器信息 / 诊断连通性）。
+   *
+   * 默认关：工具模式**非流式**（cap-llm 的流式接口不带工具集），且每多一轮工具调用
+   * 就多一轮网络往返 —— 这两件事都该由用户主动选，而不是替他决定。
+   */
+  const [useTools, setUseTools] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   // 流式期间不能依赖闭包里的 messages：它始终是发送前那一刻的快照
@@ -113,6 +189,42 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
     setInput("");
     setIsGenerating(true);
     persist(conversation);
+
+    // 工具模式：非流式（cap-llm 的流式接口不带工具集），且中途不能取消 ——
+    // 后端的工具循环没有 abort 通道，"停止"只能等本轮自然结束。所以这里不建
+    // AbortController，避免点了"停止"却什么都没发生。
+    if (useTools) {
+      try {
+        const client = createAIClient(config);
+        const result = await client.chatWithTools(fullContext, {
+          temperature: config.temperature,
+          maxTokens: config.maxTokens,
+          sessionId: pickActiveSession(useServerStore.getState()),
+        });
+        const assistant: AIMessage = {
+          role: "assistant",
+          content: result.content,
+          timestamp: Date.now(),
+          toolCalls: result.toolCalls,
+        };
+        // 达到轮次上限时模型可能还没说完，如实标注而不是让答案看起来是完整的
+        const finalContent = result.hitRoundLimit
+          ? `${result.content}\n\n> ⚠️ 已达到工具调用轮次上限（${result.rounds} 轮），回答可能不完整`
+          : result.content;
+        const finalMsg: AIMessage = { ...assistant, content: finalContent };
+        setMessages([...conversation, finalMsg]);
+        persist([...conversation, finalMsg]);
+      } catch (error: any) {
+        const content = `❌ 错误: ${error?.message || "未知错误"}`;
+        setMessages([...conversation, { role: "assistant", content, timestamp: Date.now() }]);
+        persist([...conversation, { role: "assistant", content, timestamp: Date.now() }]);
+        console.error("AI tool chat error:", error);
+      } finally {
+        setIsGenerating(false);
+        abortControllerRef.current = null;
+      }
+      return;
+    }
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -252,6 +364,8 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
                     <div style={{ fontSize: 12, color: "#a6a6a6", marginBottom: "8px" }}>
                       {msg.role === "user" ? "你" : "AI助手"} · {new Date(msg.timestamp).toLocaleTimeString()}
                     </div>
+                    {/* 工具轨迹在正文之前：先看到 AI 查了什么，再看它据此说了什么 */}
+                    {msg.toolCalls && <ToolCallTrace calls={msg.toolCalls} />}
                     <div style={{ color: "#fff", lineHeight: 1.6 }}>
                       {renderMarkdown(msg.content, `m${index}`)}
                     </div>
@@ -279,25 +393,60 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
                 size="large"
                 style={{ flex: 1 }}
               />
-              <Button
-                type="primary"
-                icon={isGenerating ? <StopOutlined /> : <SendOutlined />}
-                onClick={isGenerating ? handleStop : handleSend}
-                size="large"
-                // 生成中必须保持可点：此前 disabled 绑在输入框上, "停止"按钮永远点不动
-                disabled={isGenerating ? false : !input.trim()}
-              >
-                {isGenerating ? "停止" : "发送"}
-              </Button>
+              {/* disabled 的按钮不触发 Tooltip，得垫一层 span 才看得见 */}
+              <Tooltip title={isGenerating && useTools ? "工具调用本轮无法中途停止" : ""}>
+                <span>
+                  <Button
+                    type="primary"
+                    icon={isGenerating ? <StopOutlined /> : <SendOutlined />}
+                    onClick={isGenerating ? handleStop : handleSend}
+                    size="large"
+                    // 生成中必须保持可点：此前 disabled 绑在输入框上, "停止"按钮永远点不动。
+                    // 工具模式例外 —— 后端工具循环没有 abort 通道，点了"停止"什么都不会发生，
+                    // 那不如如实灰掉并说明。
+                    disabled={isGenerating ? useTools : !input.trim()}
+                  >
+                    {isGenerating ? (useTools ? "生成中…" : "停止") : "发送"}
+                  </Button>
+                </span>
+              </Tooltip>
             </div>
-            <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+            <div style={{ display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" }}>
               <Button size="small" icon={<PlusOutlined />} onClick={() => setShowSettings(true)}>
                 设置
               </Button>
               <Button size="small" icon={<DeleteOutlined />} onClick={handleClearHistory}>
                 清空历史
               </Button>
+              <Tooltip
+                title={
+                  useTools
+                    ? "开启后 AI 可以列远端目录、读远端文件、查服务器信息、诊断连通性。全部只读，不会改远端任何东西。"
+                    : "关闭时 AI 只凭已有知识回答，不碰你的服务器。"
+                }
+              >
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                  <ToolOutlined
+                    style={{ color: useTools ? "#52c41a" : "rgba(255,255,255,0.35)" }}
+                  />
+                  <Switch
+                    size="small"
+                    checked={useTools}
+                    onChange={setUseTools}
+                    aria-label="允许 AI 调用只读工具"
+                  />
+                  <span style={{ color: useTools ? "#52c41a" : "rgba(255,255,255,0.45)" }}>
+                    {useTools ? "工具已开（只读）" : "工具关闭"}
+                  </span>
+                </span>
+              </Tooltip>
             </div>
+            {useTools && (
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", marginTop: 6, lineHeight: 1.5 }}>
+                工具模式下 AI 会先查看你的服务器再回答，回答非流式输出（逐字生成不可用），
+                且本轮结束前无法中途停止。全部工具只读。
+              </div>
+            )}
           </div>
         </div>
       ),
