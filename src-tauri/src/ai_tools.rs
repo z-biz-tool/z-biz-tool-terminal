@@ -8,23 +8,18 @@
 //! 那条链路在 AI 自主调用时拿不到「用户正在看着弹窗」这个前提 —— 详见
 //! [`crate::ai_tools`] 的模块说明与 `AI_FEATURES.md`。
 //!
-//! ## cap-llm 的能力边界（重要）
+//! ## cap-llm 的 tool role（2026-10-30 起为原生）
 //!
-//! `cap_llm::Message` 只有 `System` / `User` / `Assistant` 三种角色，
-//! `wire::build_body` 也只按这三类编码 —— **没有 tool role / tool_call_id 的
-//! 表达路径**。所以「把工具结果作为 tool 消息回灌模型」无法按各家的原生协议
-//! 完成（OpenAI 要 `role:"tool"` + `tool_call_id`，Anthropic 要 `tool_result` 块，
-//! Gemini 要 `functionResponse` part）。
+//! `cap_llm::Message` 有 `Role::Tool` 与 `tool_call_id` / `tool_name` /
+//! `tool_calls` 字段，`wire::build_body` 按四协议各自的原生形态编码
+//! （OpenAI `role:"tool"`、Anthropic `tool_result` 块、Gemini
+//! `functionResponse`、Ollama `role:"tool"`）。本模块把工具结果用
+//! `Message::tool()` 回灌，并用 `Message::assistant_with_tools()` 把
+//! assistant 那一轮的 tool_calls 原样带回（服务端按 id 校验）。
 //!
-//! 本模块采取**受控降级**：把工具结果包成一条 `User` 消息回灌，正文里带上
-//! 明确的结构化标记（工具名 + 参数 + 结果），并在 system 提示里告诉模型
-//! 「工具结果以这条 user 消息的形式给你」。这不是各家协议里的原生形态，
-//! 但它是**唯一能在不修改 capability 仓的前提下拿到工具结果**的路径，
-//! 且不会让模型把工具输出误认成用户说的话（标记是显式的）。
-//!
-//! 真要做原生回灌，需要 cap-llm 侧增加 `Message::tool(tool_call_id, content)`，
-//! 以及 `build_body` 里各协议的 tool result 编码 —— 那是 capability 仓的改动，
-//! 本轮不改。
+//! 唯一保留的降级路径：tool_call 解析不出 id 时（畸形报文），退回到
+//! 带 `[工具结果]` 标记的 user 消息 —— 那种情况下发原生 tool 消息
+//! 必然 400（id 为空配不上对），降级总比整轮失败好。
 
 use cap_llm::{Message, ToolDef};
 use serde::{Deserialize, Serialize};
@@ -430,20 +425,32 @@ async fn run_tool(name: &str, args: &Value, ctx: &ToolContext) -> (bool, String)
 
 /// 把工具结果包成一条回灌给模型的消息。
 ///
-/// ## 为什么不是原生 tool 消息
+/// ## 原生 tool 消息优先，id 缺失才降级
 ///
-/// `cap_llm::Message` 没有 tool role（详见模块头部的说明）。所以这里用
-/// `User` 角色承载，并在正文里加**显式标记** —— 模型据此知道这是工具输出
-/// 而不是用户说的话。若不加标记，模型会把文件内容当成用户输入来回应，
-/// 答非所问。
-fn tool_result_message(name: &str, arguments: &Value, ok: bool, output: &str) -> Message {
+/// `cap_llm::Message::tool()` 会按四协议各自的原生形态编码（见模块头）。
+/// 但原生 tool 消息必须带得住配对 id：OpenAI/Anthropic 按 `tool_call_id`、
+/// Gemini/Ollama 按 `tool_name`。若这条 tool_call 连 id 都没有（畸形报文，
+/// `parse_tool_call` 已放过但 raw 里没 id），发原生消息必然 400 ——
+/// 这时退回到带显式标记的 user 消息，模型仍能读到结果。
+fn tool_result_message(
+    tool_call_id: Option<&str>,
+    name: &str,
+    arguments: &Value,
+    ok: bool,
+    output: &str,
+) -> Message {
+    let body = truncate_tool_output(output);
+    let id = tool_call_id.unwrap_or_default();
+    if !id.trim().is_empty() {
+        return Message::tool(id, name, body);
+    }
+    // 降级路径：id 缺失，退回带标记的 user 消息
     let args = if arguments.is_string() {
         arguments.as_str().unwrap_or_default().to_string()
     } else {
         arguments.to_string()
     };
     let status = if ok { "成功" } else { "失败" };
-    let body = truncate_tool_output(output);
     Message::user(format!(
         "[工具结果] 工具={name} 状态={status}\n参数={args}\n结果：\n{body}\n[/工具结果]"
     ))
@@ -544,15 +551,17 @@ pub async fn run_tool_loop<B: ToolLoopBackend + Sync, A: ToolAuditSink>(
             });
         }
 
-        // 模型这一轮说了什么也记下来（有些模型会先解释一句再调工具）
-        if !content.trim().is_empty() {
-            conversation.push(Message::assistant(&content));
-        }
+        // 模型这一轮说了什么 + 请求了哪些工具都要记下来：
+        // 服务端按 id 校验「tool 结果前必须有一条带对应 tool_calls 的 assistant 消息」，
+        // content 为空时也得带 tool_calls 原样回显，否则下一轮直接 400。
+        conversation.push(Message::assistant_with_tools(&content, tool_calls.clone()));
 
         for raw in &tool_calls {
             let record = execute_one(raw, rounds, ctx, audit).await;
             records.push(record.clone());
+            let id = raw.get("id").and_then(|v| v.as_str());
             conversation.push(tool_result_message(
+                id,
                 &record.name,
                 &record.arguments,
                 record.ok,
@@ -690,9 +699,11 @@ mod tests {
     use std::sync::Mutex;
 
     /// 脚本化的后端：按预设序列返回 (content, tool_calls)。
+    /// 同时把每轮收到的 messages 记下来，供「回灌格式」类断言用。
     struct ScriptedBackend {
         turns: Mutex<Vec<(String, Vec<Value>)>>,
         seen: Mutex<usize>,
+        captured: Mutex<Vec<Vec<Message>>>,
     }
 
     impl ScriptedBackend {
@@ -700,7 +711,13 @@ mod tests {
             Self {
                 turns: Mutex::new(turns),
                 seen: Mutex::new(0),
+                captured: Mutex::new(Vec::new()),
             }
+        }
+
+        /// 第 n 轡（1 起）后端收到的完整消息列表。
+        fn messages_at(&self, round: usize) -> Vec<Message> {
+            self.captured.lock().unwrap()[round - 1].clone()
         }
     }
 
@@ -708,9 +725,10 @@ mod tests {
     impl ToolLoopBackend for ScriptedBackend {
         async fn next_turn(
             &self,
-            _messages: &[Message],
+            messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<(String, Vec<Value>), String> {
+            self.captured.lock().unwrap().push(messages.to_vec());
             let mut seen = self.seen.lock().unwrap();
             let idx = *seen;
             *seen += 1;
@@ -925,14 +943,31 @@ mod tests {
     // ---- 回灌格式 ----
 
     #[test]
-    fn tool_result_message_is_marked_so_the_model_knows_it_is_not_the_user() {
+    fn tool_result_with_id_is_a_native_tool_message() {
         let msg = tool_result_message(
+            Some("call_1"),
             "read_remote_file",
             &json!({ "path": "/etc/hosts" }),
             true,
             "127.0.0.1 localhost",
         );
-        // 必须是 User 角色（cap-llm 没有 tool role），但正文带显式标记
+        // 有 id 就走原生 tool 角色（四协议各自的原生编码在 cap-llm 的 wire 层）
+        assert!(matches!(msg.role, cap_llm::Role::Tool));
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(msg.tool_name.as_deref(), Some("read_remote_file"));
+        assert_eq!(msg.content, "127.0.0.1 localhost");
+    }
+
+    #[test]
+    fn tool_result_without_id_degrades_to_marked_user_message() {
+        // id 缺失（畸形报文）：发原生 tool 消息必然 400，降级为带标记的 user 消息
+        let msg = tool_result_message(
+            None,
+            "read_remote_file",
+            &json!({ "path": "/etc/hosts" }),
+            true,
+            "127.0.0.1 localhost",
+        );
         assert!(matches!(msg.role, cap_llm::Role::User));
         assert!(msg.content.contains("[工具结果]"));
         assert!(msg.content.contains("read_remote_file"));
@@ -940,10 +975,39 @@ mod tests {
         assert!(msg.content.contains("127.0.0.1 localhost"));
     }
 
+    #[tokio::test]
+    async fn loop_feeds_back_native_tool_messages_not_marked_user() {
+        // 核心行为：工具结果必须以原生 tool 角色回灌，
+        // 且 assistant 那一轮的 tool_calls 原样带回（服务端按 id 配对）。
+        let backend = ScriptedBackend::new(vec![
+            ("我来查".into(), vec![call("get_server_info", "{}")]),
+            ("查完了".into(), vec![]),
+        ]);
+        let ctx = ToolContext { session_id: None };
+        let result = run_tool_loop(&backend, &[Message::user("看信息")], &ctx, &NoopAudit)
+            .await
+            .unwrap();
+        assert_eq!(result.rounds, 2);
+
+        let round2 = backend.messages_at(2);
+        // 倒数第二条：assistant 带 tool_calls 原样回显
+        let assistant = &round2[round2.len() - 2];
+        assert!(matches!(assistant.role, cap_llm::Role::Assistant));
+        assert_eq!(assistant.tool_calls.len(), 1);
+        assert_eq!(assistant.tool_calls[0]["id"], "call_1");
+        // 最后一条：原生 tool 消息，id 与名字都对得上
+        let tool_msg = &round2[round2.len() - 1];
+        assert!(matches!(tool_msg.role, cap_llm::Role::Tool));
+        assert_eq!(tool_msg.tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(tool_msg.tool_name.as_deref(), Some("get_server_info"));
+        // 不能残留降级路径的标记
+        assert!(!tool_msg.content.contains("[工具结果]"));
+    }
+
     #[test]
     fn tool_result_output_is_truncated_with_a_marker() {
         let long = "x".repeat(MAX_TOOL_OUTPUT_CHARS + 500);
-        let msg = tool_result_message("t", &json!({}), true, &long);
+        let msg = tool_result_message(Some("c1"), "t", &json!({}), true, &long);
         assert!(msg.content.contains("已截断"));
         assert!(msg.content.chars().count() < long.chars().count() + 200);
     }
