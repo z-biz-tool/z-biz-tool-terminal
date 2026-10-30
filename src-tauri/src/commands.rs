@@ -25,7 +25,10 @@ async fn sessions() -> &'static SessionStore {
 }
 
 /// 按 id 取会话句柄。只在读锁内做一次 `Arc` 克隆，不持锁跨 `await`。
-async fn get_session(session_id: &str) -> Option<Arc<SshSession>> {
+///
+/// `pub(crate)` 是为了让 AI 工具层（`ai_tools`）复用**同一张会话表** ——
+/// 工具必须打在用户当前活跃的那台机器上，而不是另建一套连接管理。
+pub(crate) async fn get_session(session_id: &str) -> Option<Arc<SshSession>> {
     sessions().await.read().await.get(session_id).cloned()
 }
 
@@ -1122,6 +1125,14 @@ pub struct TcpProbeResult {
 /// 常见失败原因会被翻译成人类可读的提示。
 #[tauri::command]
 pub async fn tcp_probe(host: String, port: u16, timeout_ms: Option<u64>) -> TcpProbeResult {
+    probe_tcp(&host, port, timeout_ms).await
+}
+
+/// TCP 探测的可复用核心。
+///
+/// `pub(crate)` 是为了让 AI 工具层复用同一份实现 —— 两处各写一遍，
+/// 迟早会出现「面板说通了、工具说不通」的分裂。
+pub(crate) async fn probe_tcp(host: &str, port: u16, timeout_ms: Option<u64>) -> TcpProbeResult {
     use std::net::ToSocketAddrs;
     use std::time::{Duration, Instant};
     use tokio::io::AsyncWriteExt;
@@ -1200,26 +1211,34 @@ pub async fn ssh_diagnose_ping(session_id: String, host: String, count: Option<u
         return diag_error(e);
     }
     if let Some(sess) = get_session(&session_id).await {
-        let c = count.unwrap_or(4).clamp(1, 20);
-        let command = format!("ping -c {} {} 2>&1", c, shell_escape(host.trim()));
-        match sess.execute(&command).await {
-            Ok(output) => ExecResult {
-                success: true,
-                output,
-                error: None,
-            },
-            Err(e) => ExecResult {
-                success: false,
-                output: String::new(),
-                error: Some(e.to_string()),
-            },
-        }
+        ping_host(&sess, &host, count).await
     } else {
         ExecResult {
             success: false,
             output: String::new(),
             error: Some(no_session(&session_id)),
         }
+    }
+}
+
+/// Ping 的可复用核心（主机名已校验过）。
+///
+/// `pub(crate)` 让 AI 工具层复用 —— 工具要打的 ping 与诊断面板是同一件事，
+/// 两处各写一份会让「面板说通了、工具说不通」。
+pub(crate) async fn ping_host(sess: &SshSession, host: &str, count: Option<u32>) -> ExecResult {
+    let c = count.unwrap_or(4).clamp(1, 20);
+    let command = format!("ping -c {} {} 2>&1", c, shell_escape(host.trim()));
+    match sess.execute(&command).await {
+        Ok(output) => ExecResult {
+            success: true,
+            output,
+            error: None,
+        },
+        Err(e) => ExecResult {
+            success: false,
+            output: String::new(),
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -1333,6 +1352,23 @@ pub async fn ssh_get_server_info(session_id: String) -> ServerSystemInfo {
     let Some(sess) = get_session(&session_id).await else {
         info.error = Some(no_session(&session_id));
         return info;
+    };
+
+    info = collect_server_info(&sess).await;
+    info
+}
+
+/// 采集系统信息的可复用核心（不查会话表）。
+///
+/// `pub(crate)` 让 AI 工具层复用同一份采集脚本 —— 面板和工具报出来的
+/// CPU/内存/磁盘必须一致，两处各写一份迟早分叉。
+pub(crate) async fn collect_server_info(sess: &SshSession) -> ServerSystemInfo {
+    let mut info = ServerSystemInfo {
+        collected_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        ..Default::default()
     };
 
     // 组合脚本: 先检测 OS,然后用对应分支采集

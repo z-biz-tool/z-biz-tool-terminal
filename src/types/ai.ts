@@ -71,6 +71,44 @@ export interface AIMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
+  /**
+   * 本轮 AI 触发的工具调用轨迹（仅 assistant 消息可能有）。
+   *
+   * 单独一个字段而不是把工具输出塞进 `content` —— 工具输出是**证据**，
+   * 模型的回答是**结论**。混在一起就没法折叠、也没法让用户核对
+   * 「AI 到底看到了什么才这么答」。
+   */
+  toolCalls?: AIToolCall[];
+}
+
+/**
+ * 一次工具调用（与后端 Rust `ai_tools::ToolCallRecord` 对齐）。
+ *
+ * 后端用 camelCase 序列化，这里字段名与之逐字对应。
+ */
+export interface AIToolCall {
+  /** 模型请求的工具名 */
+  name: string;
+  /** 模型给的参数（后端已容错解析；非法时是原始字符串） */
+  arguments: unknown;
+  /** 是否执行成功 */
+  ok: boolean;
+  /** 结果摘要或错误原因 */
+  output: string;
+  /** 第几轮执行的（从 1 开始） */
+  round: number;
+}
+
+/** 后端 `ai_chat_with_tools` 的返回 */
+export interface AIToolChatResult {
+  /** 模型的最终回答 */
+  content: string;
+  /** 期间发生的全部工具调用 */
+  toolCalls: AIToolCall[];
+  /** 是否因达到轮次上限而被截断 */
+  hitRoundLimit: boolean;
+  /** 实际发生的轮次 */
+  rounds: number;
 }
 
 /** AI 聊天会话 */
@@ -111,12 +149,31 @@ export interface StreamOptions extends ChatOptions {
   onDelta?: (delta: string) => void;
 }
 
+/** 工具模式对话参数 */
+export interface ToolChatOptions extends ChatOptions {
+  /**
+   * 当前活跃的 SSH 会话 id。
+   *
+   * 由前端从**既有** store 解析（`pickActiveSession` / `pickTabSession`）后传入，
+   * 后端按现有会话表路由 —— 不在前端另造连接管理，也不把 serverId/tabId
+   * 传下去让后端自己猜（后端只认 session_id）。
+   */
+  sessionId?: string;
+}
+
 /** AI 服务接口 */
 export interface AIClient {
   chat: (messages: AIMessage[], options?: ChatOptions) => Promise<string>;
 
   /** 流式对话：逐段回调 delta，resolve 时为完整文本 */
   chatStream: (messages: AIMessage[], options: StreamOptions) => Promise<string>;
+
+  /**
+   * 工具调用对话：模型可调用 terminal 的只读 SSH/SFTP 能力。
+   *
+   * 非流式 —— cap-llm 的流式接口当前不带工具集（见 AI_FEATURES.md）。
+   */
+  chatWithTools: (messages: AIMessage[], options?: ToolChatOptions) => Promise<AIToolChatResult>;
 
   explainCommand: (command: string) => Promise<CommandExplanation>;
   

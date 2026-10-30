@@ -975,6 +975,36 @@ impl SshSession {
         }
     }
 
+    /// 读取远端文件内容（**只读**）。
+    ///
+    /// ⚠️ 与 `commands::read_file_content` 是两回事：那个读的是**本机**文件
+    /// （受 `paths::resolve_existing` 白名单约束），这里读的是远端主机上的文件。
+    /// AI 工具要的显然是后者，所以走 SFTP 子系统的 `read`。
+    ///
+    /// 上限按字节截断：远端文件可能有几百 MB，全量读进内存再交给模型会打爆进程。
+    /// 超限时截断并明确告知模型内容不完整 —— 让模型知道"这是片段"比让它以为
+    /// 看到了完整文件更安全。
+    pub async fn sftp_read_text(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<(String, bool), Box<dyn std::error::Error + Send + Sync>> {
+        let sftp_lock = self.sftp.lock().await;
+        let Some(sftp) = sftp_lock.as_ref() else {
+            return Err("服务器不支持 SFTP 子系统，无法读取远端文件".into());
+        };
+        let raw = sftp.read(path).await?;
+        let truncated = raw.len() > max_bytes;
+        let slice = if truncated {
+            &raw[..max_bytes]
+        } else {
+            &raw[..]
+        };
+        // 远端文件不保证是 UTF-8（压缩包、二进制）；用 lossy 转换而不是报错，
+        // 让模型至少能看到可读部分，同时由调用方标记"可能有损"。
+        Ok((String::from_utf8_lossy(slice).to_string(), truncated))
+    }
+
     /// SFTP文件列表 - 通过执行ls命令模拟(兜底方案)
     async fn sftp_list_fallback(
         &self,

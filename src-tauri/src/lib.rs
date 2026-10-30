@@ -1,4 +1,5 @@
 mod ai;
+mod ai_tools;
 mod audit;
 mod commands;
 mod config;
@@ -87,6 +88,8 @@ pub fn run() {
             ai::ai_chat,
             ai::ai_chat_stream,
             ai::ai_stream_abort,
+            // AI 工具调用：模型可调用 terminal 的只读 SSH/SFTP 能力
+            ai::ai_chat_with_tools,
             // LLM 接入层：供应商预设 + 结构化测试（读已保存配置，因 key 不出 webview）
             ai::list_llm_presets,
             ai::list_llm_models,

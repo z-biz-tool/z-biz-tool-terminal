@@ -2,10 +2,12 @@ import type {
   AIMessage,
   AIClient,
   AIConfig,
+  AIToolChatResult,
   ChatOptions,
   CommandExplanation,
   ErrorAnalysis,
   StreamOptions,
+  ToolChatOptions,
 } from "../types/ai";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -104,6 +106,22 @@ class BackendAIClient implements AIClient {
         .then((fn) => fn())
         .catch((e) => console.warn("[ai] 注销流式事件监听失败，可能泄漏一个监听器:", e));
     }
+  }
+
+  /**
+   * 工具调用对话：模型可调用 terminal 的只读 SSH/SFTP 能力。
+   *
+   * 会话 id 由调用方从既有 store 解析后传入；没传就是「无会话上下文」，
+   * 工具里需要会话的那几个（列目录/读文件/查信息/诊断）会直接报错回灌，
+   * 而不是悄悄换一台机器 —— 见后端 `ai_tools::run_tool`。
+   */
+  async chatWithTools(messages: AIMessage[], options?: ToolChatOptions): Promise<AIToolChatResult> {
+    this.assertConfigured();
+    return invoke<AIToolChatResult>("ai_chat_with_tools", {
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      overrides: overridesOf(options),
+      context: { sessionId: options?.sessionId ?? null },
+    });
   }
 
   async explainCommand(command: string): Promise<CommandExplanation> {

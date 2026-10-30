@@ -211,6 +211,50 @@ pub async fn ai_stream_abort() -> Result<(), String> {
     Ok(())
 }
 
+/// AI 聊天（启用工具调用）。
+///
+/// 与 `ai_chat` 的区别只有一处：**多了工具执行循环**。
+/// 配置读取路径完全复用 [`to_cap`]（密钥只在 Rust 侧解出，不回传 WebView）。
+///
+/// 工具集与边界见 [`crate::ai_tools`]：全部只读，不写远端、不写 PTY。
+pub async fn chat_with_tools(
+    messages: &[ChatMessage],
+    overrides: &GenOverrides,
+    ctx: &crate::ai_tools::ToolContext,
+) -> Result<crate::ai_tools::ToolChatResult, String> {
+    let cap = to_cap(overrides)?;
+    let msgs = to_messages(messages)?;
+    // system 提示里说明工具结果的形态 ——
+    // cap-llm 没有 tool role（见 ai_tools 模块说明），工具结果是以
+    // `[工具结果]` 标记的 user 消息回灌的，模型需要知道这件事。
+    let mut msgs = msgs;
+    if let Some(first) = msgs.first_mut() {
+        if matches!(first.role, cap_llm::Role::System) {
+            first.content.push_str(
+                "\n\n你可以调用只读工具（列远端目录、读远端文件、查服务器信息、诊断连通性）\
+                 来获取真实信息。工具结果会以 [工具结果] 开头的消息形式给你。\
+                 工具调用失败时结果里会写明原因，你可以据此调整参数重试。",
+            );
+        }
+    }
+    crate::ai_tools::run_real_tool_loop(cap, &msgs, ctx).await
+}
+
+/// AI 聊天（启用工具调用）—— Tauri 命令。
+#[tauri::command]
+pub async fn ai_chat_with_tools(
+    messages: Vec<ChatMessage>,
+    overrides: Option<GenOverrides>,
+    context: Option<crate::ai_tools::ToolContext>,
+) -> Result<crate::ai_tools::ToolChatResult, String> {
+    chat_with_tools(
+        &messages,
+        &overrides.unwrap_or_default(),
+        &context.unwrap_or_default(),
+    )
+    .await
+}
+
 /// AI 聊天（非流式）
 #[tauri::command]
 pub async fn ai_chat(
