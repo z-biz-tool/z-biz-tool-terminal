@@ -497,6 +497,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap-hub"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+]
+
+[[package]]
 name = "cap-llm"
 version = "0.1.0"
 dependencies = [
@@ -6834,6 +6843,7 @@ version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "async-trait",
+ "cap-hub",
  "cap-llm",
  "chrono",
  "data-encoding",
