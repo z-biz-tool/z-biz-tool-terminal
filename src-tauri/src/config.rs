@@ -1162,8 +1162,7 @@ mod tests {
             pass
         );
         assert_eq!(
-            pass,
-            "export-pass",
+            pass, "export-pass",
             "同一台机器（同一主密钥）导入自己的导出件，密码应还原成明文可用"
         );
         assert_eq!(

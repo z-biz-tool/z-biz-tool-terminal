@@ -174,7 +174,9 @@ fn to_messages(messages: &[ChatMessage]) -> Result<Vec<Message>, String> {
 pub async fn chat(messages: &[ChatMessage], overrides: &GenOverrides) -> Result<String, String> {
     let cap = to_cap(overrides)?;
     let msgs = to_messages(messages)?;
-    let reply = cap_llm::chat(&cap, &msgs).await.map_err(|e| e.to_string())?;
+    let reply = cap_llm::chat(&cap, &msgs)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(reply.content)
 }
 
@@ -350,9 +352,7 @@ pub async fn list_llm_models() -> Result<Vec<String>, LlmFailure> {
 #[tauri::command]
 pub async fn test_ai_config() -> Result<String, LlmFailure> {
     let cap = to_cap(&GenOverrides::default()).map_err(LlmFailure::from)?;
-    let elapsed = cap_llm::ping(&cap)
-        .await
-        .map_err(LlmFailure::from_error)?;
+    let elapsed = cap_llm::ping(&cap).await.map_err(LlmFailure::from_error)?;
     Ok(format!(
         "连接成功（{} · {}），耗时 {}ms",
         cap.kind.label(),
@@ -408,11 +408,9 @@ fn hint_for(kind: ErrorKind, status: Option<u16>) -> String {
              如果你开了代理，先关掉再试；海外厂商（OpenAI / Gemini / Anthropic）相反，需要代理。"
                 .into()
         }
-        (E::Timeout, _) => {
-            "等太久没等到回应。可能是网络到该地区的链路慢，也可能是模型正在排队。\
+        (E::Timeout, _) => "等太久没等到回应。可能是网络到该地区的链路慢，也可能是模型正在排队。\
              可以先换一个更小的模型试，或把超时调大。"
-                .into()
-        }
+            .into(),
         (E::Http, Some(401)) | (E::Http, Some(403)) => {
             "API Key 无效、已过期，或这个 key 没有该模型的权限。请重新粘贴密钥；\
              若刚续费过，确认用的是新 key。"
@@ -425,20 +423,16 @@ fn hint_for(kind: ErrorKind, status: Option<u16>) -> String {
                 .into()
         }
         (E::Http, Some(429)) => {
-            "额度用尽或被限流。这不是配置写错了 —— 换个时段再试，或在服务商后台充值／提额。"
-                .into()
+            "额度用尽或被限流。这不是配置写错了 —— 换个时段再试，或在服务商后台充值／提额。".into()
         }
         (E::Http, Some(s)) if s >= 500 => {
             "服务商那边出故障了，不是你配置的问题。稍后重试即可。".into()
         }
         (E::Http, _) => "服务端拒绝了这次请求。原始错误见下方详情。".into(),
-        (E::Parse, _) => {
-            "对方回了内容，但不是预期的格式。多半是这个地址其实不是该协议的服务 —— \
-             例如把 Anthropic 的地址填在了 OpenAI 兼容这一档。".into()
-        }
-        (E::Unsupported, _) => {
-            "这家服务不支持当前操作。换一个厂商，或改用手动填写模型名。".into()
-        }
+        (E::Parse, _) => "对方回了内容，但不是预期的格式。多半是这个地址其实不是该协议的服务 —— \
+             例如把 Anthropic 的地址填在了 OpenAI 兼容这一档。"
+            .into(),
+        (E::Unsupported, _) => "这家服务不支持当前操作。换一个厂商，或改用手动填写模型名。".into(),
         (E::Io, _) => "本机读写配置出错。检查配置文件所在目录是否可写。".into(),
     }
 }
@@ -491,7 +485,10 @@ mod tests {
         assert!(matches!(provider_kind("claude"), ProviderKind::Anthropic));
         // 预设 id 是 anthropic（前端下拉直接写回它）—— 必须与 claude 走同一协议族，
         // 否则从下拉选「Anthropic」会退化成 OpenAI 兼容请求（2026-10-28）
-        assert!(matches!(provider_kind("anthropic"), ProviderKind::Anthropic));
+        assert!(matches!(
+            provider_kind("anthropic"),
+            ProviderKind::Anthropic
+        ));
         assert!(matches!(provider_kind("gemini"), ProviderKind::Gemini));
         assert!(matches!(provider_kind("ollama"), ProviderKind::Ollama));
         // 未知 provider 不许猜：落到 OpenAI 兼容并保留原字符串由 cap-llm 报错
@@ -541,8 +538,11 @@ mod tests {
 
     #[test]
     fn missing_key_fails_before_any_network() {
-        let err = build_cap(&ai("openai", "https://api.example.com", "  "), &GenOverrides::default())
-            .unwrap_err();
+        let err = build_cap(
+            &ai("openai", "https://api.example.com", "  "),
+            &GenOverrides::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("API Key"));
         let mut no_key = ai("openai", "https://api.example.com", "k");
         no_key.api_key = None;
@@ -556,9 +556,12 @@ mod tests {
         // 见 preset_supplies_address_when_base_url_is_empty。
         let e1 = build_cap(&ai("custom", " ", "k"), &GenOverrides::default()).unwrap_err();
         assert!(e1.contains("Base URL"));
-        let e2 = build_cap(&ai("custom", "https://x.com", "k"), &GenOverrides::default())
-            .map(|c| c.model)
-            .err();
+        let e2 = build_cap(
+            &ai("custom", "https://x.com", "k"),
+            &GenOverrides::default(),
+        )
+        .map(|c| c.model)
+        .err();
         assert!(e2.is_none(), "model 已填，不该报错");
         let mut no_model = ai("custom", "https://x.com", "k");
         no_model.model = Some(" ".into());
@@ -580,7 +583,11 @@ mod tests {
         assert_eq!(cap.temperature, Some(0.1));
         assert_eq!(cap.max_tokens, Some(64));
         // 无覆盖时用配置值
-        let cap2 = build_cap(&ai("openai", "https://x.com", "k"), &GenOverrides::default()).unwrap();
+        let cap2 = build_cap(
+            &ai("openai", "https://x.com", "k"),
+            &GenOverrides::default(),
+        )
+        .unwrap();
         assert_eq!(cap2.temperature, Some(0.5));
         assert_eq!(cap2.max_tokens, Some(1024));
     }
@@ -613,7 +620,14 @@ mod tests {
             assert!(!p.verified_on.is_empty(), "{} 缺核对日期", p.id);
         }
         // 国内厂商必须覆盖：terminal 用户最可能买的几家
-        for id in ["deepseek", "qwen", "moonshot", "zhipu", "volcengine", "minimax"] {
+        for id in [
+            "deepseek",
+            "qwen",
+            "moonshot",
+            "zhipu",
+            "volcengine",
+            "minimax",
+        ] {
             assert!(all.iter().any(|p| p.id == id), "缺国内预设 {}", id);
         }
         let ollama = all.iter().find(|p| p.id == "ollama").unwrap();
