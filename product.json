@@ -1,0 +1,16 @@
+{
+  "id": "terminal",
+  "displayName": "SSH/SFTP 终端管理器",
+  "description": "对标 Tabby / Termius / Xshell",
+  "acceptsDeepLink": true,
+  "actions": [
+    "open",
+    "connect"
+  ],
+  "keywords": [
+    "终端",
+    "SSH",
+    "SFTP",
+    "远程"
+  ]
+}
