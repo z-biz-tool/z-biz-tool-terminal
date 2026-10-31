@@ -15,7 +15,7 @@
 
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import { needsApiKey } from 'z-biz-tool-shared/ai';
+import { needsApiKey } from 'z-biz-tool-shared/ai/endpoint';
 import type { AIConfig, AIProvider, PresetView } from '../types/ai';
 
 export const DEFAULT_AI_CONFIG: AIConfig = {

@@ -29,7 +29,7 @@ import {
 } from "@ant-design/icons";
 import type { AIMessage, AIConfig, AIToolCall, LlmFailure } from "../types/ai";
 import { useAIStore, applyPreset, isAIConfigured } from '../stores/aiStore';
-import { needsApiKey } from 'z-biz-tool-shared/ai';
+import { needsApiKey } from 'z-biz-tool-shared/ai/endpoint';
 import { useServerStore } from "../stores/serverStore";
 import { pickActiveSession } from "../utils/session";
 import { createAIClient } from "../services/aiClient";
