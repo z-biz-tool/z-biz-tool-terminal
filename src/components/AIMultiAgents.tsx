@@ -24,7 +24,7 @@ interface AIMultiAgentsProps {
 
 export default function AIMultiAgents({ open, onClose }: AIMultiAgentsProps) {
   const { token } = theme.useToken();
-  const { config } = useAIStore();
+  const { config, presets } = useAIStore();
   const [loading, setLoading] = useState(false);
   // 任务描述由面板自己收：以前从 App 传进来的是硬编码空串，"开始协作"永远点不动
   const [task, setTask] = useState("");
@@ -46,7 +46,7 @@ export default function AIMultiAgents({ open, onClose }: AIMultiAgentsProps) {
   }, [open]);
 
   const runMultiAgentTask = async () => {
-    if (!task.trim() || !isAIConfigured(config)) {
+    if (!task.trim() || !isAIConfigured(config, presets)) {
       message.warning("请输入任务描述并配置 API Key");
       return;
     }
@@ -162,7 +162,7 @@ export default function AIMultiAgents({ open, onClose }: AIMultiAgentsProps) {
             icon={<TeamOutlined />}
             onClick={runMultiAgentTask}
             loading={loading}
-            disabled={!task.trim() || !isAIConfigured(config)}
+            disabled={!task.trim() || !isAIConfigured(config, presets)}
             style={{ minWidth: "200px" }}
           >
             {loading ? "智能体协作中..." : "开始多智能体协作"}

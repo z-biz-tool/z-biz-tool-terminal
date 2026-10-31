@@ -15,7 +15,7 @@ interface AIGitCommitProps {
 }
 
 export default function AIGitCommit({ open, onClose, diff }: AIGitCommitProps) {
-  const { config } = useAIStore();
+  const { config, presets } = useAIStore();
   const [loading, setLoading] = useState(false);
   const [diffText, setDiffText] = useState(diff);
   const [commitMessage, setCommitMessage] = useState("");
@@ -30,7 +30,7 @@ export default function AIGitCommit({ open, onClose, diff }: AIGitCommitProps) {
   }, [open, diff]);
 
   const generateCommitMessage = async () => {
-    if (!diffText.trim() || !isAIConfigured(config)) {
+    if (!diffText.trim() || !isAIConfigured(config, presets)) {
       message.warning("请粘贴 diff 内容并配置 API Key");
       return;
     }
@@ -137,7 +137,7 @@ export default function AIGitCommit({ open, onClose, diff }: AIGitCommitProps) {
             icon={<GitlabOutlined />}
             onClick={generateCommitMessage}
             loading={loading}
-            disabled={!diffText.trim() || !isAIConfigured(config)}
+            disabled={!diffText.trim() || !isAIConfigured(config, presets)}
             style={{ minWidth: "200px" }}
           >
             {loading ? "生成提交信息中..." : "生成提交信息"}

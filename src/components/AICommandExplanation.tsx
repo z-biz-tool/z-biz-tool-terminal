@@ -15,13 +15,13 @@ interface AICommandExplanationProps {
 
 export default function AICommandExplanation({ open, onClose, command }: AICommandExplanationProps) {
   const { token } = theme.useToken();
-  const { config } = useAIStore();
+  const { config, presets } = useAIStore();
   const [loading, setLoading] = useState(false);
   const [explanation, setExplanation] = useState<CommandExplanation | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (open && command && isAIConfigured(config)) {
+    if (open && command && isAIConfigured(config, presets)) {
       setLoading(true);
       setExplanation(null);
       setError(null);
@@ -39,7 +39,7 @@ export default function AICommandExplanation({ open, onClose, command }: AIComma
           setLoading(false);
         });
     }
-  }, [open, command, isAIConfigured(config)]);
+  }, [open, command, isAIConfigured(config, presets)]);
 
   if (!open) return null;
 

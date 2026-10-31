@@ -24,7 +24,7 @@ interface CodeSuggestion {
 }
 
 export default function AICodeEditor({ open, onClose, code, language, onCodeUpdated }: AICodeEditorProps) {
-  const { config } = useAIStore();
+  const { config, presets } = useAIStore();
   const [editCode, setEditCode] = useState(code);
   const [suggestions, setSuggestions] = useState<CodeSuggestion[]>([]);
   const [loading, setLoading] = useState(false);
@@ -39,7 +39,7 @@ export default function AICodeEditor({ open, onClose, code, language, onCodeUpda
 
   const generateSuggestions = async () => {
     // 分析对象用编辑区的内容：原来读的是外部 code 属性，用户在编辑区改了什么都不生效
-    if (!editCode.trim() || !isAIConfigured(config)) {
+    if (!editCode.trim() || !isAIConfigured(config, presets)) {
       message.warning("请输入代码并配置 API Key");
       return;
     }
@@ -151,7 +151,7 @@ export default function AICodeEditor({ open, onClose, code, language, onCodeUpda
                   icon={<BulbOutlined />}
                   onClick={generateSuggestions}
                   loading={loading}
-                  disabled={!editCode.trim() || !isAIConfigured(config)}
+                  disabled={!editCode.trim() || !isAIConfigured(config, presets)}
                 >
                   {loading ? "生成建议中..." : "生成改进建议"}
                 </Button>

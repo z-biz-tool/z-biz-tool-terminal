@@ -28,7 +28,8 @@ import {
   ToolOutlined,
 } from "@ant-design/icons";
 import type { AIMessage, AIConfig, AIToolCall, LlmFailure } from "../types/ai";
-import { useAIStore, applyPreset, isAIConfigured } from "../stores/aiStore";
+import { useAIStore, applyPreset, isAIConfigured } from '../stores/aiStore';
+import { needsApiKey } from 'z-biz-tool-shared/ai';
 import { useServerStore } from "../stores/serverStore";
 import { pickActiveSession } from "../utils/session";
 import { createAIClient } from "../services/aiClient";
@@ -113,7 +114,7 @@ function ToolCallTrace({ calls }: { calls: AIToolCall[] }) {
 }
 
 export default function AIChatModal({ open, onClose }: AIChatModalProps) {
-  const { config, updateConfig } = useAIStore();
+  const { config, updateConfig, presets } = useAIStore();
   const [messages, setMessages] = useState<AIMessage[]>([]);
   const [input, setInput] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
@@ -169,8 +170,21 @@ export default function AIChatModal({ open, onClose }: AIChatModalProps) {
     if (!input.trim() || isGenerating) return;
 
     // 如果 AI 还没配置好，提示去设置
-    if (!isAIConfigured(config)) {
-      message.warning("请先在设置中配置 API Key");
+    if (!isAIConfigured(config, presets)) {
+      // 提示语要说清「缺什么」—— 对本地网关说「配置 API Key」是错的：
+      // 它缺的是地址和模型，不是密钥。
+      const preset = presets.find(
+        (p) => p.id === config.provider || p.aliases.includes(config.provider),
+      );
+      const needsKey = needsApiKey(
+        preset ? preset.requires_api_key : undefined,
+        config.baseUrl,
+      );
+      message.warning(
+        needsKey
+          ? "请先在设置中配置 API Key"
+          : "请先在设置中填写 AI 服务地址与模型",
+      );
       setShowSettings(true);
       return;
     }
@@ -519,14 +533,30 @@ function AISettingsForm({ config, onSave, onClose }: { config: AIConfig; onSave:
   const currentPreset = presets.find(
     (p) => p.id === formData.provider || p.aliases.includes(formData.provider),
   );
-  // 是否需要密钥：Ollama 这类本地服务不需要（需隐藏密钥框）
-  const requiresKey = currentPreset ? currentPreset.requires_api_key : formData.provider !== "ollama";
+  // 是否需要密钥：与后端 cap-llm 的 `needs_api_key()` 严格同序。
+  //
+  // 2026-10-31 修：此前这里是 `currentPreset ? currentPreset.requires_api_key
+  // : formData.provider !== "ollama"` —— 只认 ollama 一个硬编码值，
+  // 于是「zbiz-local 预设」和「直接粘 mini 地址」两种本地网关场景
+  // 仍被要求填密钥，而后端放行 ⇒ 判据分裂（界面逼你填一个无处可用的 Key）。
+  //
+  // 现在交给 shared 的 `needsApiKey()`，它是 Rust `is_private_endpoint()` 的镜像。
+  const requiresKey = needsApiKey(
+    currentPreset ? currentPreset.requires_api_key : undefined,
+    formData.baseUrl,
+  );
   const hasSavedKey = config.hasApiKey === true || Boolean(config.apiKey);
-  // 已保存配置是否可测：有 key，或该服务本来免密钥（按 id 或别名匹配，兼容历史值 claude）
+  // 已保存配置是否可测：有 key，或该服务本来免密钥
+  // （按 id 或别名匹配，兼容历史值 claude；判据同上，与后端同序）
+  const savedPreset = presets.find(
+    (p) => p.id === config.provider || p.aliases.includes(config.provider),
+  );
   const savedConfigured =
     hasSavedKey ||
-    presets.find((p) => p.id === config.provider || p.aliases.includes(config.provider))
-      ?.requires_api_key === false;
+    !needsApiKey(
+      savedPreset ? savedPreset.requires_api_key : undefined,
+      config.baseUrl,
+    );
 
   // 改动判定：只比用户可编辑字段（hasApiKey 等派生字段不算）
   const dirty =

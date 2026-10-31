@@ -14,7 +14,7 @@ interface AINaturalLanguageCommandProps {
 
 export default function AINaturalLanguageCommand({ open, onClose, onCommandGenerated }: AINaturalLanguageCommandProps) {
   const { token } = theme.useToken();
-  const { config } = useAIStore();
+  const { config, presets } = useAIStore();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [generatedCommand, setGeneratedCommand] = useState<string | null>(null);
@@ -29,7 +29,7 @@ export default function AINaturalLanguageCommand({ open, onClose, onCommandGener
   const handleGenerate = async () => {
     if (!input.trim()) return;
 
-    if (!isAIConfigured(config)) {
+    if (!isAIConfigured(config, presets)) {
       message.warning("请先在设置中配置 API Key");
       onClose();
       return;

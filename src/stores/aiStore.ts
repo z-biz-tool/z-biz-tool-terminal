@@ -15,6 +15,7 @@
 
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { needsApiKey } from 'z-biz-tool-shared/ai';
 import type { AIConfig, AIProvider, PresetView } from '../types/ai';
 
 export const DEFAULT_AI_CONFIG: AIConfig = {
@@ -58,10 +59,50 @@ export function applyPreset(
  * 2026-10-26 起 apiKey 是**脱敏视图**（恒空串），明文不再回传前端 ——
  * 判「已配置」用后端的 hasApiKey 布尔。hasApiKey 缺省（测试数据、未加载）
  * 时退回看 apiKey 本身，语义兼容。
+ *
+ * ## 2026-10-31：判据与后端对齐（本地网关免密钥）
+ *
+ * 此前只看「有没有 key」⇒ 指向本地网关（`zbiz-local` 预设，或直接粘
+ * mini 的 `http://192.168.x.x:8200/v1`）的用户，AI 入口全被挡住，
+ * 提示「请先在设置中配置 API Key」—— 而设置页里后端**根本不要求**填 Key
+ * （cap-llm 的 `needs_api_key()` 放行私网地址）。
+ *
+ * 于是出现判据分裂：后端放行、前端拦下。用户看到的是「本地网关配了却用不了」，
+ * 且**没有任何编译错误**能暴露它。
+ *
+ * 现在判据与 Rust 侧 `LlmConfig::needs_api_key()` 严格同序：
+ * ① 预设登记为免 Key → 免；② 预设登记为要 Key → 要（哪怕地址是本机）；
+ * ③ 没匹配到预设 → 看地址，私网免、公网要。
+ *
+ * 私网判定复用 shared 包的 `needsApiKey()`，它是 Rust `is_private_endpoint()`
+ * 的逐条镜像 —— 不在本仓另写一份（两处各写各的必然漂移）。
  */
-export function isAIConfigured(config: AIConfig): boolean {
+export function isAIConfigured(config: AIConfig, presets: PresetView[] = []): boolean {
+  const preset = presets.find(
+    (p) => p.id === config.provider || p.aliases.includes(config.provider),
+  );
+  // 匹配到预设：按预设的登记（显式声明优先于地址猜测）
+  //
+  // 注意语义方向：`needsApiKey` 回答的是「**要不要** Key」，
+  // 这里问的是「**是不是**配置好了」—— 两者相反，不能直接 return。
+  if (preset) return !needsApiKey(preset.requires_api_key, config.baseUrl);
+  // 没匹配到预设（自定义服务）：有 key 就算配置好了；
+  // 没 key 时看地址 —— 私网上的自建服务没有鉴权层
   if (config.hasApiKey !== undefined) return config.hasApiKey;
-  return Boolean(config.apiKey);
+  if (config.apiKey) return true;
+  return !needsApiKey(undefined, config.baseUrl);
+}
+
+/**
+ * 从 store 里取「AI 是否已配置到可用」的结论。
+ *
+ * 组件一律用这个 hook，别自己拼 `isAIConfigured(config)` ——
+ * 漏传 presets 就会退回旧行为（只看 key），本地网关用户又��被挡住。
+ */
+export function useAIConfigured(): boolean {
+  const config = useAIStore((s) => s.config);
+  const presets = useAIStore((s) => s.presets);
+  return isAIConfigured(config, presets);
 }
 
 interface TerminalAIStore {

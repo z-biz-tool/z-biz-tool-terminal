@@ -15,13 +15,13 @@ interface AIErrorAnalysisProps {
 
 export default function AIErrorAnalysis({ open, onClose, error }: AIErrorAnalysisProps) {
   const { token } = theme.useToken();
-  const { config } = useAIStore();
+  const { config, presets } = useAIStore();
   const [loading, setLoading] = useState(false);
   const [analysis, setAnalysis] = useState<ErrorAnalysis | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
 
   useEffect(() => {
-    if (open && error && isAIConfigured(config)) {
+    if (open && error && isAIConfigured(config, presets)) {
       setLoading(true);
       setAnalysis(null);
       setErrorText(null);
@@ -39,7 +39,7 @@ export default function AIErrorAnalysis({ open, onClose, error }: AIErrorAnalysi
           setLoading(false);
         });
     }
-  }, [open, error, isAIConfigured(config)]);
+  }, [open, error, isAIConfigured(config, presets)]);
 
   if (!open) return null;
 
