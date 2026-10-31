@@ -772,15 +772,15 @@ mod tests {
         let cap = build_cap(&conf, &GenOverrides::default()).expect("免 Key 的本地网关必须通过");
         assert!(!cap.needs_api_key(), "私有地址不该要求 key");
 
-        let reply = cap_llm::chat(
-            &cap,
-            &[Message::user("用一句话介绍你自己，不超过30字。")],
-        )
-        .await
-        .expect("真实调用失败");
+        let reply = cap_llm::chat(&cap, &[Message::user("用一句话介绍你自己，不超过30字。")])
+            .await
+            .expect("真实调用失败");
         assert!(!reply.content.trim().is_empty(), "返回为空（网关 {gw}）");
         assert!(
-            reply.content.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+            reply
+                .content
+                .chars()
+                .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
             "应返回中文，实际：{}",
             reply.content
         );
