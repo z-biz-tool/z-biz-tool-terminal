@@ -64,7 +64,7 @@ jobs:
         run: New-Item -ItemType Junction -Path "$env:GITHUB_WORKSPACE\..\z-biz-tool-capability" -Target "$env:GITHUB_WORKSPACE\.capability" | Out-Null
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
 
