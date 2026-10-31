@@ -104,12 +104,6 @@ pub fn to_cap(overrides: &GenOverrides) -> Result<LlmConfig, String> {
 }
 
 fn build_cap(ai: &AiConfig, overrides: &GenOverrides) -> Result<LlmConfig, String> {
-    let key = ai
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| "AI 未配置：请先在 AI 设置里填写 API Key".to_string())?;
     // 先认预设 —— 选了「DeepSeek」这类已知厂商时，地址可以不填，
     // 由 cap-llm 用预设里的服务地址兜底（用户手抄地址容易抄错，
     // 抄错一个字符就是 404，而报错只说「404」）。
@@ -134,16 +128,25 @@ fn build_cap(ai: &AiConfig, overrides: &GenOverrides) -> Result<LlmConfig, Strin
     let temperature = overrides.temperature.or(ai.temperature).unwrap_or(0.7);
     let max_tokens = overrides.max_tokens.or(ai.max_tokens).unwrap_or(2048);
 
-    Ok(LlmConfig {
+    let cap = LlmConfig {
         kind: provider_kind(&ai.provider),
         base_url: base_url.unwrap_or_default().to_string(),
-        api_key: key.to_string(),
+        api_key: ai.api_key.as_deref().unwrap_or("").trim().to_string(),
         model: model.to_string(),
         timeout: CHAT_TIMEOUT,
         temperature: Some(temperature as f32),
         max_tokens: Some(max_tokens),
         preset,
-    })
+    };
+
+    // 要不要 key 交给 cap-llm 判：预设说免就免，私网/回环地址也免。
+    // 2026-10-31 修：此前无条件 `ok_or("请先填写 API Key")`，于是选了
+    // 「zBiz 本地网关」的用户在 AI 设置里填好地址模型后，仍然被这个
+    // 前置检查挡住 —— 本地服务端根本没有鉴权层，用户只能编个假密钥。
+    if cap.needs_api_key() && cap.api_key.is_empty() {
+        return Err("AI 未配置：请先在 AI 设置里填写 API Key".to_string());
+    }
+    Ok(cap)
 }
 
 /// 前端消息 → cap-llm 消息。未知 role 不许静默当 user。
@@ -742,5 +745,45 @@ mod tests {
             let hint = hint_for(kind, status);
             assert!(!hint.contains("sk-"), "提示里出现了疑似密钥：{}", hint);
         }
+    }
+
+    // ==================== 真实网关直连 ====================
+
+    /// `build_cap` 在**不填 API Key** 时应放行私有地址（未设 `ZBIZ_GW` 时静默跳过）。
+    ///
+    /// terminal 的 AI 出口是 `build_cap → cap_llm::chat(_stream)`，`load_config()`
+    /// 依赖本机配置文件，测试里直接构造 `AiConfig` 走同一个 `build_cap`，
+    /// 从而验证「配置翻译 + 免 Key 判定 + 真实请求」三件事都不假手前端。
+    ///
+    /// ```sh
+    /// ZBIZ_GW=http://192.168.31.249:8200/v1 ZBIZ_MODEL=zBiz-Text-35B \
+    ///   cargo test -p z-biz-tool-terminal live_zbiz -- --nocapture
+    /// ```
+    #[tokio::test]
+    async fn live_zbiz_gateway_accepts_keyless_and_replies() {
+        let Ok(gw) = std::env::var("ZBIZ_GW") else {
+            return;
+        };
+        let model = std::env::var("ZBIZ_MODEL").unwrap_or_else(|_| "zBiz-Text-35B".to_string());
+        let mut conf = ai("custom", &gw, "");
+        conf.api_key = None; // 本地网关没有鉴权层
+        conf.model = Some(model);
+
+        let cap = build_cap(&conf, &GenOverrides::default()).expect("免 Key 的本地网关必须通过");
+        assert!(!cap.needs_api_key(), "私有地址不该要求 key");
+
+        let reply = cap_llm::chat(
+            &cap,
+            &[Message::user("用一句话介绍你自己，不超过30字。")],
+        )
+        .await
+        .expect("真实调用失败");
+        assert!(!reply.content.trim().is_empty(), "返回为空（网关 {gw}）");
+        assert!(
+            reply.content.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+            "应返回中文，实际：{}",
+            reply.content
+        );
+        println!("[terminal → {gw}] {}", reply.content.trim());
     }
 }
