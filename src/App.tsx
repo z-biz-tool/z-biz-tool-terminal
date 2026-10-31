@@ -44,6 +44,14 @@ import { activeRecentOutput, activeSelection, feedActiveTerminal } from "./servi
 import { useServerStore } from "./stores/serverStore";
 import { AppShell, ThemeProvider, EmptyState, AppErrorBoundary, PanelErrorBoundary } from "@/_shared";
 import { auditEvent } from "./services/auditLog";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { startDeepLinkReceiver, ZBIZ_TAKE_PENDING } from "z-biz-tool-shared/protocol";
+import {
+  resolveTerminalDeepLink,
+  pickServerForDeepLink,
+  type HandoffItem,
+} from "./_shared/deepLink";
 import { commandGuard } from "./utils/commandGuard";
 import { attemptKey } from "./utils/reconnectPolicy";
 import {
@@ -182,6 +190,86 @@ function AppInner() {
     if (!loaded) loadConfig();
     // AI 配置不属于 serverStore, 单独从后端拉一次(否则重启后回到默认值)
     void useAIStore.getState().loadFromStorage();
+  }, []);
+
+  // 家族深链（zbiz://terminal/connect?host=…）：box 等产品递过来的连接请求。
+  //
+  // 机制（冷启动补取 + zbiz-open 监听 + 不静默吞掉）在共享层 startDeepLinkReceiver，
+  // 本仓只提供语义：resolveTerminalDeepLink 决定「要连哪台服务器」，
+  // pickServerForDeepLink 决定「在已保存列表里是哪一台」。
+  //
+  // 时序坑：服务器列表是异步从后端读的（见上面的 loadConfig）。
+  // 深链在冷启动时到达，列表很可能还没就绪 —— 直接查会得到「找不到这台服务器」。
+  // 所以先记下待连接的标识，等配置加载完再落地（下面那个 effect）。
+  const [pendingDeepLink, setPendingDeepLink] = useState<{
+    serverId: string | null;
+    serverName: string | null;
+    host: string | null;
+    port: number | null;
+  } | null>(null);
+
+  // 服务器列表就绪后落地待连接的深链。
+  useEffect(() => {
+    if (!pendingDeepLink) return;
+    // 配置还没加载出来时先等等 —— loaded 为 false 说明 get_config 还没回来。
+    // 加载失败时 loaded 也会变 true（走 configError 分支），那时下面会报「找不到」，
+    // 而不是永远等下去。
+    if (!loaded) return;
+
+    const outcome = {
+      ...pendingDeepLink,
+      from: null,
+      problem: null,
+    };
+    const picked = pickServerForDeepLink(servers, outcome);
+
+    setPendingDeepLink(null);
+
+    if (!picked.server) {
+      const asked = pendingDeepLink.serverName ?? pendingDeepLink.host ?? pendingDeepLink.serverId ?? "";
+      message.warning(picked.problem ?? `找不到要连接的服务器：${asked}`);
+      return;
+    }
+    const server = picked.server;
+    void useServerStore.getState().connectServer(server).then((res) => {
+      if (res.success) {
+        message.success(`已连接到 ${server.name}`);
+        auditEvent("deeplink_connect", { server: server.name, host: server.host, source: "deep_link" });
+      } else {
+        message.warning(`连接 ${server.name} 失败：${res.error ?? "未知错误"}`);
+      }
+    });
+  }, [loaded, servers, pendingDeepLink]);
+
+  useEffect(() => {
+    const stop = startDeepLinkReceiver({
+      productId: "terminal",
+      invoke: () => invoke<HandoffItem[]>(ZBIZ_TAKE_PENDING),
+      listen: (event, handler) => listen(event, handler),
+      translate: (item) => {
+        const out = resolveTerminalDeepLink(item);
+        if (!out.serverId && !out.serverName && !out.host) {
+          return { ok: false, problem: out.problem ?? "深链里没有要连接的服务器" };
+        }
+        return {
+          ok: true,
+          effect: { id: out.serverId, name: out.serverName, host: out.host, port: out.port },
+        };
+      },
+      onProblem: (msg) => {
+        console.warn("[terminal] 深链:", msg);
+        message.warning(msg);
+      },
+      onEffect: (effect) => {
+        setPendingDeepLink({
+          serverId: (effect.id as string | null) ?? null,
+          serverName: (effect.name as string | null) ?? null,
+          host: (effect.host as string | null) ?? null,
+          port: (effect.port as number | null) ?? null,
+        });
+      },
+    });
+    return stop;
   }, []);
 
   // 时钟更新
