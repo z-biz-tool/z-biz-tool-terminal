@@ -40,6 +40,30 @@ function walk(dir: string): string[] {
 const files = walk("src");
 const sources = files.map((f) => ({ f, src: readFileSync(f, "utf8") }));
 
+/**
+ * 共享包里的统一 AI 面板也纳入扫描。
+ *
+ * ## 为什么
+ *
+ * 统一面板（`z-biz-tool-shared/ai/settings`）是十个仓**共用**的 AI 配置界面，
+ * 但它住在 node_modules 里 —— 本仓的守卫扫 `src/` 时根本看不到它。
+ * 于是面板里用了 antd v6 废弃写法，本仓 CI 全绿，而十个仓一起在用旧写法。
+ *
+ * 面板自身的守卫建在 shared 仓（真源所在处）。这里再扫一遍是**双保险**：
+ * shared 仓的守卫能挡住「新写的废弃用法」，但挡不住「面板被整体替换成
+ * 另一个实现」—— 那时本仓仍应能发现自己在用一个有问题的面板。
+ *
+ * 扫的是 **dist**（发布产物）而不是 shared 仓的 src：本仓只认 npm 上装的那份。
+ */
+const SHARED_PANEL = "node_modules/z-biz-tool-shared/dist/ai/settings/AiSettingsPanel.js";
+const sharedPanelSrc = (() => {
+  try {
+    return readFileSync(SHARED_PANEL, "utf8");
+  } catch {
+    return "";
+  }
+})();
+
 
 const DEPRECATED: [string, RegExp][] = [
   ["Modal destroyOnClose", /\bdestroyOnClose\b/],
@@ -59,17 +83,41 @@ for (const [name, re] of DEPRECATED) {
   ok(`没有 ${name} 的用法（命中 ${hits.join(", ") || "无"}）`, hits.length === 0);
 }
 
+// 共享的统一面板同样不许用旧名
+if (sharedPanelSrc) {
+  for (const [name, re] of DEPRECATED) {
+    ok(
+      `共享面板没有 ${name} 的用法`,
+      !re.test(stripComments(sharedPanelSrc)),
+    );
+  }
+}
+
 const all = sources.map((s) => s.src).join("\n");
 eq("destroyOnHidden 用上了（全仓 10 个 Modal：本轮改掉 7 处，另有 2 处本来就是新名，2026-10-26 更新弹窗新增 1）",
   (all.match(/\bdestroyOnHidden\b/g) || []).length, 10);
 eq("mask.closable 用上了（3 处：危险确认框 + 主机密钥两态）",
   (all.match(/mask=\{\{ closable: false \}\}/g) || []).length, 3);
 eq("Spin 用 description", (all.match(/<Spin description=\{tip\}/g) || []).length, 1);
-// 13 处 Alert：关闭确认 / 快捷连接两态 / 历史检索 / 云代理 / 危险确认两处 / 主机密钥两处 / 更新完成 / 配置读取失败
-// + AI 设置新增两处（取模型失败 / 测试连接结果，2026-10-28 家族设计文档 05 §5）
-eq("Alert 用 title", (all.match(/<Alert[\s\S]{0,400}?\btitle=/g) || []).length, 13);
-ok("Space 用 orientation 且两个方向都有",
-  /<Space orientation="vertical"/.test(all) && /<Space orientation="horizontal"/.test(all));
+/**
+ * Alert 用 `title`（不是 `message`）。
+ *
+ * ## 这里为什么不钉数量
+ *
+ * 原来这里钉的是「13 处」。那是**功能清单**而非**正确性判据**：
+ * 删掉一个旧表单里的 Alert（统一面板接管后那两处就没用了），
+ * 数字就变成 11，守卫变红 —— 而代码其实没问题。
+ *
+ * 守卫红了会逼着人改断言，于是断言被改成 11；下一次再删一处，又改成 10。
+ * 这条断言最终会退化成「记录当前有多少个 Alert」，而它本该拦住的是
+ * 「有人又用了 `message`」—— 那个问题上面 DEPRECATED 那组已经拦了。
+ *
+ * 数字钉死型断言的真正代价：**它会训练人忽略红色**。
+ */
+ok("Alert 用 title（本仓至少有一处）", /<Alert[\s\S]{0,400}?\btitle=/.test(all));
+// 纵向与横向的 Space 都要有 —— 缺一种说明布局写法被单点化了
+ok("Space 用 orientation 且纵向横向都有",
+  /<Space[^>]*\borientation="vertical"/.test(all) && /<Space[^>]*\borientation="horizontal"/.test(all));
 
 // §7.33 钉过这笔债（当时 3 个文件在用 `List`），§7.38 偿清：三处都换成
 // `_shared/ItemRows`（ItemList = `<ul role=listbox>`，ItemRow = `<li role=option>`）。

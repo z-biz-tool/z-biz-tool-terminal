@@ -4,6 +4,7 @@ mod audit;
 mod commands;
 mod config;
 mod hostkeys;
+mod llm_shared;
 mod paths;
 mod redact;
 mod secret;
@@ -106,6 +107,16 @@ pub fn run() {
             // 失败不阻断启动: 明文仍可照常读取使用。
             if let Err(e) = config::harden_storage() {
                 eprintln!("存储加固未完成, 本次按现状继续运行: {}", e);
+            }
+            // 家族统一 AI 配置迁移（2026-11-01）：把本仓老配置搬进
+            // `~/.z-biz-tool/llm/config.json` + OS 密钥库。
+            //
+            // 幂等：统一落点已有配置时什么也不做，所以每次启动调用都安全。
+            // 失败不阻断启动 —— 迁移只是搬迁，用户没迁之前本仓的老配置仍可用。
+            match llm_shared::migrate_legacy() {
+                Ok(Some(from)) => eprintln!("已把 {} 的 AI 配置迁移到家族统一位置", from),
+                Ok(None) => {}
+                Err(e) => eprintln!("AI 配置迁移未完成, 本次按现状继续运行: {}", e),
             }
             Ok(())
         })

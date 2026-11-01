@@ -40,3 +40,6 @@ data-encoding = "2"
 aes-gcm = "0.10.3"
 # 能力共享层：协议/鉴权/SSE/脱敏统一在 cap-llm，terminal 不再自建请求代码
 cap-llm = { path = "../../z-biz-tool-capability/crates/cap-llm" }
+# 家族统一 LLM 配置存储：配置落 ~/.z-biz-tool/llm/config.json，
+# 密钥进 OS 密钥库（service="z-biz-tool"，跨应用共享同一条目）。
+cap-llm-config = { path = "../../z-biz-tool-capability/crates/cap-llm-config" }

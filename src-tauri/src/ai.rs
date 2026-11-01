@@ -20,10 +20,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use cap_llm::{Delta, ErrorKind, LlmConfig, LlmError, Message, ProviderKind};
+use cap_llm::{Delta, LlmConfig, Message, ProviderKind};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{load_config, AiConfig};
+use crate::config::AiConfig;
 
 /// 聊天超时。解释命令 / 分析报错的回答可能较长，60s 不够。
 const CHAT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -95,11 +95,28 @@ pub struct GenOverrides {
     pub max_tokens: Option<u32>,
 }
 
-/// 从全局配置 + 本次覆盖拼 cap-llm 配置。key 从 Rust 加密区解出，前端不经手。
+/// 从全局配置 + 本次覆盖拼 cap-llm 配置。key 从 OS 密钥库解出，前端不经手。
+///
+/// 2026-11-01 起真源是家族统一落点（`~/.z-biz-tool/llm/config.json` +
+/// 密钥库），见 `llm_shared.rs`。
 pub fn to_cap(overrides: &GenOverrides) -> Result<LlmConfig, String> {
-    let ai = load_config()
-        .ai
-        .ok_or_else(|| "AI 未配置：请先在 AI 设置里填写接口信息".to_string())?;
+    let (cfg, api_key) = crate::llm_shared::read_shared_config_with_key()?;
+    let ai = AiConfig {
+        provider: if cfg.preset.is_empty() {
+            cfg.provider.clone()
+        } else {
+            cfg.preset.clone()
+        },
+        api_key: if api_key.trim().is_empty() {
+            None
+        } else {
+            Some(api_key)
+        },
+        base_url: Some(cfg.base_url.clone()),
+        model: Some(cfg.model.clone()),
+        temperature: cfg.temperature.map(|t| t as f64),
+        max_tokens: cfg.max_tokens,
+    };
     build_cap(&ai, overrides)
 }
 
@@ -377,28 +394,36 @@ fn rank_models(mut models: Vec<String>) -> Vec<String> {
 
 /// 列出该配置可用的模型。
 ///
-/// ⚠️ terminal 与 file 的一个关键差异（家族设计文档 05 §5.4）：
-/// **apiKey 不出 webview**（`get_ai_config` 回传的永远是脱敏视图），所以
-/// 「获取模型列表」只能读**已保存的配置**，不能用表单草稿。这意味着用户
-/// 必须先把新配置「保存」一次，再回来点这个按钮 —— 界面会如实写
-/// 「基于已保存的配置」，不假装草稿可测。
+/// ## 草稿覆盖（2026-11-01）
+///
+/// 传 `override_config` 时用它而不是已保存配置 —— 用户在统一面板里
+/// 填完 Key 就能直接拉模型列表，不必先点一次「保存」。
+///
+/// 不传时读已保存配置（兼容原有调用）。
 #[tauri::command]
-pub async fn list_llm_models() -> Result<Vec<String>, LlmFailure> {
-    let cap = to_cap(&GenOverrides::default()).map_err(LlmFailure::from)?;
+pub async fn list_llm_models(
+    override_config: Option<crate::config::AiConfig>,
+) -> Result<Vec<String>, LlmFailure> {
+    let cap = build_cap_for(override_config, &GenOverrides::default()).map_err(LlmFailure::from)?;
     let models = cap_llm::list_models(&cap)
         .await
         .map_err(LlmFailure::from_error)?;
     Ok(rank_models(models))
 }
 
-/// 测试已保存的 AI 配置是否可用。
+/// 测试 AI 配置是否可用。
 ///
-/// 同样读**已保存配置**（理由同上）：ping 一个 `max_tokens=1` 的真实对话，
-/// 能拿到回复 ⇒ key、地址、模型三项全对。不用 `/models` 探活 —— 很多自建
-/// 代理不实现这个接口，用它测会把「服务好的，只是没这个 API」误报成「连不上」。
+/// ## 草稿覆盖（2026-11-01）
+///
+/// 同 `list_llm_models`：传 `override_config` 就用草稿。
+/// ping 一个 `max_tokens=1` 的真实对话，能拿到回复 ⇒ key、地址、模型三项全对。
+/// 不用 `/models` 探活 —— 很多自建代理不实现这个接口，
+/// 用它测会把「服务好的，只是没这个 API」误报成「连不上」。
 #[tauri::command]
-pub async fn test_ai_config() -> Result<String, LlmFailure> {
-    let cap = to_cap(&GenOverrides::default()).map_err(LlmFailure::from)?;
+pub async fn test_ai_config(
+    override_config: Option<crate::config::AiConfig>,
+) -> Result<String, LlmFailure> {
+    let cap = build_cap_for(override_config, &GenOverrides::default()).map_err(LlmFailure::from)?;
     let elapsed = cap_llm::ping(&cap).await.map_err(LlmFailure::from_error)?;
     Ok(format!(
         "连接成功（{} · {}），耗时 {}ms",
@@ -408,105 +433,41 @@ pub async fn test_ai_config() -> Result<String, LlmFailure> {
     ))
 }
 
+/// 拼 cap 配置：优先用草稿覆盖，没有就用已保存的。
+///
+/// 草稿里的 `api_key` 为空时**继承已保存的密钥** —— 统一面板不回显密钥，
+/// 用户改个模型名再点「测试」是常态，那种情况下密钥框本来就是空的。
+fn build_cap_for(
+    override_config: Option<crate::config::AiConfig>,
+    overrides: &GenOverrides,
+) -> Result<LlmConfig, String> {
+    match override_config {
+        Some(mut ai) => {
+            if ai
+                .api_key
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                // 草稿没填密钥 → 用统一落点里已存的那份
+                ai.api_key = crate::llm_shared::read_shared_config_with_key()
+                    .ok()
+                    .map(|(_, k)| k)
+                    .filter(|k| !k.trim().is_empty());
+            }
+            build_cap(&ai, overrides)
+        }
+        None => to_cap(overrides),
+    }
+}
+
 /// 给界面的结构化失败。
 ///
-/// ## 为什么不是 `Result<_, String>`
-///
-/// 字符串错误只能被「读」不能被「判断」。界面要给出的恰恰是判断：
-/// 401 该聚焦密钥框、404 该提示地址、429 该说「这不是你的配置问题」。
-/// 靠正则去猜 `HTTP 401 — ...` 里的数字，等于把协议塞进文案里，
-/// 哪天文案改一个字（比如加个中文破折号），分流就静默失效 ——
-/// 而失效的表现是「所有错误都显示同一句话」，没人会当成 bug 报上来。
-#[derive(Debug, Serialize)]
-pub struct LlmFailure {
-    /// 机器可判的类别：notConfigured / network / timeout / http / parse / unsupported / io
-    pub kind: &'static str,
-    /// HTTP 状态码（仅 kind == "http" 时非空）。
-    pub status: Option<u16>,
-    /// 原始错误，已脱敏、已按字符截断。给「想知道细节」的用户。
-    pub message: String,
-    /// 一句话动机 + 一个动作。给「只想让它能用」的用户。
-    pub hint: String,
-}
-
-fn kind_key(k: ErrorKind) -> &'static str {
-    use ErrorKind as E;
-    match k {
-        E::NotConfigured => "notConfigured",
-        E::Network => "network",
-        E::Timeout => "timeout",
-        E::Http => "http",
-        E::Parse => "parse",
-        E::Unsupported => "unsupported",
-        E::Io => "io",
-    }
-}
-
-/// 把类别 + 状态码翻译成「用户下一步该做什么」。
-///
-/// 每一条都必须指向**一个具体动作**，而不是复述错误。
-/// 「请求失败，请重试」这种文案的价值是零 —— 用户已经知道失败了。
-fn hint_for(kind: ErrorKind, status: Option<u16>) -> String {
-    use ErrorKind as E;
-    match (kind, status) {
-        (E::NotConfigured, _) => "配置还差一项。请补齐上方标红的字段后重试。".into(),
-        (E::Network, _) => {
-            "连不上这个地址。国内厂商（DeepSeek / 通义 / Kimi / 智谱 / 豆包）一般直连即可，\
-             如果你开了代理，先关掉再试；海外厂商（OpenAI / Gemini / Anthropic）相反，需要代理。"
-                .into()
-        }
-        (E::Timeout, _) => "等太久没等到回应。可能是网络到该地区的链路慢，也可能是模型正在排队。\
-             可以先换一个更小的模型试，或把超时调大。"
-            .into(),
-        (E::Http, Some(401)) | (E::Http, Some(403)) => {
-            "API Key 无效、已过期，或这个 key 没有该模型的权限。请重新粘贴密钥；\
-             若刚续费过，确认用的是新 key。"
-                .into()
-        }
-        (E::Http, Some(404)) => {
-            "地址或模型名不存在。最常见的原因是 Base URL 多写／少写了一段路径 —— \
-             各家都不完全一样（DeepSeek 带 /v1，智谱是 /api/paas/v4，火山是 /api/v3）。\
-             点「恢复默认地址」用该厂商的标准地址最稳。"
-                .into()
-        }
-        (E::Http, Some(429)) => {
-            "额度用尽或被限流。这不是配置写错了 —— 换个时段再试，或在服务商后台充值／提额。".into()
-        }
-        (E::Http, Some(s)) if s >= 500 => {
-            "服务商那边出故障了，不是你配置的问题。稍后重试即可。".into()
-        }
-        (E::Http, _) => "服务端拒绝了这次请求。原始错误见下方详情。".into(),
-        (E::Parse, _) => "对方回了内容，但不是预期的格式。多半是这个地址其实不是该协议的服务 —— \
-             例如把 Anthropic 的地址填在了 OpenAI 兼容这一档。"
-            .into(),
-        (E::Unsupported, _) => "这家服务不支持当前操作。换一个厂商，或改用手动填写模型名。".into(),
-        (E::Io, _) => "本机读写配置出错。检查配置文件所在目录是否可写。".into(),
-    }
-}
-
-impl LlmFailure {
-    fn from_error(e: LlmError) -> Self {
-        let hint = hint_for(e.kind, e.status);
-        Self {
-            kind: kind_key(e.kind),
-            status: e.status,
-            message: e.to_string(),
-            hint,
-        }
-    }
-}
-
-impl From<String> for LlmFailure {
-    /// `to_cap()` 之类的本地校验失败（如「AI 未配置」）：没有类别可判，但同样要能显示。
-    fn from(message: String) -> Self {
-        Self {
-            kind: "notConfigured",
-            status: None,
-            hint: hint_for(ErrorKind::NotConfigured, None),
-            message,
-        }
-    }
-}
+/// 判据（分类 / 动作 / 落点）已下沉到 `cap_llm::failure` —— 家族里五个仓
+/// 各抄了一份 `hint_for`，抄到第 5 遍时已经开始漂移（note 与 mind 有
+/// `focus_for`，terminal 与 file 没有）。此处只做**转发**，不再维护副本。
+pub use cap_llm::LlmFailure;
 
 #[cfg(test)]
 mod tests {
@@ -706,46 +667,9 @@ mod tests {
         assert!(ranked.contains(&"whisper-1".to_string()));
     }
 
-    #[test]
-    fn every_failure_kind_carries_an_actionable_hint() {
-        let cases = [
-            (ErrorKind::NotConfigured, None, "补齐"),
-            (ErrorKind::Network, None, "代理"),
-            (ErrorKind::Timeout, None, "超时"),
-            (ErrorKind::Http, Some(401), "密钥"),
-            (ErrorKind::Http, Some(403), "权限"),
-            (ErrorKind::Http, Some(404), "Base URL"),
-            (ErrorKind::Http, Some(429), "限流"),
-            (ErrorKind::Http, Some(502), "故障"),
-            (ErrorKind::Parse, None, "协议"),
-            (ErrorKind::Unsupported, None, "不支持"),
-            (ErrorKind::Io, None, "配置"),
-        ];
-        for (kind, status, must_mention) in cases {
-            let hint = hint_for(kind, status);
-            assert!(
-                hint.contains(must_mention),
-                "{:?}/{:?} 的提示里没提到「{}」，实际：{}",
-                kind,
-                status,
-                must_mention,
-                hint
-            );
-            assert!(hint.chars().count() >= 12, "提示过短：{}", hint);
-        }
-    }
-
-    #[test]
-    fn hint_does_not_leak_the_api_key() {
-        for (kind, status) in [
-            (ErrorKind::Network, None),
-            (ErrorKind::Http, Some(401)),
-            (ErrorKind::Parse, None),
-        ] {
-            let hint = hint_for(kind, status);
-            assert!(!hint.contains("sk-"), "提示里出现了疑似密钥：{}", hint);
-        }
-    }
+    // 注：失败提示的判据测试（每个错误类别都有可执行的下一步、
+    // 提示里不泄露密钥、落点与文案一致）已下沉到 `cap_llm::failure`，
+    // 家族五仓共用一份，不再在本仓维护副本。
 
     // ==================== 真实网关直连 ====================
 

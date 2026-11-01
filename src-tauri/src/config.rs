@@ -572,6 +572,10 @@ pub async fn export_config(path: String, include_secrets: Option<bool>) -> Resul
         // 用 raw(不解密)读取: 即使勾选含凭证, 导出的也是密文,
         // 拿不到 master.key 就无法还原（P-4 / 4.5「含凭证须显式勾选 + 加密」）
         let mut config = load_config_raw();
+        // AI 配置的真源在家族统一落点，不在本仓 config.json ——
+        // 导出时必须从统一落点取，否则导出的文件里没有 AI 配置，
+        // 拿到另一台机器导入后还得从头配一遍。
+        config.ai = shared_ai_export_view(include_secrets.unwrap_or(false));
         if !include_secrets.unwrap_or(false) {
             for server in config.servers.iter_mut() {
                 server.password = None;
@@ -604,59 +608,31 @@ pub async fn export_config(path: String, include_secrets: Option<bool>) -> Resul
     outcome
 }
 
-/// AI 配置的对外视图：**apiKey 恒为空串**，是否已配置用 `hasApiKey` 表达。
-///
-/// 此前 `get_ai_config` 把解密后的明文 key 回传前端，key 长期驻留 webview
-/// 内存（React state、表单 formData）。现在明文不出 Rust：前端设置表单
-/// 显示「已保存」占位，留空表示保持不变，录入/修改时才随 `save_ai_config`
-/// 过一次 IPC（用户本来就在输入框里敲它，这次传输躲不掉）。
-fn public_ai_view(ai: &Option<AiConfig>) -> serde_json::Value {
-    match ai {
-        None => serde_json::Value::Null,
-        Some(c) => {
-            let has = c
-                .api_key
-                .as_deref()
-                .map(|k| !k.trim().is_empty())
-                .unwrap_or(false);
-            serde_json::json!({
-                "provider": c.provider,
-                "baseUrl": c.base_url,
-                "model": c.model,
-                "temperature": c.temperature,
-                "maxTokens": c.max_tokens,
-                "apiKey": "",
-                "hasApiKey": has,
-            })
-        }
-    }
-}
-
 /// 读取 AI 配置（**脱敏视图**：apiKey 恒空，hasApiKey 表达是否已配置）
+///
+/// 2026-11-01 起真源改为家族统一落点（`~/.z-biz-tool/llm/config.json` +
+/// OS 密钥库），见 `llm_shared.rs`。本仓原来自己存 `~/.z-terminal/config.json`
+/// 的 `ai` 段，现在那份只作历史遗留。
 #[tauri::command]
 pub async fn get_ai_config() -> Result<serde_json::Value, String> {
-    Ok(public_ai_view(&load_config().ai))
+    serde_json::to_value(crate::llm_shared::read_shared_config()?)
+        .map_err(|e| format!("序列化失败: {}", e))
 }
 
-/// 保存 AI 配置（apiKey 立即加密落盘）。
+/// 保存 AI 配置（密钥进 OS 密钥库，配置落统一目录）。
 ///
 /// 前端传来的 apiKey 为空 ⇒ **继承已保存的 key**（编辑其它字段时表单里
-/// 没有明文 key，留空是常态而不是「清除」）；要清除 key 走显式的
-/// 清除按钮（传空白串会把继承语义和清除混在一起，不提供）。
+/// 没有明文 key，留空是常态而不是「清除」）。
 #[tauri::command]
-pub async fn save_ai_config(mut config: AiConfig) -> Result<(), String> {
-    let empty_key = config
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or("")
-        .is_empty();
-    if empty_key {
-        config.api_key = load_config().ai.and_then(|old| old.api_key);
-    }
-    let mut app = load_config();
-    app.ai = Some(config);
-    save_config(&app)
+pub async fn save_ai_config(config: AiConfig) -> Result<(), String> {
+    crate::llm_shared::write_shared_config(
+        &config.provider,
+        config.base_url.as_deref().unwrap_or(""),
+        config.model.as_deref().unwrap_or(""),
+        config.api_key.as_deref().unwrap_or(""),
+        config.temperature,
+        config.max_tokens,
+    )
 }
 
 /// 导入配置：整份替换并立即落盘（`save_config` 自带备份 + 封存 + 原子写）。
@@ -673,9 +649,32 @@ pub async fn save_ai_config(mut config: AiConfig) -> Result<(), String> {
 pub async fn import_config(path: String) -> Result<serde_json::Value, String> {
     let outcome: Result<AppConfig, String> = (|| {
         let content = fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
-        let parsed: AppConfig =
+        let mut parsed: AppConfig =
             serde_json::from_str(&content).map_err(|e| format!("解析失败: {}", e))?;
+        // AI 段搬进家族统一落点，然后从本仓配置里摘掉 ——
+        // 统一落点才是唯一真源，留两份会让人以为改哪份都算。
+        let imported_ai = parsed.ai.take();
         save_config(&parsed)?;
+        if let Some(mut ai) = imported_ai {
+            // 导出时密钥是本仓密文（`enc:v1:`），搬进统一落点前先解开 ——
+            // 统一落点的密钥库要存的是可直接使用的值。
+            //
+            // ⚠️ 拿不到主密钥时**不能**用零密钥去解（`open_opt` 拿零密钥
+            // 解密必然失败，还会把原密文当成明文塞进统一落点）。
+            // 此时保留密文原样 —— 统一落点里的密钥解不开就等于没配，
+            // 用户重新填一次即可，比塞一个解不开的值更诚实。
+            if let Ok(mk) = crate::secret::master_key() {
+                ai.api_key = crate::secret::open_opt(&mk, &ai.api_key);
+            }
+            crate::llm_shared::write_shared_config(
+                &ai.provider,
+                ai.base_url.as_deref().unwrap_or(""),
+                ai.model.as_deref().unwrap_or(""),
+                ai.api_key.as_deref().unwrap_or(""),
+                ai.temperature,
+                ai.max_tokens,
+            )?;
+        }
         // 覆盖已经发生，回读的那份才是当前生效的配置
         Ok(load_config())
     })();
@@ -697,21 +696,83 @@ pub async fn import_config(path: String) -> Result<serde_json::Value, String> {
     let app = outcome?;
     let mut v = serde_json::to_value(&app).map_err(|e| format!("序列化失败: {}", e))?;
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("ai".into(), public_ai_view(&app.ai));
+        obj.insert("ai".into(), shared_ai_view());
     }
     Ok(v)
 }
 
 /// 获取配置（ai 段为**脱敏视图**：apiKey 恒空、hasApiKey 表达已配置 ——
+///
 /// 与 get_ai_config 同一约定，整份配置接口也不能成为明文 key 的旁路）
 #[tauri::command]
 pub async fn get_config() -> Result<serde_json::Value, String> {
     let app = load_config();
     let mut v = serde_json::to_value(&app).map_err(|e| format!("序列化失败: {}", e))?;
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("ai".into(), public_ai_view(&app.ai));
+        obj.insert("ai".into(), shared_ai_view());
     }
     Ok(v)
+}
+
+/// 统一落点的 AI 配置脱敏视图。
+///
+/// 真源在 `~/.z-biz-tool/llm/config.json` + OS 密钥库，见 `llm_shared.rs`。
+/// 读不出来（还没迁移 / 密钥库不可用）时退成空视图 —— 不能让整个
+/// `get_config` 因此失败，那会让终端连服务器列表都读不到。
+fn shared_ai_view() -> serde_json::Value {
+    match crate::llm_shared::read_shared_config() {
+        Ok(v) => serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+        Err(_) => serde_json::json!({
+            "provider": "",
+            "baseUrl": "",
+            "model": "",
+            "temperature": serde_json::Value::Null,
+            "maxTokens": serde_json::Value::Null,
+            "apiKey": "",
+            "hasApiKey": false,
+        }),
+    }
+}
+
+/// 导出用的 AI 配置段。
+///
+/// `include_secrets` 为真时**带上密钥**，但**以本仓密文形态**（`enc:v1:`）——
+/// 与服务器凭证的处理方式一致：导出的文件里不该有任何明文凭证。
+///
+/// 为什么不用统一落点自己的密钥形态：统一落点的密钥在 OS 密钥库里，
+/// 导出文件若存明文，贴进工单就等于泄露；而存本仓密文后，
+/// 导入时本仓的 `open_secrets` 会用同一把 master.key 解开，
+/// 语义与服务器凭证完全一致。
+///
+/// 跨机器导入时对方没有这把钥匙 ⇒ 密钥解不开（会按原样保留），
+/// 这与服务器凭证的行为一致：用户需要在新机器上重新填一次密钥。
+fn shared_ai_export_view(include_secrets: bool) -> Option<AiConfig> {
+    let (cfg, key) = crate::llm_shared::read_shared_config_with_key().ok()?;
+    if cfg.base_url.trim().is_empty() && cfg.model.trim().is_empty() {
+        return None;
+    }
+    let api_key = if include_secrets && !key.trim().is_empty() {
+        match crate::secret::master_key() {
+            Ok(mk) => crate::secret::seal_opt(&mk, &Some(key)).ok().flatten(),
+            // 拿不到 master.key 就**不带**密钥 —— 宁可让对方重填，
+            // 也不能把明文写进导出文件。
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    Some(AiConfig {
+        provider: if cfg.preset.is_empty() {
+            cfg.provider.clone()
+        } else {
+            cfg.preset.clone()
+        },
+        api_key,
+        base_url: Some(cfg.base_url.clone()).filter(|s| !s.trim().is_empty()),
+        model: Some(cfg.model.clone()).filter(|s| !s.trim().is_empty()),
+        temperature: cfg.temperature.map(|t| t as f64),
+        max_tokens: cfg.max_tokens,
+    })
 }
 
 /// 保存服务器列表
@@ -1133,6 +1194,64 @@ mod tests {
         std::env::remove_var("Z_TERMINAL_CONFIG_DIR");
     }
 
+    /// AI 配置的真源在家族统一落点，导出必须带上它 ——
+    /// 否则拿到另一台机器导入后还得从头配一遍。
+    ///
+    /// 且**不得含明文密钥**：导出文件常被贴进工单或聊天窗口。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn export_carries_the_shared_ai_config_but_never_its_plaintext_key() {
+        let _guard = lock_config_dir_env();
+        let dir = isolated_config_dir("export-ai");
+        let _llm = cap_llm_config::testing::IsolatedLlm::new("terminal-export-ai");
+
+        crate::llm_shared::write_shared_config(
+            "deepseek",
+            "https://api.deepseek.com/v1",
+            "deepseek-chat",
+            "sk-shared-secret-value",
+            Some(0.7),
+            Some(2048),
+        )
+        .expect("统一落点应可写");
+
+        let stripped = dir.join("ai-stripped.json");
+        export_config(stripped.to_string_lossy().to_string(), None)
+            .await
+            .unwrap();
+        let stripped_raw = fs::read_to_string(&stripped).unwrap();
+        // AI 配置必须在（厂商与模型都对）
+        assert!(
+            stripped_raw.contains("deepseek") && stripped_raw.contains("deepseek-chat"),
+            "导出文件必须带上统一落点的 AI 配置，实际：{}",
+            stripped_raw
+        );
+        // 但密钥不得出现
+        assert!(
+            !stripped_raw.contains("sk-shared-secret-value"),
+            "导出文件不得含明文 API Key"
+        );
+
+        // 含凭证导出：密钥以本仓密文形态出现，仍不是明文
+        let with_secrets = dir.join("ai-secrets.json");
+        export_config(with_secrets.to_string_lossy().to_string(), Some(true))
+            .await
+            .unwrap();
+        let raw = fs::read_to_string(&with_secrets).unwrap();
+        assert!(
+            !raw.contains("sk-shared-secret-value"),
+            "含凭证导出也不得落明文 API Key"
+        );
+        assert!(
+            raw.contains("enc:v1:"),
+            "含凭证导出里密钥应是密文形态，实际：{}",
+            raw
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        std::env::remove_var("Z_TERMINAL_CONFIG_DIR");
+    }
+
     /// 导入必须交回"能直接用的那份"，且坏文件不得把现有配置冲掉
     #[tokio::test]
     // 这把自己的锁**故意**跨 await 持有：它串行化的是会改进程级环境变量的测试，
@@ -1141,7 +1260,21 @@ mod tests {
     async fn import_returns_the_usable_view_and_never_wipes_on_error() {
         let _guard = lock_config_dir_env();
         let dir = isolated_config_dir("import");
+        // AI 配置的真源已迁到家族统一落点（~/.z-biz-tool/llm/），
+        // 隔离它，否则测试会读到用户自己的真实配置与真实钥匙串条目。
+        let _llm = cap_llm_config::testing::IsolatedLlm::new("terminal-import");
         save_config(&config_with(Some("export-pass"))).unwrap();
+        // 统一落点上放一份带密钥的配置：导入返回值里的
+        // `ai.hasApiKey` 读的就是它。
+        crate::llm_shared::write_shared_config(
+            "openai",
+            "https://api.openai.com/v1",
+            "gpt-4o-mini",
+            "sk-export-key",
+            Some(0.7),
+            Some(2048),
+        )
+        .expect("统一落点应可写");
 
         let with_secrets = dir.join("out-secrets.json");
         export_config(with_secrets.to_string_lossy().to_string(), Some(true))
