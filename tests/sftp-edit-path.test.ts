@@ -10,10 +10,10 @@
  * 判定层是真跑的，面板与 Rust 侧走静态守卫（node 里没有 React 宿主，落盘也不是 JS 能验的）。
  */
 import { readFileSync } from "node:fs";
+import { fnv1a32StrHex } from "z-biz-tool-shared/hash";
 import {
   EDIT_DIR_NAME,
   editLocalPath,
-  hash8,
   safePathComponent,
 } from "../src/utils/sftpEditPath";
 
@@ -72,7 +72,7 @@ function eq(name: string, got: unknown, want: unknown) {
   const b = safePathComponent(long2);
   ok("长名字被截到上限内", a.length <= 120 && b.length <= 120);
   ok("两条长名字不撞车", a !== b);
-  eq("长名字截断后仍带身份尾巴", a.endsWith(`-${hash8("x".repeat(200) + "-first.jar")}`), true);
+  eq("长名字截断后仍带身份尾巴", a.endsWith(`-${fnv1a32StrHex("x".repeat(200) + "-first.jar")}`), true);
   eq("同输入的长名字幂等", safePathComponent(long), a);
 }
 
@@ -86,7 +86,7 @@ function eq(name: string, got: unknown, want: unknown) {
   eq("恰好四段路径", segs.length, 6);
   eq("末段是安全文件名", segs[5], "app.jar");
   ok("身份段带会话 id", segs[4].startsWith("sess-1-"));
-  eq("身份段带远端路径的哈希", segs[4].slice("sess-1-".length), hash8("/opt/app/app.jar"));
+  eq("身份段带远端路径的哈希", segs[4].slice("sess-1-".length), fnv1a32StrHex("/opt/app/app.jar"));
   eq("tempDir 不带尾斜杠时逐字相同", editLocalPath("/tmp/x", "sess-1", "/opt/app/app.jar", "app.jar"), p);
   eq("macOS 那种带尾斜杠的 temp_dir 也一致", editLocalPath("/var/folders/T/", "sess-1", "/opt/app/app.jar", "app.jar").startsWith("/var/folders/T/" + EDIT_DIR_NAME), true);
 }
@@ -142,16 +142,16 @@ function eq(name: string, got: unknown, want: unknown) {
   ok(`不同远端路径不撞副本`, seen.size > 1);
 }
 
-// ---------- 5. hash8 ----------
+// ---------- 5. fnv1a32StrHex（shared/hash 同源） ----------
 {
-  eq("稳定", hash8("/etc/nginx.conf"), hash8("/etc/nginx.conf"));
-  ok("8 位十六进制", /^[0-9a-f]{8}$/.test(hash8("anything")));
-  ok("空串也有值", /^[0-9a-f]{8}$/.test(hash8("")));
+  eq("稳定", fnv1a32StrHex("/etc/nginx.conf"), fnv1a32StrHex("/etc/nginx.conf"));
+  ok("8 位十六进制", /^[0-9a-f]{8}$/.test(fnv1a32StrHex("anything")));
+  ok("空串也有值", /^[0-9a-f]{8}$/.test(fnv1a32StrHex("")));
   const set = new Set<string>();
-  for (let i = 0; i < 5000; i += 1) set.add(hash8(`/opt/app/${i}/nginx.conf`));
+  for (let i = 0; i < 5000; i += 1) set.add(fnv1a32StrHex(`/opt/app/${i}/nginx.conf`));
   eq("5000 条真实形状的路径无碰撞", set.size, 5000);
   // 只比首字符不同的两条也不该撞
-  ok("相邻输入不撞", hash8("a") !== hash8("b"));
+  ok("相邻输入不撞", fnv1a32StrHex("a") !== fnv1a32StrHex("b"));
 }
 
 // ---------- 6. 面板静态守卫 ----------

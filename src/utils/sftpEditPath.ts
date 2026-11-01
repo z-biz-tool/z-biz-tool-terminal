@@ -1,4 +1,5 @@
 import { basenameOf } from "./sftpTransfer";
+import { fnv1a32StrHex } from "z-biz-tool-shared/hash";
 
 /**
  * 「编辑远端文件」的本地落点。
@@ -16,16 +17,6 @@ const MAX_NAME = 120;
 /** 分隔符、控制字符与在 shell/文件系统里有特殊说法的字符 */
 const UNSAFE = /[\u0000-\u001f\u007f/\\:*?"<>|]/g;
 
-/** 32 位 FNV-1a，够把同名不同路径的副本分开，且不引入依赖 */
-export function hash8(input: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h.toString(16).padStart(8, "0");
-}
-
 /** 只留一个路径片段：吃掉分隔符、`..`、绝对路径、控制字符与 Windows 不认的首尾点/空格 */
 export function safePathComponent(raw: unknown, fallback = "file"): string {
   if (typeof raw !== "string") return fallback;
@@ -35,7 +26,7 @@ export function safePathComponent(raw: unknown, fallback = "file"): string {
   // 尾部的点和空格 Windows 会直接吃掉，留着会让本地文件名与远端不一致
   base = base.replace(/[. ]+$/, "");
   if (!base) return fallback;
-  if (base.length > MAX_NAME) return `${base.slice(0, MAX_NAME - 9)}-${hash8(base)}`;
+  if (base.length > MAX_NAME) return `${base.slice(0, MAX_NAME - 9)}-${fnv1a32StrHex(base)}`;
   return base;
 }
 
@@ -54,7 +45,7 @@ export function editLocalPath(
   remotePath: string,
   remoteName: unknown
 ): string {
-  const who = `${safePathComponent(sessionId, "session")}-${hash8(remotePath)}`;
+  const who = `${safePathComponent(sessionId, "session")}-${fnv1a32StrHex(remotePath)}`;
   return joinPath(joinPath(joinPath(tempDir, EDIT_DIR), who), safePathComponent(remoteName));
 }
 
