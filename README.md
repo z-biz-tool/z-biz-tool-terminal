@@ -1,5 +1,12 @@
 # z-Terminal
 
+> [!IMPORTANT]
+> **本仓已于 2026-11-04 并入 [z-biz-tool-file](../z-biz-tool-file)，独立仓已归档到 z-trash。**
+>
+> SSH / SFTP 终端现在是 file 活动栏里的「终端」板块（`src/apps/terminal/`）：
+> 会话、批量执行、端口转发、sftp、审计与 AI 配置都完整搬入，IPC 命令名未改。
+> 本仓仅作历史参考。
+
 > 专业级 SSH / SFTP 终端管理器 — 对标 Tabby / Termius / Xshell / Royal TSX
 
 ![tech](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri)
